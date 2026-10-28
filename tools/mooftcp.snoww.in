@@ -1,0 +1,18 @@
+{
+  "rom_path": "@MT_HOME@/rom/MacClassic.rom",
+  "scsi_targets": [{"Disk": "@MT_HOME@/disks/work.hda"}, "None", "None", "Ethernet", "None", "None", "None"],
+  "ethernet_link_type": "NAT",
+  "model": null,
+  "init_args": {
+    "audio_disabled": false,
+    "monitor": null,
+    "mouse_mode": "Absolute",
+    "start_fastforward": false,
+    "ram_size": 4194304,
+    "override_fdd_type": null,
+    "pmmu_enabled": false,
+    "video_card": "Mdc12"
+  },
+  "viewport_scale": 2.0,
+  "framebuffer_mode": "Centered"
+}
