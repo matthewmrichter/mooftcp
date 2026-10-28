@@ -29,4 +29,24 @@ static inline int mt_seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <=
 static inline int mt_seq_gt(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 static inline int mt_seq_ge(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
 
+/* Internet checksum (RFC 1071). Bytes are summed as big-endian 16-bit words;
+ * an odd trailing byte is the high byte of a word, so only the last chunk of
+ * a chained sum may have odd length. */
+uint32_t mt_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len);
+uint16_t mt_cksum_fold(uint32_t sum);
+/* Copy and checksum in one pass (separate symbol so Plan 2 can override with asm). */
+uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len);
+
+/* Byte ring buffer. head = index of first used byte. */
+typedef struct { uint8_t *base; uint32_t size, head, used; } mt_ring;
+void mt_ring_init(mt_ring *r, uint8_t *mem, uint32_t size);
+uint32_t mt_ring_free(const mt_ring *r);
+uint32_t mt_ring_write(mt_ring *r, const uint8_t *p, uint32_t n);
+uint32_t mt_ring_read(mt_ring *r, uint8_t *dst, uint32_t n);
+/* Length of the contiguous run starting off bytes into the used data (0 if off >= used). */
+uint32_t mt_ring_peek(const mt_ring *r, uint32_t off, const uint8_t **p);
+void mt_ring_consume(mt_ring *r, uint32_t n);
+/* Write at off bytes past the end of the used data without changing used (returns bytes that fit). */
+uint32_t mt_ring_write_at(mt_ring *r, uint32_t off, const uint8_t *p, uint32_t n);
+
 #endif

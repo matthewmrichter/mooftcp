@@ -24,17 +24,29 @@ static int t_failed;
                 __FILE__, __LINE__, #a, #b, (int)(n)); \
         t_failed = 1; } } while (0)
 
+/* T_MAIN supports at most 16 tests per file. A compile error mentioning
+ * T_Ltest_... (or T_L17) means T_LIST/T_N below must be extended.
+ * t_failed is reset per test; the exit code is nonzero if any test failed or
+ * if an argv[1] filter matched no test. */
 #define T_MAIN(...) \
     int main(int argc, char **argv) { \
         static const struct { const char *name; void (*fn)(void); } t_tests[] = { \
             T_LIST(__VA_ARGS__) }; \
         size_t t_i; \
+        int t_ran = 0, t_any = 0; \
         for (t_i = 0; t_i < sizeof t_tests / sizeof t_tests[0]; t_i++) { \
             if (argc > 1 && !strstr(t_tests[t_i].name, argv[1])) continue; \
+            t_failed = 0; \
+            t_ran++; \
             t_tests[t_i].fn(); \
+            if (t_failed) t_any = 1; \
             printf("%s %s\n", t_failed ? "FAIL" : "ok  ", t_tests[t_i].name); \
         } \
-        return t_failed ? 1 : 0; \
+        if (t_ran == 0) { \
+            fprintf(stderr, "no test matches \"%s\"\n", argc > 1 ? argv[1] : ""); \
+            return 1; \
+        } \
+        return t_any ? 1 : 0; \
     }
 
 /* Expand test names to {"name", name} initializers (up to 16 tests per file). */
