@@ -11,6 +11,9 @@ typedef uint32_t mt_ip4;                         /* host byte order */
 
 typedef struct mt_stack mt_stack;
 
+enum { MT_OK = 0, MT_ERR_NOROUTE = -1, MT_ERR_NOMEM = -2, MT_ERR_INVAL = -3,
+       MT_ERR_STATE = -4, MT_ERR_INUSE = -5, MT_ERR_UNCONFIGURED = -6 };
+
 /* tx must finish with `frame` before returning; nonzero = dropped */
 typedef struct { void *ctx; int (*tx)(void *ctx, const uint8_t *frame, uint16_t len); } mt_link;
 
@@ -32,6 +35,12 @@ typedef struct {
     uint32_t arp_in;      /* ARP frames received (accepted by the Ethernet filter) */
     uint32_t arp_out;     /* ARP requests/replies transmitted */
     uint32_t arp_drops;   /* unresolved next hops given up on + held frames discarded/replaced */
+    uint32_t ip_in;         /* datagrams/fragments accepted by IPv4 input */
+    uint32_t ip_out;        /* datagrams handed to IPv4 output (fragmented ones count once) */
+    uint32_t ip_in_drops;   /* IPv4 frames dropped (malformed, not ours, reassembly refusal) */
+    uint32_t ip_frag_out;   /* fragment frames emitted */
+    uint32_t ip_reasm_ok;   /* datagrams reassembled */
+    uint32_t ip_reasm_fail; /* reassemblies abandoned (timeout, overlap, overflow, slot busy) */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */

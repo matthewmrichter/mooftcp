@@ -6,6 +6,7 @@
 typedef struct {
     uint32_t arp;       /* offset of the ARP table */
     uint32_t pend;      /* offset of the pending-frame slot */
+    uint32_t reasm;     /* offset of the IPv4 reassembly slot */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -15,6 +16,8 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off += MT_ALIGN4((uint32_t)l->arp_entries * (uint32_t)sizeof(mt_arp_entry));
     o->pend = off;
     off += MT_ALIGN4((uint32_t)sizeof(mt_pending));
+    o->reasm = off;
+    off += MT_ALIGN4((uint32_t)sizeof(mt_reasm));
     /* Later tasks: add their section here (offset = off; off += MT_ALIGN4(bytes);). */
     o->total = off;
 }
@@ -47,6 +50,8 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->seed = seed;
     s->arp = (mt_arp_entry *)(void *)(base + lay.arp);
     s->pend = (mt_pending *)(void *)(base + lay.pend);
+    s->reasm = (mt_reasm *)(void *)(base + lay.reasm);
+    s->ip_id = (uint16_t)seed;
     /* Later tasks: point their sections here. */
     return s;
 }
@@ -108,11 +113,13 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
 
 void mt_tick(mt_stack *s, uint32_t now) {
     mt_arp_tick(s, now);
-    /* Later: mt_ip_timers (reassembly), mt_tcp_timers, mt_dns_timers. */
+    mt_ip_timers(s, now);
+    /* Later: mt_tcp_timers, mt_dns_timers. */
 }
 
 uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     uint32_t d = mt_arp_deadline(s, now);
-    /* Later: d = mt_dl_min(d, mt_tcp_deadline(s, now)); likewise reassembly, DNS. */
+    d = mt_dl_min(d, mt_ip_deadline(s, now));
+    /* Later: d = mt_dl_min(d, mt_tcp_deadline(s, now)); likewise DNS. */
     return d;
 }

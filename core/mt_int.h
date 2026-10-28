@@ -51,6 +51,31 @@ typedef struct {
     uint8_t frame[MT_PEND_MAX];
 } mt_pending;
 
+/* ---- IPv4 reassembly: one slot, payload buffer in the arena ---- */
+#define MT_REASM_MAX 4096u
+#define MT_REASM_UNITS (MT_REASM_MAX / 8u)       /* 512 bits of 8-byte units */
+#define MT_REASM_TIMEOUT_MS 15000u
+typedef struct {
+    uint32_t bitmap[MT_REASM_UNITS / 32u];
+    uint32_t t_start;
+    mt_ip4 src;
+    uint16_t id;
+    uint16_t got;        /* units received */
+    uint16_t total;      /* payload length once the last fragment is seen, else 0 */
+    uint16_t maxend;     /* highest byte offset covered so far */
+    uint8_t proto;
+    uint8_t active;
+    uint8_t buf[MT_REASM_MAX];
+} mt_reasm;
+
+#ifdef MT_TEST_HOOKS
+/* Test-only spy: mt_ip_input calls it for every datagram it is about to hand to
+ * a protocol handler (including reassembled ones and unknown protocols), then
+ * dispatches normally. Never compiled into production builds. */
+typedef void (*mt_ip_spy_fn)(void *ctx, uint8_t proto, mt_ip4 src, mt_ip4 dst,
+                             const uint8_t *pl, uint16_t len);
+#endif
+
 struct mt_stack {
     mt_ifconfig cfg;
     mt_link link;
@@ -60,6 +85,12 @@ struct mt_stack {
     /* arena sections */
     mt_arp_entry *arp;       /* lim.arp_entries entries */
     mt_pending *pend;
+    mt_reasm *reasm;
+    uint16_t ip_id;          /* next IPv4 identification */
+#ifdef MT_TEST_HOOKS
+    mt_ip_spy_fn ip_spy;
+    void *ip_spy_ctx;
+#endif
     /* scratch */
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
@@ -85,8 +116,32 @@ uint32_t mt_arp_deadline(const mt_stack *s, uint32_t now);
 int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payload_len,
                 uint32_t now);
 
+/* ---- IPv4 (mt_ip.c) ---- */
+#define MT_IP_HDR 20u
+/* `ip` points at the IPv4 header (after the Ethernet header). Validates and
+ * dispatches whole datagrams (reassembling fragments). Bad frames: ip_in_drops++. */
+void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now);
+/* Upper layers build their payload here (txbuf + 14 + 20, at most 1480 bytes). */
+static inline uint8_t *mt_ip_payload(mt_stack *s) { return s->txbuf + MT_ETH_HDR + MT_IP_HDR; }
+/* Send plen bytes already placed at mt_ip_payload(). Header: TTL 64, DF clear,
+ * next ID. Routes (on-link / broadcast / gateway), fragments when 20+plen > mtu.
+ * MT_OK (sent, held for ARP or dropped by the link), MT_ERR_NOROUTE,
+ * MT_ERR_UNCONFIGURED, MT_ERR_INVAL. */
+int mt_ip_output(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t plen, uint32_t now);
+/* Same, with the payload in caller memory `pl` (any size up to 65515); the only way
+ * to send datagrams larger than txbuf. pl may equal mt_ip_payload(). */
+int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
+                     uint32_t now);
+static inline mt_ip4 mt_ip_src_for(const mt_stack *s) { return s->cfg.addr; }
+void mt_ip_timers(mt_stack *s, uint32_t now);
+uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now);
+
+/* Protocol handlers (stubs in mt_stubs.c until Tasks 5-7). */
+void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
+void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
+void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
+
 /* ---- Stubs (mt_stubs.c): delete each when its owning task implements it ---- */
-void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now);   /* Task 4 */
 void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now);                 /* Task 7 */
 
 #endif

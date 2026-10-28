@@ -3,6 +3,11 @@ project(mooftcp_core C)
 
 option(MT_SANITIZE "Build host tests with ASan+UBSan" ON)
 
+option(MT_TEST_HOOKS "Compile test-only hooks (spy callbacks)" ON)
+if(MT_TEST_HOOKS)
+  add_compile_definitions(MT_TEST_HOOKS)
+endif()
+
 add_compile_options(-std=c99 -Wall -Wextra -Werror -g)
 if(MT_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
