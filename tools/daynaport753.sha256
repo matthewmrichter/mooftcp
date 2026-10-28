@@ -1,0 +1,7 @@
+# DaynaPORT 7.5.3 + MacTCP "2.1" from the BlueSCSI project's documented distribution.
+# Linked from https://bluescsi.com/docs/WiFi-DaynaPORT ("Macintosh" section, BlueSCSI Bootstrap image).
+# Used by scripts/fetch-daynaport753.sh (sha256sum -c format below; '#' lines ignored).
+# url: https://mega.nz/file/J8wykBxT#-QBYCwpgP8G8MNYxKW91RW3OhIbsGpavtZM04VxNNj8
+20b00c5f32bdbe1df5cdf51aaa5066fa608a601569cb73c50e7aaf07e7a6b04e  HD1 BlueSCSI Bootstrap.hda.zip
+70ab7aa5f1959c45471aa7cf04023a26cd876f08fe91ccf25163a1029344b2a6  DaynaPORT 7.5.3-DiskCopy4.img
+1a152e3f6890dccd6d131df38e2d60e61bfc588011a264fc38706306c3a5a0c2  MacTCP-2.1.bin

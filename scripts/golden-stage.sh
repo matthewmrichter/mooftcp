@@ -1,9 +1,15 @@
 #!/bin/bash
-# Stage 2: copy the System Startup floppy's System Folder onto the initialized HDD,
-# bless it, install boot blocks, add MacTCP + empty "MoofTCP Test" folder.
+# Stage 2 of docs/dev/GOLDEN-IMAGE.md: copy the System Startup floppy's System Folder onto
+# the HD SC Setup-initialized HDD, bless it, install boot blocks, add MacTCP and an empty
+# "MoofTCP Test" folder. Run only while Snow is stopped.
+#   MT_MACTCP=2.1   (default) BlueSCSI-distributed MacTCP "2.1" (patched 2.0.6; lists
+#                   "Ethernet Built-In" with the DaynaPORT SCSI/Link driver)
+#   MT_MACTCP=2.0.6 Apple MacTCP 2.0.6 from media/mactcp206.dsk (no Ethernet on the Classic)
 set -euo pipefail
 MT_HOME=${MT_HOME:-$HOME/.local/share/mooftcp}
 HDA=${1:-$MT_HOME/disks/golden.hda}
+MT_MACTCP=${MT_MACTCP:-2.1}
+if pgrep -x snowemu >/dev/null; then echo "FATAL: snowemu is running" >&2; exit 1; fi
 T=$(mktemp -d)
 trap 'humount >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
 
@@ -18,10 +24,12 @@ hmount "$T/sys.raw" >/dev/null
 hls -1 ":System Folder:" > "$T/list"
 while IFS= read -r f; do hcopy -m ":System Folder:$f" "$T/sf/$f.bin"; done < "$T/list"
 humount
-# 2. MacTCP cdev from the MacTCP 2.0.6 disk.
-hmount "$T/mactcp.dsk" >/dev/null
-hcopy -m ":MacTCP" "$T/MacTCP.bin"
-humount
+# 2. MacTCP cdev.
+case "$MT_MACTCP" in
+  2.1) cp "$MT_HOME/media/daynaport753/MacTCP-2.1.bin" "$T/MacTCP.bin" ;;  # verified by fetch-daynaport753.sh
+  2.0.6) hmount "$T/mactcp.dsk" >/dev/null; hcopy -m ":MacTCP" "$T/MacTCP.bin"; humount ;;
+  *) echo "FATAL: MT_MACTCP must be 2.1 or 2.0.6" >&2; exit 1 ;;
+esac
 
 # 3. Boot blocks: HD SC Setup leaves them zeroed. Copy the floppy's (LK v0x17,
 #    System/Finder, startup app Finder) into the first 1024 bytes of the HFS partition.

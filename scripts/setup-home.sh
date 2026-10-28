@@ -30,3 +30,6 @@ else
   unar -q -k visible -o "$dp" "$SRC_IMGS/DaynaPORT_DCv4_Stuffitv1.5.sit"
   echo "unpacked: $dp"
 fi
+
+# DaynaPORT 7.5.3 + MacTCP 2.1 (BlueSCSI distribution; downloads ~85 MB once, verified).
+"$(dirname "${BASH_SOURCE[0]}")/fetch-daynaport753.sh"
