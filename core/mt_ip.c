@@ -27,7 +27,7 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
                      uint16_t off, int more, const uint8_t *pl, uint16_t dlen, uint32_t now) {
     mt_reasm *r = s->reasm;
     uint32_t end = (uint32_t)off + dlen;
-    uint32_t u, u0, u1;
+    uint32_t u, u0, u1, set = 0;
 
     if (dlen == 0 || (more && (dlen & 7u))) { s->stats.ip_in_drops++; return; }
     mt_ip_timers(s, now);                      /* lazily expire a stale slot */
@@ -49,14 +49,19 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
     u0 = off >> 3;
     u1 = (end + 7u) >> 3;
     for (u = u0; u < u1; u++)
-        if (r->bitmap[u >> 5] & (1u << (u & 31u))) goto bad;       /* overlap */
+        if (r->bitmap[u >> 5] & ((uint32_t)1 << (u & 31u))) set++;
+    if (set == u1 - u0 && (more || r->total == end)) {   /* exact duplicate: ignore this frame */
+        s->stats.ip_in_drops++;
+        return;
+    }
+    if (set) goto bad;                                   /* partial overlap */
     if (!more) {
         if (r->total || r->maxend > end) goto bad;                 /* second tail / data past tail */
         r->total = (uint16_t)end;
     } else if (r->total && end > r->total) {
         goto bad;
     }
-    for (u = u0; u < u1; u++) r->bitmap[u >> 5] |= 1u << (u & 31u);
+    for (u = u0; u < u1; u++) r->bitmap[u >> 5] |= (uint32_t)1 << (u & 31u);
     r->got = (uint16_t)(r->got + (u1 - u0));
     if (end > r->maxend) r->maxend = (uint16_t)end;
     memcpy(r->buf + off, pl, dlen);
@@ -134,7 +139,8 @@ static void ip_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t id, uint16_t
 int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
                      uint32_t now) {
     mt_ip4 nexthop;
-    uint16_t id, mtu, chunk, off;
+    uint16_t id, mtu, chunk;
+    uint32_t off;
     uint8_t *body = s->txbuf + MT_ETH_HDR + MT_IP_HDR;
 
     if (s->cfg.addr == 0) return MT_ERR_UNCONFIGURED;
@@ -157,7 +163,7 @@ int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, 
     if (mtu < MT_IP_HDR + 8u || plen > 65535u - MT_IP_HDR) { s->stats.ip_out--; return MT_ERR_INVAL; }
 
     chunk = (uint16_t)(((mtu - MT_IP_HDR) >> 3) << 3);
-    for (off = 0; off < plen; off = (uint16_t)(off + chunk)) {
+    for (off = 0; off < plen; off += chunk) {   /* off is 32-bit: no wrap near 65535 */
         uint16_t n = (uint16_t)(plen - off);
         uint16_t ff = (uint16_t)(off >> 3);
         if (n > chunk) { n = chunk; ff |= 0x2000u; }

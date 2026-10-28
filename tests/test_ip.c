@@ -21,9 +21,12 @@ static void spy_cb(void *ctx, uint8_t proto, mt_ip4 src, mt_ip4 dst, const uint8
     if (len <= sizeof y->last) memcpy(y->last, pl, len);
 }
 
+static int epoch;
+
 static mt_stack *new_stack(fake_link *fl, spy_t *y) {
     mt_stack *s = tstack_new(fl, T_ME);
     memset(y, 0, sizeof *y);
+    epoch++;
     s->ip_spy = spy_cb;
     s->ip_spy_ctx = y;
     return s;
@@ -33,10 +36,11 @@ static mt_stack *new_stack(fake_link *fl, spy_t *y) {
 static uint8_t rec_f[48][1520];
 static uint16_t rec_len[48];
 static uint32_t rec_now[48];
+static int rec_epoch[48];   /* which test (new_stack call) injected the frame */
 static int rec_n;
 
 static void inject(mt_stack *s, const uint8_t *f, uint16_t n, uint32_t now) {
-    if (rec_n < 48) { memcpy(rec_f[rec_n], f, n); rec_len[rec_n] = n; rec_now[rec_n++] = now; }
+    if (rec_n < 48) { memcpy(rec_f[rec_n], f, n); rec_len[rec_n] = n; rec_epoch[rec_n] = epoch; rec_now[rec_n++] = now; }
     mt_input(s, f, n, now);
 }
 
@@ -151,6 +155,48 @@ static void test_ip_fragment_out(void) {
         T_EQ(fl.len[0], 14 + 20 + 576);
         T_MEMEQ(fl.f[1] + 34, pl + 576, 424);
     }
+}
+
+static void frag_max_case(uint16_t plen, uint16_t last_len) {
+    static uint8_t pl[65535];
+    fake_link fl; spy_t y;
+    mt_stack *s = new_stack(&fl, &y);
+    int i;
+    fill(pl, plen);
+    T_EQ(mt_ip_output_buf(s, 0xFFFFFFFFu, 17, pl, plen, 0), MT_OK);
+    T_EQ(fl.n, 45);                       /* ceil(plen / 1480) at mtu 1500 */
+    for (i = 0; i < fl.n; i++) {
+        ipv v;
+        T_CHECK(view_ip(fl.f[i], fl.len[i], &v));
+        T_EQ(v.frag * 8, i * 1480);
+        T_EQ(v.flags & 0x2000, i < 44 ? 0x2000 : 0);
+        T_EQ(v.len, i < 44 ? 1480 : last_len);
+        T_MEMEQ(v.payload, pl + i * 1480, v.len);
+    }
+    T_EQ(mt_get_stats(s)->ip_frag_out, 45);
+}
+
+static void test_ip_fragment_out_max(void) {
+    frag_max_case(65515, 395);            /* largest datagram: 65515 - 44*1480 */
+    frag_max_case(65121, 1);              /* smallest plen where a 16-bit offset wrapped */
+}
+
+static void test_ip_reassemble_dup(void) {
+    fake_link fl; spy_t y; static uint8_t pl[3000];
+    static const int mid[4] = {1, 2, 2, 3}, tail[4] = {3, 3, 1, 2}, tail2[4] = {3, 1, 3, 2};
+    mt_stack *s = new_stack(&fl, &y);
+    fill(pl, 3000);
+    send_frags(s, pl, 20, mid, 4, 0);          /* duplicated middle fragment is ignored */
+    T_EQ(y.n, 1); T_EQ(y.len, 3000); T_MEMEQ(y.last, pl, 3000);
+    T_EQ(mt_get_stats(s)->ip_in_drops, 1);
+    T_EQ(mt_get_stats(s)->ip_reasm_fail, 0);
+    send_frags(s, pl, 21, tail, 4, 0);         /* duplicated last fragment keeps total */
+    T_EQ(y.n, 2); T_EQ(y.len, 3000); T_MEMEQ(y.last, pl, 3000);
+    send_frags(s, pl, 22, tail2, 4, 0);
+    T_EQ(y.n, 3); T_EQ(y.len, 3000); T_MEMEQ(y.last, pl, 3000);
+    T_EQ(mt_get_stats(s)->ip_in_drops, 3);
+    T_EQ(mt_get_stats(s)->ip_reasm_fail, 0);
+    T_EQ(mt_get_stats(s)->ip_reasm_ok, 3);
 }
 
 static void test_ip_reassemble_out_of_order(void) {
@@ -299,8 +345,10 @@ static void replay(int odd, sig_t *sig, mt_stats *st) {
     for (i = 0; i < rec_n; i++) {
         uint8_t *p = buf + (odd ? 1 : 0);
         memcpy(p, rec_f[i], rec_len[i]);
-        mt_tick(s, rec_now[i]);
-        mt_input(s, p, rec_len[i], rec_now[i]);
+        /* virtual clock: monotonic across tests, so reassemblies complete or expire as live */
+        uint32_t vnow = (uint32_t)rec_epoch[i] * 100000u + rec_now[i];
+        mt_tick(s, vnow);
+        mt_input(s, p, rec_len[i], vnow);
     }
     sig->n = y.n; sig->proto = y.proto; sig->src = y.src; sig->len = y.len; sig->hash = y.hash;
     *st = *mt_get_stats(s);
@@ -332,6 +380,7 @@ static void test_ip_odd_alignment(void) {
 }
 
 T_MAIN(test_ip_route_onlink_vs_gateway, test_ip_broadcast, test_ip_header_fields,
-       test_ip_fragment_out, test_ip_reassemble_out_of_order, test_ip_reassemble_timeout,
+       test_ip_fragment_out, test_ip_fragment_out_max, test_ip_reassemble_dup,
+       test_ip_reassemble_out_of_order, test_ip_reassemble_timeout,
        test_ip_reassemble_too_big, test_ip_reassemble_overlap, test_ip_unfragmented_dispatch,
        test_malformed_table, test_ip_odd_alignment)
