@@ -2,6 +2,8 @@
 # Fetch the DaynaPORT 7.5.3 installer (and the MacTCP "2.1" cdev) from the BlueSCSI
 # project's documented distribution, verify, and unpack into $MT_HOME/media/daynaport753/.
 # Idempotent: if the verified outputs exist, does nothing. Source + hashes: tools/daynaport753.sha256.
+# Offline copy: if $DP753_LOCAL (default: the owner's "Mac Images/BlueSCSI-DaynaPORT-7.5.3")
+# holds the zip, it is copied instead of downloading (hash-checked the same way).
 # The download is untrusted data: nothing in it is executed on the host; hfsutils only
 # reads files out of the bundled HFS disk image.
 set -euo pipefail
@@ -14,6 +16,7 @@ ZIP="HD1 BlueSCSI Bootstrap.hda.zip"
 HDA="HD1 BlueSCSI Bootstrap.hda"
 DP="DaynaPORT 7.5.3-DiskCopy4.img"
 TCP="MacTCP-2.1.bin"
+DP753_LOCAL="${DP753_LOCAL:-${MT_SRC_IMGS:-$HOME/projects/Mac Images}/BlueSCSI-DaynaPORT-7.5.3}"
 
 die() { echo "FATAL: $*" >&2; exit 1; }
 check() { (cd "$DEST" && grep -v '^#' "$SUMS" | sha256sum --quiet -c -); }
@@ -32,6 +35,12 @@ python3 -I -c 'import cryptography' 2>/dev/null \
 
 if [ ! -f "$DEST/$ZIP" ]; then
   [ -z "$(ls -A "$DEST" | grep -v '\.bad-')" ] || die "$DEST is not empty but incomplete; inspect and clear it"
+  if [ -f "$DP753_LOCAL/$ZIP" ]; then
+    echo "using offline copy: $DP753_LOCAL"
+    cp -- "$DP753_LOCAL/$ZIP" "$DEST/.$ZIP.part" && mv -- "$DEST/.$ZIP.part" "$DEST/$ZIP"
+  fi
+fi
+if [ ! -f "$DEST/$ZIP" ]; then
   dl="$(mktemp -d "$DEST/.dl.XXXXXX")"
   trap 'rm -rf "$dl"' EXIT
   python3 -I "$ROOT/scripts/mega-get.py" "$URL" "$dl" >/dev/null
