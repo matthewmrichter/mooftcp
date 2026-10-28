@@ -3,3 +3,4 @@ project(MoofTCPMac C)
 
 add_subdirectory(hello)
 add_subdirectory(hello_init)
+add_subdirectory(heapinfo)
