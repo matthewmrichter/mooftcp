@@ -1,0 +1,34 @@
+cmake_minimum_required(VERSION 3.16)
+project(mooftcp_core C)
+
+option(MT_SANITIZE "Build host tests with ASan+UBSan" ON)
+
+add_compile_options(-std=c99 -Wall -Wextra -Werror -g)
+if(MT_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
+file(GLOB MT_CORE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/core/*.c)
+add_library(mtcore STATIC ${MT_CORE_SRC})
+target_include_directories(mtcore PUBLIC ${CMAKE_SOURCE_DIR}/core)
+
+file(GLOB MT_HELPER_SRC CONFIGURE_DEPENDS
+     ${CMAKE_SOURCE_DIR}/tests/net.c ${CMAKE_SOURCE_DIR}/tests/pair.c)
+set(MT_TEST_LIBS mtcore)
+if(MT_HELPER_SRC)
+  add_library(mthelp STATIC ${MT_HELPER_SRC})
+  target_link_libraries(mthelp PUBLIC mtcore)
+  set(MT_TEST_LIBS mthelp)
+endif()
+
+enable_testing()
+file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
+foreach(src ${MT_TEST_SRC})
+  get_filename_component(name ${src} NAME_WE)
+  add_executable(${name} ${src})
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(${name} ${MT_TEST_LIBS})
+  set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME ${name} COMMAND ${name})
+endforeach()
