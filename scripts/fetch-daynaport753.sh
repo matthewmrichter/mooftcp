@@ -23,6 +23,13 @@ if [ -f "$DEST/$DP" ] && [ -f "$DEST/$TCP" ] && [ -f "$DEST/$ZIP" ] && check; th
   echo "ok (verified): $DEST"; exit 0
 fi
 
+# Preflight (only when there is work to do). The download itself is Python urllib in
+# mega-get.py (no curl); decryption needs python3-cryptography.
+need() { command -v "$1" >/dev/null || die "$1 not found; owner must install $2 (see CLAUDE.md Bootstrap)"; }
+need python3 python3; need unzip unzip; need hmount hfsutils; need hcopy hfsutils
+python3 -I -c 'import cryptography' 2>/dev/null \
+  || die "python3 module 'cryptography' not found; owner must install python3-cryptography (see CLAUDE.md Bootstrap)"
+
 if [ ! -f "$DEST/$ZIP" ]; then
   [ -z "$(ls -A "$DEST" | grep -v '\.bad-')" ] || die "$DEST is not empty but incomplete; inspect and clear it"
   dl="$(mktemp -d "$DEST/.dl.XXXXXX")"

@@ -8,3 +8,9 @@ dist/
 *.dsk
 *.rom
 *.ROM
+*.bin
+*.hqx
+*.sit
+*.zip
+*.pcap
+*.png

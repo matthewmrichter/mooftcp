@@ -13,6 +13,10 @@ if [ -x "$dest/snowemu" ] && [ -f "$dest/VERSION" ] && [ "$(cat "$dest/VERSION")
   echo "snowemu $tag already installed"; exit 0
 fi
 
+for t in curl:curl unzip:unzip; do
+  command -v "${t%%:*}" >/dev/null || { echo "FATAL: ${t%%:*} not found; owner must install ${t#*:} (see CLAUDE.md Bootstrap)" >&2; exit 1; }
+done
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 curl -fsSL -o "$tmp/$zipname" "https://github.com/twvd/snow/releases/download/$tag/$zipname"

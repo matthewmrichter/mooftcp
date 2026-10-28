@@ -24,6 +24,7 @@ have="$(sha256sum "$GOLDEN" | cut -d' ' -f1)"
 tmp="$WORK.tmp.$$"
 trap 'rm -f "$tmp"' EXIT
 cp -- "$GOLDEN" "$tmp"
+chmod u+w -- "$tmp"   # golden.hda is read-only (golden-promote.sh); work.hda must be writable
 copy="$(sha256sum "$tmp" | cut -d' ' -f1)"
 [ "$copy" = "$want" ] || die "copy hash mismatch ($copy)"
 mv -f -- "$tmp" "$WORK"

@@ -19,5 +19,6 @@ hash="$(sha256sum "$WIP" | cut -d' ' -f1)"
 mv -n -- "$WIP" "$GOLDEN"
 [ ! -e "$WIP" ] || die "move failed"
 [ "$(sha256sum "$GOLDEN" | cut -d' ' -f1)" = "$hash" ] || die "hash changed during promote"
+chmod a-w -- "$GOLDEN"   # guard against accidental hmount/writes; fresh-disk.sh copies it
 echo "$hash" > "$ROOT/tools/golden.sha256"
 echo "promoted: $GOLDEN ($hash) -> tools/golden.sha256"

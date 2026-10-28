@@ -4,7 +4,8 @@
 #   snow.sh stop                     kill Snow (and our Xvfb) by recorded PID
 #   snow.sh status                   exit 0 running / 1 stopped
 #   snow.sh shot <png>               screenshot the whole Xvfb screen
-# MT_DISPLAY overrides the display (default :142). Never use :0/:1 (owner's desktop).
+# MT_DISPLAY overrides the display (default :142). Only :140-:149 are accepted: :0/:1 are
+# the owner's desktop, and other displays (:97, :99, ...) belong to other sessions.
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,7 +15,14 @@ XVFB_PID_FILE="$MT_HOME/xvfb.pid"
 WS="$MT_HOME/mooftcp.snoww"
 
 die() { echo "snow.sh: $*" >&2; exit 1; }
-case "$MT_DISPLAY" in :0|:1|:99) die "refusing display $MT_DISPLAY (not ours)";; esac
+# Normalize "[host]:N[.screen]" to ":N", then allow only our private range.
+DISP_NUM="${MT_DISPLAY##*:}"; DISP_NUM="${DISP_NUM%%.*}"
+[[ "$MT_DISPLAY" == *:* && "$DISP_NUM" =~ ^[0-9]+$ ]] || die "bad display '$MT_DISPLAY' (want :140-:149)"
+DISP_NUM=$((10#$DISP_NUM))
+{ [ "$DISP_NUM" -ge 140 ] && [ "$DISP_NUM" -le 149 ]; } \
+  || die "refusing display $MT_DISPLAY (only :140-:149 are ours; :0/:1 owner, :97/:99 other sessions)"
+MT_DISPLAY=":$DISP_NUM"
+need() { command -v "$1" >/dev/null || die "$1 not found; owner must install $2 (see CLAUDE.md Bootstrap)"; }
 
 alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 readpid() { if [ -f "$1" ]; then tr -d '[:space:]' < "$1"; fi; }
@@ -42,6 +50,7 @@ cmd_start() {
   done
   if snow_running; then die "already running (pid $(readpid "$SNOW_PID_FILE"))"; fi
   if pgrep -x snowemu >/dev/null; then die "a snowemu we did not start is running; refusing"; fi
+  need Xvfb xvfb; need xdpyinfo x11-utils
   [ -x "$MT_HOME/snow/snowemu" ] || die "missing $MT_HOME/snow/snowemu (run scripts/fetch-snow.sh)"
   [ -f "$MT_HOME/disks/work.hda" ] || die "missing work.hda (run scripts/fresh-disk.sh)"
   sed "s#@MT_HOME@#$MT_HOME#g" "$ROOT/tools/mooftcp.snoww.in" > "$WS"
@@ -74,9 +83,15 @@ cmd_stop() {
   rm -f "$SNOW_PID_FILE"
   if pgrep -x snowemu >/dev/null; then die "snowemu still running after stop"; fi
   local x; x="$(readpid "$XVFB_PID_FILE")"
-  if alive "$x" && [ "$(cat "/proc/$x/comm" 2>/dev/null)" = Xvfb ]; then
+  # Kill the recorded Xvfb only if it is still ours: comm is Xvfb AND its argv holds our
+  # display (a stale PID may have been reused, e.g. by another session's Xvfb :99).
+  if alive "$x" && [ "$(cat "/proc/$x/comm" 2>/dev/null)" = Xvfb ] \
+     && tr '\0' '\n' < "/proc/$x/cmdline" 2>/dev/null | grep -qx -- "$MT_DISPLAY"; then
     kill "$x"
     for _ in $(seq 30); do alive "$x" || break; sleep 0.1; done
+    if alive "$x"; then die "Xvfb $MT_DISPLAY (pid $x) did not exit"; fi
+  elif alive "$x"; then
+    echo "snow.sh: recorded pid $x is not Xvfb $MT_DISPLAY; leaving it alone" >&2
   fi
   rm -f "$XVFB_PID_FILE"
   echo "snow stopped"
