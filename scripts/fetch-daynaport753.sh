@@ -24,7 +24,7 @@ if [ -f "$DEST/$DP" ] && [ -f "$DEST/$TCP" ] && [ -f "$DEST/$ZIP" ] && check; th
 fi
 
 if [ ! -f "$DEST/$ZIP" ]; then
-  [ -z "$(ls -A "$DEST")" ] || die "$DEST is not empty but incomplete; inspect and clear it"
+  [ -z "$(ls -A "$DEST" | grep -v '\.bad-')" ] || die "$DEST is not empty but incomplete; inspect and clear it"
   dl="$(mktemp -d "$DEST/.dl.XXXXXX")"
   trap 'rm -rf "$dl"' EXIT
   python3 -I "$ROOT/scripts/mega-get.py" "$URL" "$dl" >/dev/null
@@ -34,15 +34,19 @@ if [ ! -f "$DEST/$ZIP" ]; then
 fi
 want_zip="$(grep -F "  $ZIP" "$SUMS" | cut -d' ' -f1)"
 have_zip="$(sha256sum "$DEST/$ZIP" | cut -d' ' -f1)"
-[ "$have_zip" = "$want_zip" ] || die "$ZIP hash mismatch: $have_zip"
+if [ "$have_zip" != "$want_zip" ]; then
+  bad="$DEST/$ZIP.bad-$have_zip"
+  mv -- "$DEST/$ZIP" "$bad"
+  die "$ZIP hash mismatch ($have_zip); quarantined as '$bad' (delete it: rm -f -- '$bad'), then re-run"
+fi
 
 tmp="$(mktemp -d "$DEST/.x.XXXXXX")"
-trap 'humount >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+trap 'humount "$tmp/$HDA" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
 unzip -q "$DEST/$ZIP" "$HDA" -d "$tmp"
 hmount "$tmp/$HDA" >/dev/null
 hcopy -r ":BlueSCSI PicoW Setup:DaynaPORT:$DP" "$tmp/$DP"
 hcopy -m ":BlueSCSI PicoW Setup:MacTCP Setup:MacTCP" "$tmp/$TCP"
-humount
+humount "$tmp/$HDA"
 rm -f -- "$DEST/$DP" "$DEST/$TCP"
 mv -- "$tmp/$DP" "$tmp/$TCP" "$DEST/"
 check || die "unpacked files do not match $SUMS"

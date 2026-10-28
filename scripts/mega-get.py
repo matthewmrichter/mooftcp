@@ -17,6 +17,8 @@ def b64(s):
 
 
 def main(url, outdir):
+    if not url.startswith('https://mega.nz/file/') or '#' not in url:
+        sys.exit('URL must be https://mega.nz/file/<handle>#<key>')
     tail = url.split('/file/', 1)[1]
     handle, key_s = tail.split('#', 1)
     k = struct.unpack('>8I', b64(key_s))
