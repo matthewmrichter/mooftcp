@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Stage files for a real-hardware session (BlueSCSI shared folder).
+#   stage-hw.sh [--spec <file.md>] <session-name> <file.bin>...
+#   stage-hw.sh --verify <session-name>
+# Stage: writes dist/hw/<session-name>/ with each file as MacBinary (.bin) and BinHex
+# (.hqx, via macutils binhex), a README.txt (ASCII, CR line endings, for TeachText) and
+# CHECKLIST.md rendered from docs/dev/hw-checklist-template.md. A failed run removes the
+# half-made session directory. The staged session is verified automatically.
+# Spec file (markdown) supplies the owner-facing steps as "## Install", "## Try" and
+# "## Undo" sections. Without --spec those sections say no steps were given.
+# Verify: round-trips every .hqx with hexbin and checks it equals the .bin (name,
+# type/creator, flags, data and resource forks); checks README.txt is ASCII with CR only;
+# fails if the checklist still has TODO-FILL or {{ markers.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+die() { echo "stage-hw.sh: $*" >&2; exit 1; }
+
+PYCMP='
+import struct, sys
+def parse(p):
+    d = open(p, "rb").read()
+    nl = d[1]
+    dl, rl = struct.unpack(">II", d[83:91])
+    off = 128 + ((dl + 127) // 128) * 128
+    return dict(name=d[2:2+nl], type=d[65:69], creator=d[69:73], flags=(d[73], d[101]),
+                data=d[128:128+dl], rsrc=d[off:off+rl])
+a, b = parse(sys.argv[1]), parse(sys.argv[2])
+bad = [k for k in a if a[k] != b[k]]
+if bad:
+    print("differs in: " + ", ".join(bad)); sys.exit(1)
+print("%s type/creator %s/%s data %d rsrc %d: equal" % (a["name"].decode("mac_roman"),
+      a["type"].decode("ascii"), a["creator"].decode("ascii"), len(a["data"]), len(a["rsrc"])))
+'
+
+verify_session() {
+  local dir="$1" n=0 hqx stem tmp
+  [ -d "$dir" ] || die "no such session dir: $dir"
+  command -v hexbin >/dev/null || die "hexbin (macutils) not installed"
+  tmp="$(mktemp -d)"
+  for hqx in "$dir"/*.hqx; do
+    [ -e "$hqx" ] || die "no .hqx files in $dir"
+    stem="$(basename "$hqx" .hqx)"
+    [ -f "$dir/$stem.bin" ] || die "$stem.hqx has no matching $stem.bin"
+    mkdir "$tmp/$stem"
+    (cd "$tmp/$stem" && hexbin "$hqx" >/dev/null) || { rm -rf "$tmp"; die "hexbin failed on $stem.hqx"; }
+    set -- "$tmp/$stem"/*.bin
+    [ -f "$1" ] || { rm -rf "$tmp"; die "hexbin of $stem.hqx produced no MacBinary file"; }
+    python3 -I -c "$PYCMP" "$1" "$dir/$stem.bin" || { rm -rf "$tmp"; die "$stem: round-trip mismatch"; }
+    n=$((n+1))
+  done
+  rm -rf "$tmp"
+  [ -f "$dir/README.txt" ] || die "missing README.txt"
+  if LC_ALL=C grep -q '[^ -~'$'\r'']' "$dir/README.txt"; then die "README.txt is not plain ASCII"; fi
+  [ "$(tr -cd '\n' < "$dir/README.txt" | wc -c)" -eq 0 ] || die "README.txt has LF; must be CR only"
+  [ -f "$dir/CHECKLIST.md" ] || die "missing CHECKLIST.md"
+  if grep -q 'TODO-FILL\|{{' "$dir/CHECKLIST.md"; then die "CHECKLIST.md still has TODO-FILL or {{ markers"; fi
+  echo "verified $n file(s) in $dir"
+}
+
+if [ "${1:-}" = "--verify" ]; then
+  [ $# -eq 2 ] || die "usage: stage-hw.sh --verify <session-name>"
+  verify_session "$ROOT/dist/hw/$2"
+  exit 0
+fi
+
+spec=""
+if [ "${1:-}" = "--spec" ]; then
+  [ $# -ge 2 ] || die "--spec needs a file"
+  spec="$2"; shift 2
+  [ -f "$spec" ] || die "no such spec: $spec"
+fi
+[ $# -ge 2 ] || die "usage: stage-hw.sh [--spec file.md] <session-name> <file.bin>..."
+session="$1"; shift
+case "$session" in
+  ""|.*|*[!A-Za-z0-9._-]*) die "session name must match [A-Za-z0-9._-] and not start with '.'";;
+esac
+command -v binhex >/dev/null || die "binhex (macutils) not installed"
+for f in "$@"; do [ -f "$f" ] || die "no such file: $f"; done
+
+out="$ROOT/dist/hw/$session"
+[ ! -e "$out" ] || die "$out already exists; remove it or pick a new session name"
+done_ok=""; readme_lf=""
+cleanup() {
+  if [ -z "$done_ok" ]; then rm -rf "$out"; fi
+  if [ -n "$readme_lf" ]; then rm -f "$readme_lf"; fi
+}
+trap cleanup EXIT
+mkdir -p "$out"
+
+names=()
+for f in "$@"; do
+  base="$(basename "$f")"
+  case "$base" in *.bin) ;; *) die "$f is not a MacBinary .bin file";; esac
+  stem="${base%.bin}"
+  case "$stem" in *[!A-Za-z0-9._-]*) die "file name '$base' has characters other than [A-Za-z0-9._-]";; esac
+  cp "$f" "$out/$base"
+  binhex "$out/$base" > "$out/$stem.hqx" || die "binhex failed for $base"
+  [ -s "$out/$stem.hqx" ] || die "binhex produced an empty file for $base"
+  names+=("$stem")
+done
+
+# README.txt: ASCII, CR line endings.
+readme_lf="$(mktemp)"
+{
+  echo "MoofTCP hardware session: $session"
+  echo "Staged: $(date +%Y-%m-%d)"
+  echo
+  echo "Files in this folder (each in two formats):"
+  for n in "${names[@]}"; do echo "  $n.bin   MacBinary"; echo "  $n.hqx   BinHex"; done
+  echo
+  echo "Copy ONE format of each file to the BlueSCSI shared folder on the SD card."
+  echo "Try the .bin files first. If StuffIt Expander or the Finder shows a plain"
+  echo "data file with no icon, use the .hqx file instead."
+  echo
+  echo "Then follow CHECKLIST.md (read it on the host; it lists the steps and"
+  echo "what to report back)."
+} > "$readme_lf"
+tr '\n' '\r' < "$readme_lf" > "$out/README.txt"
+
+# CHECKLIST.md from template + optional spec.
+tpl="$ROOT/docs/dev/hw-checklist-template.md"
+[ -f "$tpl" ] || die "missing template $tpl"
+[ -n "$spec" ] || echo "stage-hw.sh: warning: no --spec; Install/Try/Undo will say no steps were given" >&2
+list=""
+for n in "${names[@]}"; do list+="- \`$n.bin\` (or \`$n.hqx\`)"$'\n'; done
+python3 -I - "$tpl" "$out/CHECKLIST.md" "$session" "$(date +%Y-%m-%d)" "$list" "$spec" <<'PY'
+import re, sys
+tpl, dst, session, date, files, spec = sys.argv[1:7]
+none = "No steps were given for this session."
+secs = {"Install": none, "Try": none, "Undo": none}
+if spec:
+    text = open(spec).read()
+    parts = re.split(r"(?m)^## +(.+?) *$", text)
+    found = dict(zip(parts[1::2], parts[2::2]))
+    for k in secs:
+        if k not in found or not found[k].strip():
+            sys.exit("spec has no '## %s' section" % k)
+        secs[k] = found[k].strip()
+s = open(tpl).read()
+for key, val in (("SESSION", session), ("DATE", date), ("FILES", files.rstrip("\n")),
+                 ("INSTALL", secs["Install"]), ("TRY", secs["Try"]), ("UNDO", secs["Undo"])):
+    s = s.replace("{{%s}}" % key, val)
+open(dst, "w").write(s)
+PY
+verify_session "$out"
+done_ok=1
+echo "staged $out"
+ls -l "$out"

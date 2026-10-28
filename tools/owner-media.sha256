@@ -1,0 +1,4 @@
+# SHA-256 of the owner-provided media used to build the golden image (paths relative to $MT_HOME/media).
+# Verified by scripts/golden-stage.sh before use. sha256sum -c format; '#' lines ignored.
+6362d8c2851b2317efccf1f7eb67519b2b35f0729397a856ecd7697cf803a22a  sys608.img
+320f894750ee7cd7c56ecdbb591ba98cb9e205155826240547ff61bc66f74d4d  mactcp206.dsk

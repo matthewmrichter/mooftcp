@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run a command inside the pinned Retro68 Docker image, repo mounted at /src.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DIGEST="$(cat "$REPO/tools/retro68.digest")"
+exec docker run --rm -v "$REPO:/src" -w /src -u "$(id -u):$(id -g)" -e HOME=/tmp \
+  "ghcr.io/autc04/retro68@$DIGEST" "$@"

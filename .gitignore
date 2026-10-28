@@ -1,3 +1,16 @@
 .claude/settings.local.json
 .claude/worktrees/
 .superpowers/
+build*/
+dist/
+*.hda
+*.img
+*.dsk
+*.rom
+*.ROM
+*.bin
+*.hqx
+*.sit
+*.zip
+*.pcap
+*.png
