@@ -7,6 +7,7 @@
 #include <TextEdit.h>
 #include <Memory.h>
 #include <Events.h>
+#include <Devices.h>
 
 QDGlobals qd;
 
@@ -46,10 +47,31 @@ int main(void)
     size = (long)sys->bkLim - (long)sys;
     SetZone(saved);
 
+#ifdef OPEN_IPP
+    /* HeapInfoOpen: open the MacTCP driver, then re-measure the system zone.
+       Shows the OpenDriver result (0 = ok) and FreeMem before/after, which
+       isolates MacTCP's own open cost from any application's. */
+    {
+        short ref;
+        OSErr err = OpenDriver("\p.IPP", &ref);
+        long freeA;
+        unsigned char e[48];
+        SetZone(sys);
+        freeA = FreeMem();
+        size = (long)sys->bkLim - (long)sys;
+        SetZone(saved);
+        line("OpenDriver(.IPP) err: ", (long)err, e);
+        line("FreeMem before: ", freeB, a);
+        line("FreeMem after: ", freeA, b);
+        line("Zone size: ", size, c);
+        ParamText(e, a, b, c);
+    }
+#else
     line("FreeMem: ", freeB, a);
     line("MaxMem: ", maxB, b);
     line("Zone size: ", size, c);
     ParamText("\p system zone (bytes)", a, b, c);
+#endif
     Alert(128, 0);
     return 0;
 }
