@@ -41,6 +41,8 @@ typedef struct {
     uint32_t ip_frag_out;   /* fragment frames emitted */
     uint32_t ip_reasm_ok;   /* datagrams reassembled */
     uint32_t ip_reasm_fail; /* reassemblies abandoned (timeout, overlap, overflow, slot busy) */
+    uint32_t icmp_in;       /* ICMP messages accepted (well-formed, checksum ok, from a unicast peer) */
+    uint32_t icmp_out;      /* ICMP messages transmitted (echo requests/replies, errors) */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
@@ -52,6 +54,15 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
 void      mt_set_config(mt_stack *s, const mt_ifconfig *c);
 void      mt_get_config(const mt_stack *s, mt_ifconfig *c);
 const mt_stats *mt_get_stats(const mt_stack *s);
+
+/* ICMP echo. The callback fires for each echo reply addressed to us. */
+typedef void (*mt_echo_cb)(void *user, mt_ip4 from, uint16_t id, uint16_t seq,
+                           const uint8_t *data, uint16_t len, uint32_t now);
+void      mt_set_echo_cb(mt_stack *s, mt_echo_cb cb, void *user);
+/* Send an echo request (len <= 1472 so it fits one frame; MT_ERR_INVAL otherwise).
+ * Returns what mt_ip_output returns. */
+int       mt_icmp_echo(mt_stack *s, mt_ip4 dst, uint16_t id, uint16_t seq, const uint8_t *data,
+                       uint16_t len, uint32_t now);
 
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);

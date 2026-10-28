@@ -3,9 +3,22 @@
 /* Placeholders for functions implemented by later tasks. Each task deletes its
  * stub from this file when it adds the real definition. */
 
-/* Task 5 (ICMP) replaces this. */
-void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now) {
-    (void)s; (void)src; (void)dst; (void)pl; (void)len; (void)now;
+/* Tasks 6/7 replace these. Under MT_TEST_HOOKS they report to icmp_err_spy. */
+void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
+                       uint8_t code) {
+#ifdef MT_TEST_HOOKS
+    if (s->icmp_err_spy) s->icmp_err_spy(s->icmp_err_ctx, 6, dst, lport, rport, type, code);
+#else
+    (void)s; (void)dst; (void)lport; (void)rport; (void)type; (void)code;
+#endif
+}
+void mt_udp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
+                       uint8_t code) {
+#ifdef MT_TEST_HOOKS
+    if (s->icmp_err_spy) s->icmp_err_spy(s->icmp_err_ctx, 17, dst, lport, rport, type, code);
+#else
+    (void)s; (void)dst; (void)lport; (void)rport; (void)type; (void)code;
+#endif
 }
 
 /* Task 6 (UDP) replaces this. */

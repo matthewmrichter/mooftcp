@@ -87,9 +87,14 @@ struct mt_stack {
     mt_pending *pend;
     mt_reasm *reasm;
     uint16_t ip_id;          /* next IPv4 identification */
+    mt_echo_cb echo_cb;
+    void *echo_user;
 #ifdef MT_TEST_HOOKS
     mt_ip_spy_fn ip_spy;
     void *ip_spy_ctx;
+    void (*icmp_err_spy)(void *ctx, uint8_t proto, mt_ip4 dst, uint16_t lport, uint16_t rport,
+                         uint8_t type, uint8_t code);
+    void *icmp_err_ctx;
 #endif
     /* scratch */
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
@@ -140,6 +145,23 @@ uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now);
 void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
+
+/* ---- ICMP (mt_icmp.c) ---- */
+/* Called for ICMP dest-unreachable (3), source-quench (4), time-exceeded (11) and
+ * parameter-problem (12) about a datagram WE sent. dst/lport/rport come from the
+ * embedded original header (dst = original destination, lport = original source port,
+ * rport = original destination port). Stubs in mt_stubs.c until Tasks 6-7. */
+void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
+                       uint8_t code);
+void mt_udp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
+                       uint8_t code);
+/* Send an ICMP error (type 3, `code`) about a received datagram src->dst whose IP payload is
+ * pl/len (the IP header is not available at this layer, so a 20-byte header is synthesised:
+ * ID 0, TTL 1, checksum valid; peers match on addresses, protocol and the 8 payload bytes).
+ * Nothing is sent unless dst is our own unicast address and src is a unicast peer, so
+ * broadcast/multicast datagrams never provoke errors. UDP closed port: code 3. */
+void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, const uint8_t *pl,
+                          uint16_t len, uint8_t code, uint32_t now);
 
 /* ---- Stubs (mt_stubs.c): delete each when its owning task implements it ---- */
 void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now);                 /* Task 7 */
