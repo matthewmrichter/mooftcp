@@ -134,6 +134,41 @@ static void test_arp_resolved_ages(void) {
     T_EQ(fl.n, 1);
 }
 
+static void test_arp_oversize_not_held(void) {
+    fake_link fl; arpv v;
+    mt_stack *s = tstack_new(&fl, T_ME);
+    T_EQ(mt_eth_send(s, T_PEER, 0x0800, 1500, 0), 0);
+    T_EQ(fl.n, 1);
+    T_CHECK(view_arp(fl.f[0], fl.len[0], &v));
+    T_EQ(v.op, 1);
+    T_EQ(mt_get_stats(s)->arp_drops, 1);
+    inject_reply(s, T_PEER, T_PEER_MAC, 100);
+    T_EQ(fl.n, 1);                       /* nothing held, nothing extra sent */
+    T_EQ(mt_get_stats(s)->arp_drops, 1);
+    /* a frame exactly at the cap is held */
+    T_EQ(mt_eth_send(s, T_PEER + 1, 0x0800, MT_PEND_MAX - 14, 200), 0);
+    T_EQ(mt_get_stats(s)->arp_drops, 1);
+    inject_reply(s, T_PEER + 1, T_PEER_MAC, 300);
+    T_EQ(fl.n, 3);
+    T_EQ(fl.len[2], MT_PEND_MAX);
+}
+
+static void test_arp_expiry_wrap(void) {
+    fake_link fl; uint8_t mac[6];
+    mt_stack *s = tstack_new(&fl, T_ME);
+    /* stamp just below 2^32: expiry crosses the clock wrap */
+    mt_arp_insert(s, T_PEER, T_PEER_MAC, 0xFFFFFFF0u);
+    T_EQ(mt_next_deadline(s, 0xFFFFFFF0u), 600000);
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 0xFFFFFFF0u + 599999u), 1);
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 0xFFFFFFF0u + 600000u), 0);
+    /* ticked at the 10-minute mark, then idle for > 2^31 ms: must not revive */
+    mt_arp_insert(s, T_PEER + 1, T_PEER_MAC, 1000);
+    mt_tick(s, 1000 + 600000);
+    fl.n = 0;
+    T_EQ(mt_arp_resolve(s, T_PEER + 1, mac, 1000 + 0x90000000u), 0);
+    T_EQ(fl.n, 1);
+}
+
 static void test_deadline(void) {
     fake_link fl; uint8_t mac[6];
     mt_stack *s = tstack_new(&fl, T_ME);
@@ -180,4 +215,5 @@ T_MAIN(test_arp_reply, test_arp_ignore_other_target, test_arp_resolve_flow,
        test_arp_learn_from_request, test_arp_pending_frame_sent_on_reply,
        test_arp_pending_other_hop_not_sent, test_arp_pending_expires,
        test_arp_lru_replace, test_arp_resolved_ages, test_deadline,
-       test_arp_odd_address, test_arp_malformed)
+       test_arp_odd_address, test_arp_malformed, test_arp_oversize_not_held,
+       test_arp_expiry_wrap)

@@ -86,6 +86,10 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
         memset(mac, 0xFF, 6);
     } else if (!mt_arp_resolve(s, nexthop, mac, now)) {
         mt_pending *p = s->pend;
+        if (MT_ETH_HDR + payload_len > MT_PEND_MAX) {
+            s->stats.arp_drops++;                  /* too big to hold; request already sent */
+            return 0;
+        }
         if (p->len) s->stats.arp_drops++;          /* older held frame replaced */
         memcpy(p->frame + 6, s->cfg.mac, 6);
         mt_wr16(p->frame + 12, ethertype);

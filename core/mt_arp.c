@@ -148,8 +148,10 @@ void mt_arp_input(mt_stack *s, const uint8_t *arp, uint16_t len, uint32_t now) {
 void mt_arp_tick(mt_stack *s, uint32_t now) {
     mt_arp_entry *e = s->arp, *end = s->arp + s->lim.arp_entries;
     for (; e < end; e++) {
-        if (e->state != MT_ARP_PENDING) continue;
-        if (!arp_expired(s, e, now)) arp_pending_step(s, e, now);
+        if (e->state == MT_ARP_FREE) continue;
+        /* Resolved entries are invalidated here too, so a stale t_stamp/t_used
+         * is never compared across a half clock wrap (tick at least every 2^31 ms). */
+        if (!arp_expired(s, e, now) && e->state == MT_ARP_PENDING) arp_pending_step(s, e, now);
     }
     /* A held frame whose next hop has no pending entry can never be released. */
     if (s->pend->len) {
@@ -163,9 +165,12 @@ uint32_t mt_arp_deadline(const mt_stack *s, uint32_t now) {
     uint32_t best = MT_NO_DEADLINE;
     for (; e < end; e++) {
         uint32_t at, rel;
-        if (e->state != MT_ARP_PENDING) continue;
-        at = e->t_stamp + (e->tries < ARP_MAX_TRIES ? (uint32_t)e->tries * ARP_RETRY_MS
-                                                    : ARP_PENDING_MS);
+        if (e->state == MT_ARP_FREE) continue;
+        if (e->state == MT_ARP_RESOLVED)
+            at = e->t_stamp + ARP_RESOLVED_MS;
+        else
+            at = e->t_stamp + (e->tries < ARP_MAX_TRIES ? (uint32_t)e->tries * ARP_RETRY_MS
+                                                        : ARP_PENDING_MS);
         rel = mt_time_before(at, now) ? 0u : at - now;
         if (rel < best) best = rel;
     }

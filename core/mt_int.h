@@ -41,11 +41,14 @@ typedef struct {
     uint8_t tries;       /* requests sent while pending */
 } mt_arp_entry;
 
-/* Single frame held while its next hop resolves. len == 0: empty. */
+/* Single frame held while its next hop resolves (len == 0: empty). Only small
+ * frames wait on ARP (SYN, DNS query, ICMP echo, first UDP datagram); larger
+ * ones are dropped and recovered by upper-layer retransmission. */
+#define MT_PEND_MAX 256u   /* frame bytes including the 14-byte Ethernet header */
 typedef struct {
     mt_ip4 nexthop;
     uint16_t len;
-    uint8_t frame[MT_TXBUF_SIZE];
+    uint8_t frame[MT_PEND_MAX];
 } mt_pending;
 
 struct mt_stack {
@@ -74,7 +77,9 @@ void mt_arp_tick(mt_stack *s, uint32_t now);
 uint32_t mt_arp_deadline(const mt_stack *s, uint32_t now);
 
 /* Send the frame whose payload is already at txbuf + 14. Returns 1 = sent,
- * 0 = held in the pending slot awaiting ARP (replacing any older held frame),
+ * 0 = held in the pending slot awaiting ARP (replacing any older held frame);
+ * a frame over MT_PEND_MAX is not held (arp_drops++, ARP request still sent) and also
+ * returns 0 so the caller's retransmission logic recovers it,
  * -1 = dropped (unconfigured, oversize, or link error). nexthop
  * 255.255.255.255 goes to the Ethernet broadcast address. */
 int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payload_len,
