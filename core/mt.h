@@ -4,7 +4,26 @@
 #include <stdint.h>
 
 /* MoofTCP portable core: public API. All state lives in one caller-supplied
- * arena; the core never allocates and has no mutable globals. */
+ * arena; the core never allocates and has no mutable globals.
+ *
+ * Embedder contract (what the glue must guarantee):
+ *  - One context at a time per stack. mt_input and mt_tick must never be re-entered, neither
+ *    from a callback nor from link.tx; every other API call is legal from callbacks.
+ *  - Timers: re-query mt_next_deadline after EVERY API call that can arm one (mt_tcp_send/open/
+ *    close/abort/listen, mt_dns_query, mt_udp_send, mt_icmp_echo, mt_set_config), not only after
+ *    mt_input and mt_tick. Call mt_tick when it reaches 0, and at least once every 2^31 ms.
+ *  - Clock: `now` (ms, uint32, wraps) comes from one monotonic source shared by every context
+ *    that calls into the stack.
+ *  - Lifetimes: the `frame` given to mt_input need only live for that call. Pointers handed to
+ *    callbacks (echo data, UDP datagram data, TCP peek pointers) are valid only during the
+ *    callback unless documented otherwise.
+ *  - Callbacks run in the caller's context: at interrupt time if mt_input is called at interrupt
+ *    time, so they must not call the Memory Manager (or anything else unsafe there).
+ *  - link.tx receives complete Ethernet frames. ARP frames are padded to 60 bytes; IP frames are
+ *    NOT, so a frame can be shorter than the 60-byte Ethernet minimum (a pure TCP ACK is 54
+ *    bytes). The glue must pad to 60 in its ENET write path; the core does not. The pointer may
+ *    point into the core's tx scratch buffer, the ARP scratch buffer or the pending-frame slot,
+ *    and is valid only until tx returns. */
 
 typedef uint32_t mt_ip4;                         /* host byte order */
 #define MT_NO_DEADLINE 0xFFFFFFFFu
@@ -14,7 +33,7 @@ typedef struct mt_stack mt_stack;
 enum { MT_OK = 0, MT_ERR_NOROUTE = -1, MT_ERR_NOMEM = -2, MT_ERR_INVAL = -3,
        MT_ERR_STATE = -4, MT_ERR_INUSE = -5, MT_ERR_UNCONFIGURED = -6 };
 
-/* tx must finish with `frame` before returning; nonzero = dropped */
+/* tx must finish with `frame` before returning (see the embedder contract); nonzero = dropped */
 typedef struct { void *ctx; int (*tx)(void *ctx, const uint8_t *frame, uint16_t len); } mt_link;
 
 typedef struct {
