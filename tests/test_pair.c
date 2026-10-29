@@ -1,6 +1,8 @@
 #include "t.h"
 #include "pair.h"
 #include "mt_util.h"
+#include "net.h"
+#include "mt_int.h"
 
 /* Two real stacks over a faulty link (see pair.h). A = .200 connects, B = .10 listens on 7000.
  * Streams are pseudo-random patterns checked byte for byte. A transfer that does not finish
@@ -19,6 +21,7 @@ typedef struct {
     uint8_t rsalt;
     int close_after, close_on_fin, closed;
     int estab, peer_fin, term, reason;
+    uint32_t est_t;                 /* virtual time of ESTABLISHED */
     int drain;                      /* read in the DATA callback */
     uint32_t slow_bytes, slow_ms, last_read;
 } ep;
@@ -55,7 +58,7 @@ static void ep_drain(ep *e, uint32_t max) {
 static void ep_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     ep *e = (ep *)user;
     switch (ev) {
-    case MT_TCP_EV_ESTABLISHED: e->estab = 1; ep_pump(e); break;
+    case MT_TCP_EV_ESTABLISHED: e->estab = 1; e->est_t = pair_now(e->p); ep_pump(e); break;
     case MT_TCP_EV_DATA: if (e->drain) ep_drain(e, 0); break;
     case MT_TCP_EV_CLOSING:
         e->peer_fin = 1;
@@ -100,9 +103,12 @@ typedef struct {
     uint32_t a_send, b_send;
     int a_close_after, b_close_after, a_close_on_fin, b_close_on_fin;
     uint32_t a_slow_bytes, a_slow_ms;
+    int fault;                     /* directed fault (TL_*), 0 = none */
 } scen;
 
 typedef struct { ep a, b; pair *p; int done; uint32_t t0, elapsed; } run;
+static int tl_filter(void *user, int from, const uint8_t *f, uint16_t len);
+static void tl_reset(int kind, uint32_t total);
 
 static int data_done(run *r, const scen *s) {
     return r->a.got == s->b_send && r->b.got == s->a_send;
@@ -127,6 +133,7 @@ static void run_start(run *r, const scen *s) {
         r->a.drain = 0; r->a.slow_bytes = s->a_slow_bytes; r->a.slow_ms = s->a_slow_ms;
         r->a.last_read = pair_now(r->p);
     }
+    if (s->fault) { tl_reset(s->fault, s->b_send); pair_set_filter(r->p, tl_filter, r->p); }
     T_EQ(mt_tcp_listen(r->b.t, 0, 0, PORT), MT_OK);
     r->t0 = pair_now(r->p);
     T_EQ(mt_tcp_open(r->a.t, PAIR_B_IP, PORT, 0, pair_now(r->p)), MT_OK);
@@ -346,5 +353,93 @@ static void test_pair_slow_reader(void) {
     run_free(&r);
 }
 
+/* ---- directed single-frame losses on an otherwise clean link ---- */
+enum { TL_ARP = 1, TL_SYN, TL_SYNACK, TL_AFIN, TL_FINAL_ACK, TL_TAIL, TL_MID, TL_FINAL_ACK3 };
+static struct { int kind, hits, saw_a_fin, saw_b_fin; uint32_t b_isn, total, drop_seq, drop_t, resend_dt; } tl;
+
+static void tl_reset(int kind, uint32_t total) {
+    memset(&tl, 0, sizeof tl);
+    tl.kind = kind; tl.total = total;
+}
+
+static int tl_filter(void *user, int from, const uint8_t *f, uint16_t len) {
+    tcpv v; arpv a;
+    pair *p = (pair *)user;
+    if (tl.kind == TL_ARP) {
+        if (from == 0 && !tl.hits && view_arp(f, len, &a) && a.op == 1) { tl.hits++; return 1; }
+        return 0;
+    }
+    if (!view_tcp(f, len, &v)) return 0;
+    if (from == 1 && (v.flags & TF_SYN)) tl.b_isn = v.seq;
+    if (tl.drop_t && !tl.resend_dt && from == 1 && v.dlen && v.seq == tl.drop_seq)
+        tl.resend_dt = pair_now(p) - (tl.drop_t - 1u);  /* first resend of the lost segment */
+    if (v.flags & TF_FIN) { if (from) tl.saw_b_fin = 1; else tl.saw_a_fin = 1; }
+    switch (tl.kind) {
+    case TL_SYN:    if (from == 0 && v.flags == TF_SYN && !tl.hits) { tl.hits++; return 1; } break;
+    case TL_SYNACK: if (from == 1 && v.flags == (TF_SYN | TF_ACK) && !tl.hits) { tl.hits++; return 1; } break;
+    case TL_AFIN:   if (from == 0 && (v.flags & TF_FIN) && !tl.hits) { tl.hits++; return 1; } break;
+    case TL_FINAL_ACK: case TL_FINAL_ACK3:       /* B's ACK of A's FIN (B is in TIME_WAIT) */
+        if (from == 1 && tl.saw_a_fin && tl.saw_b_fin && v.flags == TF_ACK && !v.dlen &&
+            tl.hits < (tl.kind == TL_FINAL_ACK ? 1 : 3)) { tl.hits++; return 1; }
+        break;
+    case TL_TAIL:
+        if (from == 1 && v.dlen && v.seq + v.dlen == tl.b_isn + 1 + tl.total && !tl.hits) {
+            tl.hits++; return 1; }
+        break;
+    case TL_MID:
+        if (from == 1 && v.dlen && v.seq - (tl.b_isn + 1) >= 65536u && !tl.hits) {
+            tl.hits++; tl.drop_seq = v.seq; tl.drop_t = pair_now(p) + 1u; return 1; }
+        break;
+    }
+    return 0;
+}
+
+static void targeted(int kind, uint32_t delay, uint32_t total, const char *what, uint32_t *elapsed,
+                     uint32_t *rexmt, uint32_t *resend_dt, uint32_t *est) {
+    scen s; run r;
+    memset(&s, 0, sizeof s);
+    s.f.delay_ms = delay; s.f.seed = 1;
+    s.b_send = total; s.b_close_after = 1; s.a_close_on_fin = 1;
+    s.fault = kind;
+    run_start(&r, &s);
+    run_until_done(&r, &s);
+    check_run(&r, &s, what, (uint32_t)kind);
+    T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
+    T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
+    if (kind != TL_FINAL_ACK3) T_EQ(tl.hits, 1);
+    else T_EQ(tl.hits, 3);
+    if (elapsed) *elapsed = r.elapsed;
+    if (est) *est = r.a.est_t - r.t0;
+    if (resend_dt) *resend_dt = tl.resend_dt;
+    if (rexmt) *rexmt = mt_get_stats(pair_a(r.p))->tcp_rexmt + mt_get_stats(pair_b(r.p))->tcp_rexmt;
+    run_free(&r);
+}
+
+static void test_pair_targeted_loss(void) {
+    uint32_t clean, loss, rex, rex0, dt, est;
+    targeted(TL_ARP, 5, 32768, "arp request lost", NULL, NULL, NULL, &est);
+    T_CHECK(est >= 1000 && est < 1500);              /* the 2nd ARP request (+1 s) got through */
+    targeted(TL_SYN, 5, 32768, "syn lost", NULL, NULL, NULL, NULL);
+    targeted(TL_SYNACK, 5, 32768, "syn-ack lost", NULL, NULL, NULL, NULL);
+    targeted(TL_AFIN, 5, 32768, "A's fin lost", NULL, NULL, NULL, NULL);
+    targeted(TL_FINAL_ACK, 5, 32768, "final ack lost", NULL, NULL, NULL, NULL);   /* TIME_WAIT must re-ACK */
+    targeted(TL_TAIL, 5, 32768, "tail segment lost", NULL, NULL, NULL, NULL);     /* RTO-only recovery */
+    /* One mid-stream loss in a 128 KB transfer must be repaired by fast retransmit: the lost
+     * segment is resent well before the RTO (>= RTO_MIN) could fire. The receiver keeps no
+     * out-of-order data, so the (up to ~5) segments already in flight behind the hole are resent
+     * too: bounded, not a storm. */
+    targeted(0, 5, 131072, "mid clean", &clean, &rex0, NULL, NULL);
+    targeted(TL_MID, 5, 131072, "mid-stream loss", &loss, &rex, &dt, NULL);
+    T_EQ(rex0, 0);
+    T_CHECK(rex >= 1 && rex <= 8);
+    T_CHECK(dt > 0 && dt < MT_TCP_RTO_MIN);
+    (void)clean; (void)loss;
+    /* Slow link (400 ms each way), the first three final ACKs lost. A's FIN retransmits at +1 s,
+     * +2 s, +4 s and each arrival renews B's 2 s TIME_WAIT, so the fourth FIN finds B gone and is
+     * answered with an RST; A (LAST_ACK, all data acked) must still report a clean close. (With
+     * only two lost ACKs the third FIN arrives exactly as TIME_WAIT expires: a tie.) */
+    targeted(TL_FINAL_ACK3, 400, 8192, "three final acks lost, slow link", NULL, NULL, NULL, NULL);
+}
+
 T_MAIN(test_pair_bulk_clean, test_pair_bulk_lossy, test_pair_interactive_clean,
-       test_pair_bidirectional_close, test_pair_wrap, test_pair_slow_reader)
+       test_pair_bidirectional_close, test_pair_wrap, test_pair_slow_reader, test_pair_targeted_loss)

@@ -18,6 +18,8 @@ struct pair {
     mt_stack *s[2];
     void *arena[2], *raw[2];
     txctx ctx[2];
+    pair_filter_fn filter;
+    void *filter_user;
     qent *q;
     int n;
 };
@@ -58,6 +60,7 @@ static int pair_tx(void *vctx, const uint8_t *frame, uint16_t len) {
             fprintf(stderr, "%8u %c->%c non-tcp len %u\n", p->now, c->who ? 'B' : 'A',
                     c->who ? 'A' : 'B', len);
     }
+    if (p->filter && p->filter(p->filter_user, c->who, frame, len)) { p->ndrop++; return 0; }
     if (chance(p, p->f.drop_ppm)) { p->ndrop++; return 0; }
     memcpy(tmp, frame, len);
     if (chance(p, p->f.corrupt_ppm)) {
@@ -121,6 +124,7 @@ void pair_free(pair *p) {
     free(p->raw[0]); free(p->raw[1]); free(p->q); free(p);
 }
 
+void pair_set_filter(pair *p, pair_filter_fn fn, void *user) { p->filter = fn; p->filter_user = user; }
 mt_stack *pair_a(pair *p) { return p->s[0]; }
 mt_stack *pair_b(pair *p) { return p->s[1]; }
 uint32_t pair_now(const pair *p) { return p->now; }

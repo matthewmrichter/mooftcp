@@ -31,6 +31,10 @@ mt_stack *pair_b(pair *p);
  * has been handled when it returns. */
 void     pair_run(pair *p, uint32_t ms);
 uint32_t pair_now(const pair *p);
+/* Directed-fault hook, consulted for every transmitted frame before the random faults:
+ * returning nonzero drops the frame (from: 0 = sent by A, 1 = sent by B). NULL clears it. */
+typedef int (*pair_filter_fn)(void *user, int from, const uint8_t *frame, uint16_t len);
+void     pair_set_filter(pair *p, pair_filter_fn fn, void *user);
 /* Number of times mt_tick left a stack with an already-expired deadline (contract
  * violation; expected 0). */
 uint32_t pair_stuck(const pair *p);
