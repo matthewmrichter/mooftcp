@@ -346,8 +346,7 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     i->lport = t->lport;
     i->rport = t->rport;
     if (t->state >= MT_TCP_ESTABLISHED && t->state != MT_TCP_TIME_WAIT) {
-        sent = t->snd_max - t->snd_una;
-        if ((t->flags & MT_TF_FINSENT) && sent) sent--;   /* an ACKed FIN leaves sent 0, not -1 */
+        sent = mt_tcp_data_out(t);
         i->unacked = sent;
         i->send_queued = q > sent ? q - sent : 0u;
     }
@@ -700,7 +699,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
  * estimated in full-MSS units by compares (no division); flights of smaller segments keep 3. */
 static uint8_t dup_thresh(const mt_tcp *t) {
     uint32_t out = t->snd_max - t->snd_una, m = t->mss;
-    uint32_t data = out - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
+    uint32_t data = mt_tcp_data_out(t);
     if (mt_tcp_sq_total(t) > data || (t->flags & MT_TF_FINQ && !(t->flags & MT_TF_FINSENT)))
         return 3;                                          /* new data could still clock out ACKs */
     if (out <= m) return 3;                                /* one segment: no duplicates possible */

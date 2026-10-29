@@ -225,6 +225,7 @@ static int send_progress(MtStream *s) {
             if (in.state < MT_TCP_ESTABLISHED || in.state == MT_TCP_TIME_WAIT) break;
             notack = in.unacked + in.send_queued;
             if (notack > inflight || (int32_t)(s->acked + inflight - notack - end) < 0) break;
+            s->d->early_done++;                   /* completed inside a merged request */
         }
         complete(s, sq_pop(s), 0);
         if (!same(s, g, c) || s->used != LIVE) return 0;
@@ -386,17 +387,54 @@ static int closing_check(MtStream *s) {
     return 1;
 }
 
-/* Serve pending reads in FIFO order while data is there. 0 if the stream changed. */
-static int serve_reads(MtStream *s) {
+/* TCPDataArrival(n). An app that reads from its ASR may leave data again (one small read per
+ * ASR is common): the ASR is then due once more, but it runs after the current one returns, in
+ * this loop, never nested inside it (stack depth stays bounded on the 68k). */
+static void data_asr(MtStream *s, uint32_t n) {
     uint8_t g = s->gen;
     uint16_t c = s->conn;
+    if (s->in_data_asr) { s->data_due = 1; return; }
+    s->in_data_asr = 1;
+    for (;;) {
+        s->data_due = 0;
+        asr(s, TCPDataArrival, (uint16_t)(n > 65535u ? 65535u : n), 0);
+        if (!same(s, g, c) || s->used != LIVE || !s->data_due || s->rq_n) break;
+        n = unread(s);
+        if (!n) break;
+    }
+    s->in_data_asr = 0;          /* the slot cannot be re-created meanwhile (release is deferred) */
+    s->data_due = 0;
+}
+
+/* A read completed: if data is still unread and no other read is pending, TCPDataArrival with
+ * the unread count follows the completion (matrix 500: C:k1:r0 then A:e4:t16). 0 if the stream
+ * changed under us. */
+static int after_read(MtStream *s) {
+    uint8_t g = s->gen;
+    uint16_t c = s->conn;
+    uint32_t u;
+    if (s->rq_n) return 1;                               /* matrix 400/502: not with a read pending */
+    u = unread(s);
+    if (u) data_asr(s, u);
+    return same(s, g, c) && s->used == LIVE;
+}
+
+/* Serve pending reads in FIFO order while data is there (*served counts them). 0 if the
+ * stream changed. */
+static int serve_reads(MtStream *s, int *served) {
+    uint8_t g = s->gen;
+    uint16_t c = s->conn;
+    int n = 0;
     while (s->rq_n && unread(s) && can_serve(s, s->rq[0].pb)) {
         MtAnyPb *pb = rq_take(s, 0);
         if (pb->hdr.csCode == TCPRcv) rcv_copy(s, pb);
         else rcv_nocopy(s, pb);
         complete(s, pb, 0);
+        n++;
         if (!same(s, g, c) || s->used != LIVE) return 0;
     }
+    if (served) *served = n;
+    if (n && !after_read(s)) return 0;
     return closing_check(s);
 }
 
@@ -416,13 +454,20 @@ static int16_t do_rcv(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     if (!s->rq_n && unread(s) && can_serve(s, pb)) {
         uint8_t g = s->gen;
         uint16_t c = s->conn;
+        uint32_t u;
         if (cs == TCPRcv) rcv_copy(s, pb);
         else rcv_nocopy(s, pb);
-        if (!(s->fin && unread(s) == 0 && !s->closing_sent)) return 0;
-        /* it drained the data after the peer's FIN: complete it, then TCPClosing (matrix 601) */
+        u = unread(s);
+        if (!u && !(s->fin && !s->closing_sent)) return 0;
+        /* An ASR must follow this read's completion: TCPDataArrival for the data it left
+         * (matrix 500), or TCPClosing once it drained the data after the peer's FIN (601). So
+         * the glue completes it now and returns inProgress (see mt_pb.h, result contract). */
         pb->hdr.ioResult = inProgress;
         complete(s, pb, 0);
-        if (same(s, g, c) && s->used == LIVE) closing_check(s);
+        if (same(s, g, c) && s->used == LIVE) {
+            if (u) after_read(s);
+            else closing_check(s);
+        }
         return inProgress;
     }
     if (!s->rq_n && s->fin && unread(s) == 0) return connectionClosing; /* matrix 601: rcv2 */
@@ -445,7 +490,7 @@ static int16_t do_bfr_return(MtStream *s, MtAnyPb *pb) {
         if (!s->loan[i].returned && s->loan[i].key && s->loan[i].key == e.ptr) {
             s->loan[i].returned = 1;
             loans_consume(s);
-            serve_reads(s);                     /* a read may have waited for a loan slot */
+            serve_reads(s, NULL);               /* a read may have waited for a loan slot */
             return 0;
         }
     return invalidRDS;                          /* matrix 504: again, or made up */
@@ -470,12 +515,13 @@ static void on_established(MtStream *s) {
 
 static void on_data(MtStream *s, uint32_t n) {
     uint32_t u;
-    if (!send_progress(s) || !serve_reads(s)) return;
-    if (s->rq_n) return;                                  /* matrix 400/502: not with a read pending */
+    int served = 0;
+    if (!send_progress(s) || !serve_reads(s, &served)) return;
+    if (served || s->rq_n) return;   /* after_read reported what the reads left; 400/502: none pending */
     u = unread(s);
     if (!u) return;
-    if (n > u) n = u;                                     /* the new bytes nobody took (matrix 608) */
-    asr(s, TCPDataArrival, (uint16_t)(n > 65535u ? 65535u : n), 0);
+    if (n > u) n = u;                                     /* the new bytes (matrix 504, 608) */
+    data_asr(s, n);
 }
 
 static void on_terminate(MtStream *s, uint32_t reason) {
@@ -509,7 +555,7 @@ static void tcp_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     case MT_TCP_EV_ESTABLISHED: on_established(s); break;
     case MT_TCP_EV_DATA:        on_data(s, arg); break;
     case MT_TCP_EV_URGENT:      asr(s, mt_pb_event_code(ev), 0, 0); break;
-    case MT_TCP_EV_CLOSING:     s->fin = 1; serve_reads(s); break;
+    case MT_TCP_EV_CLOSING:     s->fin = 1; serve_reads(s, NULL); break;
     case MT_TCP_EV_ULP_TIMEOUT: asr(s, mt_pb_event_code(ev), 0, 0); break;
     case MT_TCP_EV_ICMP:        on_icmp(s, arg); break;
     case MT_TCP_EV_TERMINATE:   on_terminate(s, arg); break;

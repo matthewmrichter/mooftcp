@@ -165,7 +165,8 @@ TCPiopb *pbt_pb(int16_t cs, StreamPtr s) {
 
 int16_t pbt_call(pbt *x, TCPiopb *pb) {
     int16_t r = mt_pb_control(x->d, (MtAnyPb *)pb);
-    if (r != inProgress) mt_os_complete((MtAnyPb *)pb, r);
+    if (r != inProgress && r != MT_PB_NOTOPEN)            /* mt_pb.h result contract 3 and 4 */
+        mt_os_complete((MtAnyPb *)pb, r);
     return r;
 }
 

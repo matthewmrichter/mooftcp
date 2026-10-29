@@ -264,7 +264,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
 
 /* Retransmit the first unacked segment (SYN, SYN-ACK, data from the send queue, or FIN). */
 void mt_tcp_rexmit(mt_tcp *t, uint32_t now) {
-    uint32_t out, data;
+    uint32_t data;
     t->tnow = now;
     switch (t->state) {
     case MT_TCP_SYN_SENT:
@@ -275,8 +275,7 @@ void mt_tcp_rexmit(mt_tcp *t, uint32_t now) {
         break;
     case MT_TCP_ESTABLISHED: case MT_TCP_FIN_WAIT_1: case MT_TCP_FIN_WAIT_2:
     case MT_TCP_CLOSE_WAIT: case MT_TCP_CLOSING: case MT_TCP_LAST_ACK:
-        out = t->snd_max - t->snd_una;
-        data = out - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
+        data = mt_tcp_data_out(t);
         if (data) {
             uint32_t n = data < t->mss ? data : t->mss;
             uint8_t fl = MT_TH_ACK;

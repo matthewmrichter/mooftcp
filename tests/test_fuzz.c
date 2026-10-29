@@ -880,7 +880,10 @@ typedef struct {
     StreamPtr h;
     int16_t cs;
 } prec;
-typedef struct { StreamPtr h; uint8_t *rbuf; int live; } pstream;
+typedef struct {
+    StreamPtr h; uint8_t *rbuf; int live;
+    int rx_valid; uint8_t rx_next;   /* peer data is the low byte of its sequence number: reads */
+} pstream;                           /* must hand it out contiguously, in stream order */
 
 static struct {
     MtDrv *d;
@@ -888,7 +891,7 @@ static struct {
     pstream ps[PS_N];
     MacPtr32 compl, asr;
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
-         defer_rel, imm_err, reenter, open_ok, merged;
+         defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes;
 } P;
 
 static TCPiopb *pr_pb(prec *r) { return (TCPiopb *)r->blk; }
@@ -930,6 +933,37 @@ static MtStream *pb_stream(StreamPtr h) {
 
 static void pb_action(void);
 
+/* Received bytes continue the stream where the previous read stopped (also across no-copy
+ * loans and copies made behind outstanding loans). */
+static void rx_check(int slot, const uint8_t *b, uint32_t n) {
+    pstream *p;
+    uint32_t i;
+    if (slot < 0 || !b) return;
+    p = &P.ps[slot];
+    for (i = 0; i < n; i++) {
+        if (p->rx_valid && b[i] != p->rx_next) { bad("received data out of order or wrong"); return; }
+        p->rx_next = (uint8_t)(b[i] + 1u);
+        p->rx_valid = 1;
+    }
+    P.rx_bytes += n;
+}
+
+static void rx_check_pb(const prec *r, TCPiopb *pb) {
+    if (r->cs == TCPRcv) {
+        rx_check(r->slot, (const uint8_t *)pbf_p(pb->csParam.receive.rcvBuff),
+                 pb->csParam.receive.rcvBuffLen);
+    } else if (r->cs == TCPNoCopyRcv) {
+        const uint8_t *rds = (const uint8_t *)pbf_p(pb->csParam.receive.rdsPtr);
+        int k;
+        for (k = 0; rds && k < PR_DS; k++) {
+            rdsEntry e;
+            memcpy(&e, rds + 6 * k, sizeof e);
+            if (!e.length) break;
+            rx_check(r->slot, (const uint8_t *)pbf_p(e.ptr), e.length);
+        }
+    }
+}
+
 static void pb_reenter(void) {
     if (g.cb_depth >= 3 || rn(3)) return;
     g.cb_depth++;
@@ -950,6 +984,7 @@ static void fz_compl(MtAnyPb *pb) {
     if (r->slot >= 0 && P.ps[r->slot].h != r->h) bad("completion after its stream was released");
     if (r->cs == TCPSend) { if (res == 0) P.ok_send++; else if (res == connectionTerminated) P.term_send++; }
     if (r->cs == TCPRcv && res == 0) P.ok_rcv++;
+    if (res == 0) rx_check_pb(r, (TCPiopb *)pb);
     if (res == commandTimeout) P.tmo++;
     if ((r->cs == TCPActiveOpen || r->cs == TCPPassiveOpen) && res == 0) P.open_ok++;
     if (r->cs == TCPNoCopyRcv && res == 0) { r->loan = 1; P.ok_nocopy++; }
@@ -1051,6 +1086,7 @@ static void act_create(void) {
     if (res == 0) {
         P.ps[slot].h = pb->tcpStream;
         P.ps[slot].live = 1;
+        P.ps[slot].rx_valid = 0;
         memset(P.ps[slot].rbuf, 0, PS_BUF);
     } else if (len >= 4096 && pb->csParam.create.rcvBuff && res != insufficientResources) {
         bad("valid TCPCreate refused");
@@ -1073,8 +1109,10 @@ static void act_open(int passive) {
     pb->csParam.open.ulpTimeoutValue = (int8_t)rn(30);
     pb->csParam.open.ulpTimeoutAction = (int8_t)rn(2);
     pb->csParam.open.commandTimeoutValue = (int8_t)(rn(3) ? 0 : rn(6));
-    if (issue(r, passive ? TCPPassiveOpen : TCPActiveOpen, h, slot) == inProgress && slot >= 0)
+    if (issue(r, passive ? TCPPassiveOpen : TCPActiveOpen, h, slot) == inProgress && slot >= 0) {
         free_loans(slot);                       /* a new connection forgets old loans */
+        P.ps[slot].rx_valid = 0;                /* and its data starts at a new sequence number */
+    }
     if (!r->busy) pr_free(r);
 }
 
@@ -1138,9 +1176,12 @@ static void act_rcv(int nocopy) {
         pb->csParam.receive.rcvBuff = rn(20) ? pbf_a(pr_buf(r) + rn(2)) : 0;
         pb->csParam.receive.rcvBuffLen = (uint16_t)(rn(20) == 0 ? 0 : 1 + rn(PR_BUF - 2));
     }
-    if (issue(r, nocopy ? TCPNoCopyRcv : TCPRcv, h, slot) == 0 && nocopy) {
-        r->loan = 1;
-        P.ok_nocopy++;
+    if (issue(r, nocopy ? TCPNoCopyRcv : TCPRcv, h, slot) == 0) {
+        rx_check_pb(r, pb);
+        if (nocopy) {
+            r->loan = 1;
+            P.ok_nocopy++;
+        }
     }
     if (!r->busy && !r->loan) pr_free(r);
 }
@@ -1182,7 +1223,8 @@ static void act_simple(int16_t cs) {
     }
     res = issue(r, cs, h, slot);
     if (cs == TCPRelease && res == 0 && slot >= 0) {
-        if (g.cb_depth) P.defer_rel++;
+        if (P.d->in_core) P.defer_core++;       /* from a callback of mt_input / mt_tick */
+        else if (g.cb_depth) P.defer_call++;    /* from a call-out of mt_pb_control */
         stream_dead(slot);
     }
     if (!r->busy) pr_free(r);
@@ -1338,8 +1380,8 @@ static void pb_step(uint8_t *f) {
 static void test_fuzz_pb(void) {
     static uint8_t f[1514];
     uint32_t seed;
-    long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, dr = 0,
-         ie = 0, re = 0, op = 0, mg = 0;
+    long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, drc = 0,
+         drp = 0, ie = 0, re = 0, op = 0, mg = 0, early = 0, rx = 0;
     for (seed = 1; seed <= PB_SEEDS; seed++) {
         pb_setup(seed);
         if (!P.d) return;
@@ -1348,18 +1390,21 @@ static void test_fuzz_pb(void) {
         T_EQ(g.bad, 0);
         if (g.bad) fprintf(stderr, "pb fuzz seed %u failed at step %ld\n", (unsigned)seed, g.step);
         sok += P.ok_send; sterm += P.term_send; rok += P.ok_rcv; nc += P.ok_nocopy; ret += P.ret_ok;
-        tmo += P.tmo; ad += P.asr_data; at += P.asr_term; ac += P.asr_closing; dr += P.defer_rel;
-        ie += P.imm_err; re += P.reenter; op += P.open_ok; mg += P.merged;
+        tmo += P.tmo; ad += P.asr_data; at += P.asr_term; ac += P.asr_closing; drc += P.defer_core;
+        drp += P.defer_call; ie += P.imm_err; re += P.reenter; op += P.open_ok; mg += P.merged;
+        early += (long)P.d->early_done; rx += P.rx_bytes;
     }
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "pb: open %ld send ok %ld term %ld rcv ok %ld nocopy %ld returned %ld timeouts %ld "
-                "asr data %ld term %ld closing %ld deferred releases %ld immediate errors %ld "
-                "re-entries %ld sends past the core queue %ld\n",
-                op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, dr, ie, re, mg);
+                "asr data %ld term %ld closing %ld deferred releases in core %ld in call-outs %ld "
+                "immediate errors %ld re-entries %ld sends past the core queue %ld early in merged "
+                "%ld bytes received %ld\n",
+                op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, drc, drp, ie, re, mg, early, rx);
     /* coverage: the run must reach the interesting paths */
     T_CHECK(op > 0); T_CHECK(sok > 0); T_CHECK(sterm > 0); T_CHECK(rok > 0); T_CHECK(nc > 0);
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
-    T_CHECK(dr > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
+    T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
+    T_CHECK(early > 0); T_CHECK(rx > 0);
 }
 
 T_MAIN(test_fuzz_seeds, test_fuzz_clock_wrap, test_fuzz_pb)

@@ -7,12 +7,23 @@
  * (mt_os_irq_save) for its duration, so calls into one MtDrv are serialised. The expected
  * values of every result are those of the real MacTCP 2.1 (docs/dev/MACTCP-REFERENCE-MATRIX.md).
  *
- * Result convention of mt_pb_control: a value <= 0 is the final result of a call that finished
- * inside mt_pb_control (also stored in ioResult); the caller (the driver entry, like IODone)
- * runs the completion routine for it. inProgress (1) means the glue owns the PB: ioResult is 1
- * (or already final) and the glue calls mt_os_complete exactly once, later or already before
- * returning (a TCPRcv that drains the last data completes itself first so the TCPClosing ASR can
- * follow its completion, as MacTCP orders them).
+ * RESULT CONTRACT (authoritative; the driver entry of Task 10 implements exactly this):
+ *  1. At entry the driver takes the PB off the Device Manager's driver queue (and clears the
+ *     driver's busy state) before calling mt_pb_control, so several PBs can be pending at once.
+ *     It never calls jIODone for a PB the glue owns.
+ *  2. r == inProgress (1): the glue owns the PB. The driver returns noErr without reading or
+ *     writing the PB again: it may already be completed (and even reissued by the app from its
+ *     completion routine) before mt_pb_control returns. The glue runs mt_os_complete for it
+ *     exactly once (later, or already inside mt_pb_control when an ASR must follow the
+ *     completion: a TCPRcv that leaves data, matrix 500, or drains it after the FIN, 601).
+ *  3. r <= 0 and r != -28: the call finished inside mt_pb_control and ioResult already holds r.
+ *     The driver runs ioCompletion (if nonzero) once, after mt_pb_control has returned (glue
+ *     depth 0), with A0 = the PB and the same pointer at 4(SP), the app's A5, plain RTS
+ *     (matrix 150), then returns r in D0.
+ *  4. r == -28 (MT_PB_NOTOPEN, driver unconfigured): no completion routine runs (matrix
+ *     "Unconfigured run", U01-U12: the poll sees -28, no C event); ioResult is -28.
+ *  5. mt_os_complete and mt_os_asr are re-entrant (the routine may call the driver again,
+ *     which calls them again) and must not use the Memory Manager (interrupt level).
  *
  * Memory: MtDrv holds everything (stream table, PB queues, the TCPGlobalInfo tables); the core
  * arena follows it in the same block (mt_pb_size). No allocation, no globals. The block must
@@ -85,6 +96,8 @@ struct MtStream {
     uint8_t   fin;              /* the peer's FIN has arrived */
     uint8_t   closing_sent;     /* TCPClosing ASR delivered */
     uint8_t   close_deferred;   /* TCPClose waits for queued PB bytes to reach the core */
+    uint8_t   in_data_asr;      /* a TCPDataArrival ASR of this stream is running */
+    uint8_t   data_due;         /* ...and another one is due when it returns (no recursion) */
     uint8_t   ulp_s, ulp_abort, tos, prec;
     /* open / close */
     MtAnyPb  *open_pb;
@@ -115,6 +128,7 @@ struct MtDrv {
     uint16_t  rel_mask;         /* streams whose core release is deferred */
     uint32_t  now;
     uint32_t  reenter_drops;    /* input/tick calls refused because the core was already running */
+    uint32_t  early_done;       /* TCPSend PBs completed before their merged core request's done */
     MtStream  tcp[MT_PB_MAX_TCP];
     TCPParam  gparam;           /* TCPGlobalInfo hands out pointers to these */
     TCPStats  gstats;

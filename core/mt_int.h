@@ -399,6 +399,12 @@ uint16_t mt_tcp_local_mss(const mt_stack *s);
 static inline uint32_t mt_tcp_sq_total(const mt_tcp *t) {
     return t->sq_n == 0 ? 0u : t->sq_n == 1 ? t->sq[0].left : t->sq[0].left + t->sq[1].left;
 }
+/* Data bytes sent and not yet ACKed: snd_max - snd_una without the FIN's sequence number while
+ * the FIN is outstanding (an ACKed FIN leaves 0, never -1). */
+static inline uint32_t mt_tcp_data_out(const mt_tcp *t) {
+    uint32_t out = t->snd_max - t->snd_una;
+    return ((t->flags & MT_TF_FINSENT) && out) ? out - 1u : out;
+}
 static inline uint32_t mt_tcp_pseudo(mt_ip4 src, mt_ip4 dst, uint16_t len) {
     return (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + 6u + len;
 }

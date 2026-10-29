@@ -59,8 +59,8 @@ typedef struct {
 void     pbt_init(pbt *x, int configured);
 /* A zeroed TCPiopb (fake memory) with csCode, stream and a recording completion routine. */
 TCPiopb *pbt_pb(int16_t cs, StreamPtr s);
-/* Device Manager model: mt_pb_control; a result other than inProgress is stored and the
- * completion routine is run, as IODone would. Returns the result. */
+/* Driver-entry model (mt_pb.h result contract): mt_pb_control; a result other than
+ * inProgress and -28 is stored and the completion routine is run, as IODone would. */
 int16_t  pbt_call(pbt *x, TCPiopb *pb);
 /* Scripted peer: T_PEER port PBT_PEER_PORT, MSS 1460 on SYNs. */
 #define PBT_PEER_PORT 23

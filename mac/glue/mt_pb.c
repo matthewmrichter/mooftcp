@@ -48,7 +48,7 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
 /* Perform the core releases that were deferred while a glue frame was active. */
 static void flush_deferred(MtDrv *d) {
     uint8_t i;
-    if (d->depth || !d->rel_mask) return;
+    if (d->depth || d->in_core || !d->rel_mask) return;
     for (i = 0; i < d->ntcp; i++)
         if (d->rel_mask & (1u << i)) {
             d->rel_mask &= (uint16_t)~(1u << i);
