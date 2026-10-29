@@ -1,31 +1,31 @@
 #include "mt_util.h"
 
-/* All utilities are static inline in mt_util.h; this unit keeps the header
- * compiled under the strict flags and gives mtcore a source from day one. */
+#include <string.h>
 
+#ifndef MT_ASM_CKSUM
+/* Canonical 16-bit ones-complement fold: 0 stays 0, any other value maps to 1..0xFFFF. */
+static uint32_t cksum_canon(uint32_t x) {
+    x = (x & 0xFFFFu) + (x >> 16);
+    return (x & 0xFFFFu) + (x >> 16);
+}
+
+/* Portable versions. The Mac build defines MT_ASM_CKSUM and links mac/glue/mt_cksum68k.s,
+ * which must return bit-identical results (contract in mt_util.h, pinned by tests/test_util.c).
+ * The carried-in sum is folded first so the 32-bit accumulator cannot overflow for
+ * len <= 65535 (it stays below 0x1FFFE + 32768 * 0xFFFF). */
 uint32_t mt_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len) {
+    sum = (sum & 0xFFFFu) + (sum >> 16);
     while (len > 1) {
         sum += ((uint32_t)p[0] << 8) | p[1];
         p += 2;
         len -= 2;
     }
     if (len) sum += (uint32_t)p[0] << 8;
-    return sum;
-}
-
-uint16_t mt_cksum_fold(uint32_t sum) {
-    sum = (sum & 0xFFFFu) + (sum >> 16);
-    sum = (sum & 0xFFFFu) + (sum >> 16);
-    return (uint16_t)~sum;
-}
-
-uint32_t mt_cksum_odd(uint32_t part) {
-    part = (part & 0xFFFFu) + (part >> 16);
-    part = (part & 0xFFFFu) + (part >> 16);
-    return ((part << 8) | (part >> 8)) & 0xFFFFu;
+    return cksum_canon(sum);
 }
 
 uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len) {
+    sum = (sum & 0xFFFFu) + (sum >> 16);
     while (len > 1) {
         uint8_t a = src[0], b = src[1];
         dst[0] = a;
@@ -39,7 +39,20 @@ uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t 
         dst[0] = src[0];
         sum += (uint32_t)src[0] << 8;
     }
-    return sum;
+    return cksum_canon(sum);
+}
+#endif
+
+uint16_t mt_cksum_fold(uint32_t sum) {
+    sum = (sum & 0xFFFFu) + (sum >> 16);
+    sum = (sum & 0xFFFFu) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+uint32_t mt_cksum_odd(uint32_t part) {
+    part = (part & 0xFFFFu) + (part >> 16);
+    part = (part & 0xFFFFu) + (part >> 16);
+    return ((part << 8) | (part >> 8)) & 0xFFFFu;
 }
 
 void mt_ring_init(mt_ring *r, uint8_t *mem, uint32_t size) {
@@ -53,10 +66,10 @@ uint32_t mt_ring_free(const mt_ring *r) { return r->size - r->used; }
 
 /* Copy n bytes into the ring starting at physical index pos (< size), wrapping. */
 static void ring_put(mt_ring *r, uint32_t pos, const uint8_t *p, uint32_t n) {
-    uint32_t first = r->size - pos, i;
+    uint32_t first = r->size - pos;
     if (first > n) first = n;
-    for (i = 0; i < first; i++) r->base[pos + i] = p[i];
-    for (i = first; i < n; i++) r->base[i - first] = p[i];
+    memcpy(r->base + pos, p, first);
+    memcpy(r->base, p + first, n - first);
 }
 
 uint32_t mt_ring_write_at(mt_ring *r, uint32_t off, const uint8_t *p, uint32_t n) {
@@ -99,10 +112,10 @@ uint32_t mt_ring_read(mt_ring *r, uint8_t *dst, uint32_t n) {
     uint32_t got = 0;
     while (got < n) {
         const uint8_t *p;
-        uint32_t run = mt_ring_peek(r, 0, &p), i;
+        uint32_t run = mt_ring_peek(r, 0, &p);
         if (run == 0) break;
         if (run > n - got) run = n - got;
-        for (i = 0; i < run; i++) dst[got + i] = p[i];
+        memcpy(dst + got, p, run);
         got += run;
         mt_ring_consume(r, run);
     }

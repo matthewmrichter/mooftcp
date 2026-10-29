@@ -29,18 +29,25 @@ static inline int mt_seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <=
 static inline int mt_seq_gt(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 static inline int mt_seq_ge(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
 
-/* Internet checksum (RFC 1071). Bytes are summed as big-endian 16-bit words;
- * an odd trailing byte is the high byte of a word, so only the last chunk of
- * a chained sum may have odd length. */
+/* Internet checksum (RFC 1071). Bytes are summed as big-endian 16-bit words counted from p
+ * (not from the address parity); an odd trailing byte is the high byte of a word, so only the
+ * last chunk of a chained sum may have odd length. The result is canonical: the 16-bit
+ * ones-complement sum of the carried-in sum (any uint32) and the words, in 0..0xFFFF, 0 only if
+ * the sum and all bytes are 0, otherwise in 1..0xFFFF. Callers may add results (and chain them
+ * as the next sum) freely. Precondition: len <= 65535. The Mac build replaces mt_cksum_add and
+ * mt_cksum_copy with 68000 asm (MT_ASM_CKSUM, mac/glue/mt_cksum68k.s) that returns
+ * bit-identical results; tests/test_util.c pins the contract. */
 uint32_t mt_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len);
 uint16_t mt_cksum_fold(uint32_t sum);
-/* Copy and checksum in one pass (separate symbol so Plan 2 can override with asm). */
+/* Copy and checksum in one pass; same result as mt_cksum_add over src. src and dst may have
+ * any alignment but must not overlap. */
 uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len);
 /* A chunk sum computed as if it started at an even stream offset, re-based to an odd one
  * (fold to 16 bits, swap the bytes). Add the result to the running sum. */
 uint32_t mt_cksum_odd(uint32_t part);
 
-/* Byte ring buffer. head = index of first used byte. */
+/* Byte ring buffer. head = index of first used byte. Copies in and out use memcpy (the
+ * Retro68 newlib memcpy moves long words when both pointers are even). */
 typedef struct { uint8_t *base; uint32_t size, head, used; } mt_ring;
 void mt_ring_init(mt_ring *r, uint8_t *mem, uint32_t size);
 uint32_t mt_ring_free(const mt_ring *r);
