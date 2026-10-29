@@ -366,7 +366,44 @@ static void unconfigured_ip_calls_per_matrix(void) {
     }
 }
 
+/* PBs in EXACT-size heap blocks (ASan sees any byte read or written past the documented size). */
+static int16_t exact_call(pbt *x, const void *pb, size_t n) {
+    void *h = malloc(n);
+    int16_t r;
+    memcpy(h, pb, n);
+    r = mt_pb_control(x->d, (MtAnyPb *)h);
+    free(h);
+    return r;
+}
+
+static void exact_size_pbs(void) {
+    pbt x;
+    IPParamBlock *pb;
+    uint8_t *mem;
+    pbt_init(&x, 1);
+    memset(&g_nt, 0, sizeof g_nt);
+    T_EQ(sizeof(GetAddrParamBlock), 36);
+    T_EQ(sizeof(IPParamBlock), 54);
+    T_EQ(exact_call(&x, pbt_pb(ipctlGetAddr, 0), sizeof(GetAddrParamBlock)), 0);
+    mem = (uint8_t *)pbf_alloc(sizeof(LAPStats));
+    pb = ipb(ipctlLAPStats);
+    pb->csParam.LAPStatsPB.lapStatsPtr = pbf_a(mem);
+    T_EQ(exact_call(&x, pb, sizeof(IPParamBlock)), 0);
+    pb = ipb(ipctlLAPStats);
+    T_EQ(exact_call(&x, pb, sizeof(IPParamBlock)), invalidBufPtr);
+    pb = echo_pb(&x, T_PEER, "abcd", 4, 3, 1);
+    T_EQ(exact_call(&x, pb, sizeof(IPParamBlock)), 0);   /* the 54-byte echo PB: no over-read */
+    pb = echo_pb(&x, T_PEER, "abcd", 4, 3, 1);
+    pb->csParam.IPEchoPB.userDataPtr = 0x1234;
+    T_EQ(exact_call(&x, pb, sizeof(IPParamBlock)), 0);
+    pbf_now += 3000;
+    mt_pb_tick(x.d);
+    T_EQ(g_nt.n, 2);                                      /* both notify (timeout), from the driver's block */
+    T_EQ(g_nt.blk[0].icmpEchoInfo.userDataPtr, 0);        /* not carried over from the app's PB */
+    T_EQ(pbf_bad, 0);
+}
+
 T_MAIN(get_my_ip_addr, echo_icmp_roundtrip_and_timeout, echo_argument_rules,
        echo_reissue_from_notify, get_tcp_global_info_counts_open,
        icmp_stats_and_lap_stats_fields_from_mt_stats, unknown_cscode_returns_matrix_error,
-       unconfigured_ip_calls_per_matrix)
+       unconfigured_ip_calls_per_matrix, exact_size_pbs)

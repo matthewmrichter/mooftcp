@@ -520,7 +520,65 @@ static void release_inside_callbacks(void) {
     T_EQ(pbf_irq, 0);
 }
 
+/* Every UDP csCode with its PB in an exact-size (58 byte) heap block. */
+static int16_t uexact(pbt *x, const UDPiopb *pb) {
+    void *h = malloc(sizeof(UDPiopb));
+    int16_t r;
+    memcpy(h, pb, sizeof(UDPiopb));
+    r = mt_pb_control(x->d, (MtAnyPb *)h);
+    memcpy((void *)pb, h, sizeof(UDPiopb));               /* outputs back to the fake-memory copy */
+    free(h);
+    return r;
+}
+
+static void exact_size_pbs(void) {
+    pbt x;
+    StreamPtr s;
+    uint16_t port = 0;
+    UDPiopb *pb;
+    uint8_t *buf;
+    int16_t cs;
+    T_EQ(sizeof(UDPiopb), 58);
+    pbt_init(&x, 1);
+    buf = (uint8_t *)pbf_alloc(2048);
+    pb = upb(UDPCreate, 0);
+    pb->csParam.create.rcvBuff = pbf_a(buf);
+    pb->csParam.create.rcvBuffLen = 2048;
+    T_EQ(uexact(&x, pb), 0);
+    s = pb->udpStream;
+    port = pb->csParam.create.localPort;
+    T_CHECK(s != 0);
+    pbt_udp_in(&x, PEERPORT, port, "abc", 3);
+    pb = upb(UDPRead, s);
+    T_EQ(uexact(&x, pb), 0);
+    pbf_nlog = 0;
+    {
+        UDPiopb *b = upb(UDPBfrReturn, s);
+        b->csParam.receive.rcvBuff = pb->csParam.receive.rcvBuff;
+        T_EQ(uexact(&x, b), 0);
+    }
+    {   /* UDPWrite with a one-entry WDS */
+        wdsEntry *w = (wdsEntry *)pbf_alloc(2 * sizeof(wdsEntry)), e[2];
+        e[0].length = 3; e[0].ptr = pbf_a(buf);
+        e[1].length = 0; e[1].ptr = 0;
+        memcpy(w, e, sizeof e);
+        pb = upb(UDPWrite, s);
+        pb->csParam.send.remoteHost = T_PEER;
+        pb->csParam.send.remotePort = PEERPORT;
+        pb->csParam.send.wdsPtr = pbf_a(w);
+        T_EQ(uexact(&x, pb), 0);
+    }
+    T_EQ(uexact(&x, upb(UDPMaxMTUSize, 0)), 0);
+    T_EQ(uexact(&x, upb(UDPStatus, 0)), 0);
+    for (cs = UDPMultiCreate; cs <= UDPMultiRead; cs++) uexact(&x, upb(cs, s));
+    uexact(&x, upb(UDPRead, 0));
+    pb = upb(UDPRelease, s);
+    T_EQ(uexact(&x, pb), 0);
+    T_EQ(pb->csParam.create.rcvBuffLen, 2048);
+    T_EQ(pbf_bad, 0);
+}
+
 T_MAIN(create_min_buffer_and_port_rules, create_with_port0_assigns, write_read_roundtrip,
        data_arrival_asr_and_read_at_once, read_timeout_completes_with_matrix_error,
        release_completes_pending_read, rcv_buffer_return, write_variants, mtu_call,
-       stream_check_sweep, icmp_report_asr, release_inside_callbacks)
+       stream_check_sweep, icmp_report_asr, release_inside_callbacks, exact_size_pbs)

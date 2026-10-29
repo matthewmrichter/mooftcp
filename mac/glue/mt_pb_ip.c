@@ -79,7 +79,10 @@ static int16_t do_echo(MtDrv *d, MtAnyPb *pb) {
     if (r == MT_ERR_NOMEM) return insufficientResources;
     if (r != MT_OK) return ipRouteErr;
     memset(e, 0, sizeof *e);
-    memcpy(&e->blk, pb, sizeof e->blk);                      /* MacTCP's own copy of the block */
+    /* MacTCP's own copy of the block: only the IPParamBlock part (28-byte header + IPEchoPB = 54
+     * bytes) is read from the app's PB, which may be exactly that big; the rest stays zero
+     * (icmpEchoInfo is the driver's to fill; the app's own copy of it stays 0, matrix ICMP echo notify). */
+    memcpy(&e->blk, pb, offsetof(IPParamBlock, csParam) + sizeof(IPEchoPB));
     e->blk.ioCompletion = pb->ip.csParam.IPEchoPB.icmpCompletion;
     e->id = (uint16_t)(0x4D00u + i);
     e->seq = d->echo_seq;

@@ -1164,8 +1164,16 @@ static void act_echo(void) {
     pb->csParam.IPEchoPB.data.ptr = len && rn(40) ? pbf_a(pr_buf(r)) : 0;
     pb->csParam.IPEchoPB.timeout = (int16_t)(rn(8) == 0 ? -1 : (int)rn(6));
     pb->csParam.IPEchoPB.icmpCompletion = rn(5) ? P.compl : 0;
-    res = issue_ex(r, ipctlEchoICMP, 0, -1, -1, 0);
-    if (res == 0 && pb->csParam.IPEchoPB.icmpCompletion) P.echo_sent++;
+    {   /* the PB sits in an exact-size heap block: any read past 54 bytes is an ASan error.
+         * An immediate result never runs the completion routine, so r is not busy afterwards. */
+        void *h = malloc(sizeof(IPParamBlock));
+        memcpy(h, pb, sizeof(IPParamBlock));
+        ((IPParamBlock *)h)->csCode = ipctlEchoICMP;
+        res = mt_pb_control(P.d, (MtAnyPb *)h);
+        free(h);
+        if (res == inProgress) bad("ICMPEcho returned inProgress");
+        if (res == 0 && pb->csParam.IPEchoPB.icmpCompletion) P.echo_sent++;
+    }
     if (!r->busy) pr_free(r);
 }
 
