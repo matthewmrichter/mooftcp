@@ -875,7 +875,7 @@ static void test_fuzz_clock_wrap(void) {
 
 typedef struct {
     uint8_t *blk;              /* PB, then buffer, then the WDS/RDS array (fake memory) */
-    int busy, loan, incall, slot;
+    int busy, loan, incall, slot, uslot;
     long ncompl;
     StreamPtr h;
     int16_t cs;
@@ -885,11 +885,23 @@ typedef struct {
     int rx_valid; uint8_t rx_next;   /* peer data is the low byte of its sequence number: reads */
 } pstream;                           /* must hand it out contiguously, in stream order */
 
+#define US_N 4
+#define US_BUF 4100
+typedef struct {
+    StreamPtr h; uint8_t *buf; int live;
+    uint32_t len; uint16_t port;
+    MacPtr32 base;                   /* the receive buffer given to UDPCreate */
+    MacPtr32 loan;                   /* the datagram lent by the last completed UDPRead */
+} ustream;
+
 static struct {
     MtDrv *d;
     prec r[PR_N];
     pstream ps[PS_N];
-    MacPtr32 compl, asr;
+    ustream us[US_N];
+    long u_read_ok, u_tmo, u_write_ok, u_ret_ok, u_asr, u_rel_pending, u_in, echo_sent, echo_ok,
+         echo_tmo, u_lent;
+    MacPtr32 compl, asr, uasr;
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
          defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes;
 } P;
@@ -917,7 +929,7 @@ static prec *pr_get(void) {
         memset(r->blk, 0, PR_BLK);
         pr_pb(r)->ioCompletion = P.compl;
         pr_pb(r)->ioNamePtr = (MacPtr32)(k + 1);
-        r->slot = -1;
+        r->slot = r->uslot = -1;
         r->h = 0;
         return r;
     }
@@ -929,6 +941,245 @@ static MtStream *pb_stream(StreamPtr h) {
     for (i = 0; i < P.d->ntcp; i++)
         if (P.d->tcp[i].used == 1 && P.d->tcp[i].handle == h) return &P.d->tcp[i];
     return NULL;
+}
+
+/* ---- UDP and ICMP echo through the PB interface ---- */
+
+static int16_t issue_ex(prec *r, int16_t cs, StreamPtr h, int slot, int uslot, int set_stream);
+static void u_lend(int uslot, MacPtr32 key, uint32_t len);
+static void pb_udp_invariants(void);
+
+static StreamPtr pick_uhandle(int *uslot) {
+    int i, k = (int)rn(US_N);
+    *uslot = -1;
+    if (rn(12) == 0) return rn(3) == 0 ? 0 : rn(2) ? rnd() : P.us[k].h + 2u;
+    for (i = 0; i < US_N; i++, k = (k + 1) % US_N)
+        if (P.us[k].live) { *uslot = k; return P.us[k].h; }
+    return 0;
+}
+
+static void ustream_dead(int slot) {
+    int k;
+    for (k = 0; k < PR_N; k++)
+        if (P.r[k].uslot == slot && P.r[k].busy && !P.r[k].incall) bad("PB still pending after UDPRelease returned");
+    P.us[slot].live = 0;
+    P.us[slot].h = 0;
+    P.us[slot].loan = 0;
+    memset(P.us[slot].buf, CAN2, US_BUF);
+}
+
+static void act_ucreate(void) {
+    int slot = -1, k, k0 = (int)rn(US_N);
+    prec *r;
+    UDPiopb *pb;
+    int16_t res;
+    uint32_t len;
+    uint16_t port;
+    for (k = 0; k < US_N; k++) if (!P.us[(k0 + k) % US_N].live) { slot = (k0 + k) % US_N; break; }
+    if (slot < 0 || !(r = pr_get())) return;
+    pb = (UDPiopb *)pr_pb(r);
+    canary_check(P.us[slot].buf, US_BUF, "receive buffer of a released UDP stream was written");
+    len = rn(10) == 0 ? rn(2100) : 2048 + rn(US_BUF - 2048 - 1);
+    port = (uint16_t)(rn(3) == 0 ? 0 : rn(2) ? 7 : 1000 + rn(3));
+    pb->csParam.create.rcvBuff = rn(20) ? pbf_a(P.us[slot].buf + rn(2)) : 0;
+    pb->csParam.create.rcvBuffLen = len;
+    pb->csParam.create.notifyProc = rn(8) ? P.uasr : 0;
+    pb->csParam.create.localPort = port;
+    pb->csParam.create.userDataPtr = (MacPtr32)(slot + 1);
+    res = issue_ex(r, UDPCreate, 0, -1, -1, 0);
+    if (res == 0) {
+        P.us[slot].h = pb->udpStream;
+        P.us[slot].live = 1;
+        P.us[slot].loan = 0;
+        P.us[slot].len = len;
+        P.us[slot].base = pb->csParam.create.rcvBuff;
+        P.us[slot].port = pb->csParam.create.localPort;
+        memset(P.us[slot].buf, 0, US_BUF);
+    } else if (len >= 2048 && pb->csParam.create.rcvBuff && port == 0 && res != insufficientResources) {
+        bad("valid UDPCreate refused");
+    } else if (len < 2048 && res != invalidLength) {
+        bad("short UDP buffer not refused");
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void act_uread(void) {
+    int uslot;
+    StreamPtr h = pick_uhandle(&uslot);
+    prec *r = pr_get();
+    UDPiopb *pb;
+    int16_t res;
+    if (!r) return;
+    pb = (UDPiopb *)pr_pb(r);
+    pb->csParam.receive.timeOut = (uint16_t)(rn(3) ? 0 : 1 + rn(4));
+    res = issue_ex(r, UDPRead, h, -1, uslot, 1);
+    if (res == 0 && uslot >= 0) {
+        P.u_read_ok++;
+        u_lend(uslot, pb->csParam.receive.rcvBuff, pb->csParam.receive.rcvBuffLen);
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void act_uwrite(void) {
+    int uslot, i, ne = (int)rn(4);
+    StreamPtr h = pick_uhandle(&uslot);
+    prec *r = pr_get();
+    UDPiopb *pb;
+    wdsEntry e;
+    uint32_t pos = rn(2), j;
+    int16_t res;
+    if (!r) return;
+    pb = (UDPiopb *)pr_pb(r);
+    memset(pr_buf(r), 0x11, PR_BUF);
+    for (i = 0; i < ne; i++) {
+        uint32_t len = rn(5) == 0 ? 0 : rn(6) == 0 ? 1400 : rn(300);
+        if (pos + len > PR_BUF) len = pos < PR_BUF ? PR_BUF - pos : 0;
+        e.length = (uint16_t)len;
+        e.ptr = rn(40) ? pbf_a(pr_buf(r) + pos) : 0;
+        memcpy(pr_ds(r) + i * 6, &e, 6);
+        if (len == 0) break;
+        for (j = 0; j < len; j++) pr_buf(r)[pos + j] = (uint8_t)(0x11 + j % 7);
+        pos += len;
+    }
+    if (i == ne) {
+        e.length = 0; e.ptr = 0;
+        memcpy(pr_ds(r) + i * 6, &e, 6);
+    }
+    pb->csParam.send.remoteHost = rn(8) ? PEER : (rn(2) ? T_FAR : 0);
+    pb->csParam.send.remotePort = (uint16_t)(rn(3) ? 17007 : rn(65536));
+    pb->csParam.send.wdsPtr = rn(30) ? pbf_a(pr_ds(r)) : 0;
+    pb->csParam.send.checkSum = (uint8_t)rn(2);
+    res = issue_ex(r, UDPWrite, h, -1, uslot, 1);
+    if (res == 0) P.u_write_ok++;
+    if (!r->busy) pr_free(r);
+}
+
+static void act_ubfr(void) {
+    int uslot, k = (int)rn(US_N), i;
+    prec *r;
+    UDPiopb *pb;
+    int16_t res;
+    StreamPtr h;
+    for (i = 0; i < US_N; i++, k = (k + 1) % US_N) if (P.us[k].live && P.us[k].loan) break;
+    if (i == US_N || !(r = pr_get())) return;
+    uslot = k;
+    h = P.us[k].h;
+    pb = (UDPiopb *)pr_pb(r);
+    if (rn(8) == 0) {                                   /* a made-up pointer first */
+        pb->csParam.receive.rcvBuff = P.us[k].loan ^ 0x10u;
+        res = issue_ex(r, UDPBfrReturn, h, -1, uslot, 1);
+        if (res == 0) bad("a made-up datagram pointer was accepted");
+        if (!r->busy) pr_free(r);
+        if (!(r = pr_get())) return;
+        pb = (UDPiopb *)pr_pb(r);
+        if (!P.us[k].live || !P.us[k].loan) { pr_free(r); return; }
+    }
+    {
+        MacPtr32 key = P.us[k].loan;
+        pb->csParam.receive.rcvBuff = key;
+        P.us[k].loan = 0;                       /* returned: the call itself may lend the next datagram */
+        res = issue_ex(r, UDPBfrReturn, h, -1, uslot, 1);
+        if (res == 0) {
+            P.u_ret_ok++;
+        } else {
+            int glue_live = 0;
+            uint8_t q;
+            for (q = 0; q < P.d->nudp; q++) glue_live |= P.d->udp[q].used == 1 && P.d->udp[q].handle == h;
+            if (glue_live || res != invalidStreamPtr)    /* (else: released by a nested call, not yet known here) */
+                bad("returning the lent datagram failed");
+            if (P.us[k].live && P.us[k].h == h && !P.us[k].loan) P.us[k].loan = key;
+        }
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void act_urelease(void) {
+    int uslot;
+    StreamPtr h = pick_uhandle(&uslot);
+    prec *r = pr_get();
+    int16_t res;
+    if (!r) return;
+    res = issue_ex(r, UDPRelease, h, -1, uslot, 1);
+    if (res == 0 && uslot >= 0) ustream_dead(uslot);
+    if (!r->busy) pr_free(r);
+}
+
+static void act_uother(void) {
+    static const int16_t cs[] = {UDPMaxMTUSize, UDPStatus, UDPMultiCreate, UDPMultiSend, UDPMultiRead,
+                                 UDPCreate, UDPRead, UDPWrite, UDPBfrReturn};
+    int uslot;
+    StreamPtr h = pick_uhandle(&uslot);
+    prec *r = pr_get();
+    int16_t c = cs[rn(sizeof cs / sizeof cs[0])];
+    if (!r) return;
+    if (c == UDPRead || c == UDPWrite || c == UDPBfrReturn || c == UDPCreate) h = 0, uslot = -1;   /* the real actions do these */
+    issue_ex(r, c, h, -1, uslot, 1);
+    if (!r->busy) pr_free(r);
+}
+
+static void act_echo(void) {
+    prec *r = pr_get();
+    IPParamBlock *pb;
+    uint32_t len = rn(4) == 0 ? rn(1600) : rn(80), j;
+    int16_t res;
+    if (!r) return;
+    pb = (IPParamBlock *)pr_pb(r);
+    if (len > PR_BUF) len = PR_BUF;
+    for (j = 0; j < len; j++) pr_buf(r)[j] = (uint8_t)(0x20 + j);
+    pb->csParam.IPEchoPB.dest = rn(5) ? PEER : (rn(2) ? GW : rn(2) ? T_FAR : 0);
+    pb->csParam.IPEchoPB.data.length = (uint16_t)len;
+    pb->csParam.IPEchoPB.data.ptr = len && rn(40) ? pbf_a(pr_buf(r)) : 0;
+    pb->csParam.IPEchoPB.timeout = (int16_t)(rn(8) == 0 ? -1 : (int)rn(6));
+    pb->csParam.IPEchoPB.icmpCompletion = rn(5) ? P.compl : 0;
+    res = issue_ex(r, ipctlEchoICMP, 0, -1, -1, 0);
+    if (res == 0 && pb->csParam.IPEchoPB.icmpCompletion) P.echo_sent++;
+    if (!r->busy) pr_free(r);
+}
+
+static void act_ipmisc(void) {
+    prec *r = pr_get();
+    LAPStats *ls = (LAPStats *)(pr_buf(r ? r : &P.r[0]) + 1);
+    int16_t res, c = (int16_t)(rn(2) ? ipctlGetAddr : ipctlLAPStats);
+    if (!r) return;
+    if (c == ipctlLAPStats) ((IPParamBlock *)pr_pb(r))->csParam.LAPStatsPB.lapStatsPtr = rn(10) ? pbf_a(ls) : 0;
+    res = issue_ex(r, c, 0, -1, -1, 0);
+    if (c == ipctlGetAddr && res != 0) bad("GetMyIPAddr failed");
+    if (!r->busy) pr_free(r);
+}
+
+/* A datagram from the peer to one of our ports (and, sometimes, a matching or stray echo reply). */
+static uint16_t gen_pb_udp(uint8_t *f) {
+    uint8_t pl[800];
+    uint16_t dl = (uint16_t)(rn(5) == 0 ? 0 : rn(700)), i, dport = 0;
+    int k = (int)rn(US_N), n;
+    for (n = 0; n < US_N; n++, k = (k + 1) % US_N) if (P.us[k].live) { dport = P.us[k].port; break; }
+    if (!dport || rn(10) == 0) dport = (uint16_t)(rn(2) ? 7 : 1 + rn(65535));
+    mt_wr16(pl, (uint16_t)(rn(2) ? 17007 : 1 + rn(65535)));
+    mt_wr16(pl + 2, dport);
+    mt_wr16(pl + 4, (uint16_t)(8 + dl));
+    mt_wr16(pl + 6, 0);
+    for (i = 0; i < dl; i++) pl[8 + i] = (uint8_t)rnd();
+    if (rn(4)) {
+        uint32_t sum = (PEER >> 16) + (PEER & 0xFFFFu) + (ME >> 16) + (ME & 0xFFFFu) + 17u + 8u + dl;
+        uint16_t c = mt_cksum_fold(mt_cksum_add(sum, pl, 8u + dl));
+        mt_wr16(pl + 6, c ? c : 0xFFFFu);
+    }
+    P.u_in++;
+    return mk_ip(f, PEER, ME, 17, (uint16_t)rnd(), 0, pl, (uint16_t)(8 + dl));
+}
+
+static uint16_t gen_pb_echo_reply(uint8_t *f) {
+    uint8_t pl[100];
+    uint16_t i, l = (uint16_t)(8 + rn(60));
+    const MtEcho *e = &P.d->echo[rn(MT_PB_ECHOQ)];
+    for (i = 0; i < l; i++) pl[i] = (uint8_t)rnd();
+    pl[0] = 0;
+    pl[1] = 0;
+    mt_wr16(pl + 4, e->state ? e->id : (uint16_t)rnd());
+    mt_wr16(pl + 6, (uint16_t)(e->seq + (rn(6) == 0)));
+    mt_wr16(pl + 2, 0);
+    mt_wr16(pl + 2, mt_cksum_fold(mt_cksum_add(0, pl, l)));
+    return mk_ip(f, rn(6) ? e->dest : PEER, ME, 1, (uint16_t)rnd(), 0, pl, l);
 }
 
 static void pb_action(void);
@@ -972,16 +1223,40 @@ static void pb_reenter(void) {
     g.cb_depth--;
 }
 
+static void u_lend(int uslot, MacPtr32 key, uint32_t len) {
+    ustream *u = &P.us[uslot];
+    if (u->loan) bad("a second datagram was lent while one is outstanding");
+    if (key < u->base || key + len > u->base + u->len) bad("lent datagram lies outside the receive buffer");
+    u->loan = key;
+    P.u_lent++;
+}
+
 static void fz_compl(MtAnyPb *pb) {
     uint32_t k = pb->hdr.ioNamePtr - 1u;
     prec *r;
     int16_t res = pb->hdr.ioResult;
+    if ((uint8_t *)pb >= (uint8_t *)P.d->echo && (uint8_t *)pb < (uint8_t *)(P.d->echo + MT_PB_ECHOQ)) {
+        if (pb->hdr.csCode != ipctlEchoICMP || (res != 0 && res != icmpEchoTimeoutErr)) bad("bad echo notify block");
+        if (res == 0) P.echo_ok++; else P.echo_tmo++;
+        if (P.echo_ok + P.echo_tmo > P.echo_sent) bad("echo notified more often than requested");
+        pb_reenter();
+        return;
+    }
     if (k >= PR_N) { bad("completion for an unknown PB"); return; }
     r = &P.r[k];
     if (!r->busy) { bad("completion of a PB that is not pending (twice, or after an immediate result)"); return; }
     r->busy = 0;
     r->ncompl++;
     if (r->slot >= 0 && P.ps[r->slot].h != r->h) bad("completion after its stream was released");
+    if (r->uslot >= 0) {
+        if (P.us[r->uslot].h != r->h) bad("UDP completion after its stream was released");
+        if (r->cs == UDPRead && res == 0) {
+            P.u_read_ok++;
+            u_lend(r->uslot, ((UDPiopb *)pb)->csParam.receive.rcvBuff, ((UDPiopb *)pb)->csParam.receive.rcvBuffLen);
+        }
+        if (r->cs == UDPRead && res == commandTimeout) P.u_tmo++;
+        if (r->cs == UDPRead && res == connectionTerminated) P.u_rel_pending++;
+    }
     if (r->cs == TCPSend) { if (res == 0) P.ok_send++; else if (res == connectionTerminated) P.term_send++; }
     if (r->cs == TCPRcv && res == 0) P.ok_rcv++;
     if (res == 0) rx_check_pb(r, (TCPiopb *)pb);
@@ -989,6 +1264,19 @@ static void fz_compl(MtAnyPb *pb) {
     if ((r->cs == TCPActiveOpen || r->cs == TCPPassiveOpen) && res == 0) P.open_ok++;
     if (r->cs == TCPNoCopyRcv && res == 0) { r->loan = 1; P.ok_nocopy++; }
     if (!r->incall && !r->loan) pr_free(r);
+    pb_reenter();
+}
+
+static void fz_uasr(StreamPtr s, uint16_t ev, MacPtr32 user, uint16_t reason, MacPtr32 icmp) {
+    int slot = (int)user - 1, k;
+    (void)reason; (void)icmp;
+    if (slot < 0 || slot >= US_N || P.us[slot].h != s) { bad("UDP ASR for an unknown stream"); return; }
+    if (ev == UDPDataArrival) {
+        P.u_asr++;
+        for (k = 0; k < PR_N; k++)
+            if (P.r[k].busy && !P.r[k].incall && P.r[k].uslot == slot && P.r[k].cs == UDPRead)
+                bad("UDPDataArrival while a read is pending");
+    }
     pb_reenter();
 }
 
@@ -1042,15 +1330,16 @@ static void free_loans(int slot) {
 }
 
 /* Issue a PB: busy before the call (its completion may run inside), then the result. */
-static int16_t issue(prec *r, int16_t cs, StreamPtr h, int slot) {
+static int16_t issue_ex(prec *r, int16_t cs, StreamPtr h, int slot, int uslot, int set_stream) {
     TCPiopb *pb = pr_pb(r);
     long nc = r->ncompl;
     int16_t res;
     pb->csCode = cs;
-    pb->tcpStream = h;
+    if (set_stream) pb->tcpStream = h;
     r->cs = cs;
     r->h = h;
     r->slot = slot;
+    r->uslot = uslot;
     r->busy = 1;
     r->incall = 1;
     res = mt_pb_control(P.d, (MtAnyPb *)pb);
@@ -1063,9 +1352,14 @@ static int16_t issue(prec *r, int16_t cs, StreamPtr h, int slot) {
         if (slot < 0 && cs >= TCPPassiveOpen && cs <= TCPRelease && cs != TCPGlobalInfo &&
             res != invalidStreamPtr && !pb_stream(h))
             bad("bad stream not refused with invalidStreamPtr");
+        if (set_stream && slot < 0 && uslot < 0 && (cs == UDPRead || cs == UDPBfrReturn || cs == UDPWrite ||
+            cs == UDPRelease || cs == UDPMultiSend || cs == UDPMultiRead) && res != invalidStreamPtr)
+            bad("bad UDP stream not refused with invalidStreamPtr");
     }
     return res;
 }
+
+static int16_t issue(prec *r, int16_t cs, StreamPtr h, int slot) { return issue_ex(r, cs, h, slot, -1, 1); }
 
 static void act_create(void) {
     int slot = -1, k, k0 = (int)rn(PS_N);
@@ -1231,7 +1525,15 @@ static void act_simple(int16_t cs) {
 }
 
 static void pb_action(void) {
-    switch (rn(18)) {
+    switch (rn(30)) {
+    case 16: act_ucreate(); break;
+    case 17: case 18: act_uread(); break;
+    case 19: case 20: act_uwrite(); break;
+    case 21: act_ubfr(); break;
+    case 22: if (rn(8) == 0) act_urelease(); break;
+    case 23: act_uother(); break;
+    case 24: case 25: act_echo(); break;
+    case 26: act_ipmisc(); break;
     case 0: act_create(); break;
     case 1: act_open(0); break;
     case 2: act_open(1); break;
@@ -1245,7 +1547,9 @@ static void pb_action(void) {
     case 13: act_simple(rn(3) ? TCPStatus : rn(2) ? TCPGlobalInfo : TCPExtendedStat); break;
     case 14: {                                  /* any other csCode with a zeroed PB */
         int16_t cs = (int16_t)rn(61);
-        if (cs != TCPRelease && cs != TCPSend && cs != TCPCreate) act_simple(cs);
+        if (cs != TCPRelease && cs != TCPSend && cs != TCPCreate && cs != ipctlGetAddr &&
+            cs != ipctlEchoICMP && cs != ipctlLAPStats && cs != UDPCreate && cs != UDPMultiCreate)
+            act_simple(cs);                     /* (those take pointers in the stream's place: own actions) */
         break;
     }
     default: break;
@@ -1258,6 +1562,7 @@ static void pb_invariants(void) {
     if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
     if (P.d->rel_mask) bad("deferred release left over");
     if (pbf_bad) { bad("misuse seen by the fake OS (pointer, routine, irq nesting)"); pbf_bad = 0; }
+    pb_udp_invariants();
     for (i = 0; i < PS_N; i++) {
         MtStream *s;
         int nsend = 0, nrcv = 0, nopen = 0, nclose = 0;
@@ -1298,6 +1603,31 @@ static void pb_invariants(void) {
     }
 }
 
+static void pb_udp_invariants(void) {
+    int i, k, nwait = 0;
+    uint8_t j;
+    for (i = 0; i < US_N; i++) {
+        const MtUdpStream *s = NULL;
+        int nrd = 0;
+        if (!P.us[i].live) {
+            for (k = 0; k < PR_N; k++)
+                if (P.r[k].uslot == i && P.r[k].busy && !P.r[k].incall) bad("PB pending on a released UDP stream");
+            continue;
+        }
+        for (j = 0; j < P.d->nudp; j++)
+            if (P.d->udp[j].used == 1 && P.d->udp[j].handle == P.us[i].h) s = &P.d->udp[j];
+        if (!s) { bad("live UDP stream unknown to the glue"); continue; }
+        for (k = 0; k < PR_N; k++)
+            if (P.r[k].uslot == i && P.r[k].busy && !P.r[k].incall && P.r[k].cs == UDPRead) nrd++;
+        if (nrd != s->rq_n) bad("pending UDPReads differ from the glue's queue");
+        if (s->loan != P.us[i].loan) bad("lent datagram differs from the glue's");
+        if (s->u && mt_udp_port(s->u) != P.us[i].port) bad("UDP port changed");
+        if (s->rq_n && !s->loan && s->u && mt_udp_queued(s->u)) bad("read waits although a datagram is queued and none lent");
+    }
+    for (j = 0; j < MT_PB_ECHOQ; j++) nwait += P.d->echo[j].state != 0 && P.d->echo[j].blk.ioCompletion != 0;
+    if ((long)nwait != P.echo_sent - P.echo_ok - P.echo_tmo) bad("waiting echoes differ from requests minus notifications");
+}
+
 static void pb_full_canary_check(void) {
     int k;
     for (k = 0; k < PR_N; k++)
@@ -1305,6 +1635,8 @@ static void pb_full_canary_check(void) {
             canary_check(P.r[k].blk, PR_BLK, "a completed PB or its buffers were written");
     for (k = 0; k < PS_N; k++)
         if (!P.ps[k].live) canary_check(P.ps[k].rbuf, PS_BUF, "receive buffer of a released stream was written");
+    for (k = 0; k < US_N; k++)
+        if (!P.us[k].live) canary_check(P.us[k].buf, US_BUF, "receive buffer of a released UDP stream was written");
 }
 
 static void pb_setup(uint32_t seed) {
@@ -1323,6 +1655,7 @@ static void pb_setup(uint32_t seed) {
     pbf_reset();
     P.compl = pbf_compl(fz_compl);
     P.asr = pbf_asr(fz_asr);
+    P.uasr = pbf_asr(fz_uasr);
     link.ctx = NULL;
     link.tx = link_tx;
     mt_limits_default(&lim);
@@ -1338,6 +1671,7 @@ static void pb_setup(uint32_t seed) {
     mt_pb_set_config(P.d, &c);
     for (k = 0; k < PR_N; k++) { P.r[k].blk = (uint8_t *)pbf_alloc(PR_BLK); pr_free(&P.r[k]); }
     for (k = 0; k < PS_N; k++) { P.ps[k].rbuf = (uint8_t *)pbf_alloc(PS_BUF); memset(P.ps[k].rbuf, CAN2, PS_BUF); }
+    for (k = 0; k < US_N; k++) { P.us[k].buf = (uint8_t *)pbf_alloc(US_BUF); memset(P.us[k].buf, CAN2, US_BUF); }
     g.now = rn(2) ? 0xFFF00000u + rnd() % 0x100000u : rnd();
     pbf_now = g.now;
 }
@@ -1357,6 +1691,8 @@ static void pb_step(uint8_t *f) {
         k = (int)rn(g.lastn < 8 ? (uint32_t)g.lastn : 8u);
         mt_pb_input(P.d, g.lastout[k], g.lastlen[k]);
     }
+    if (rn(3) == 0) mt_pb_input(P.d, f, gen_pb_udp(f));
+    if (rn(8) == 0) mt_pb_input(P.d, f, gen_pb_echo_reply(f));
     for (k = (int)rn(3); k > 0; k--) pb_action();
     check_invariants();
     pb_invariants();
@@ -1382,7 +1718,11 @@ static void test_fuzz_pb(void) {
     uint32_t seed;
     long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, drc = 0,
          drp = 0, ie = 0, re = 0, op = 0, mg = 0, early = 0, rx = 0;
-    for (seed = 1; seed <= PB_SEEDS; seed++) {
+    long uro = 0, utm = 0, uwr = 0, urt = 0, uas = 0, urp = 0, uin = 0, eok = 0, eto = 0, ese = 0;
+    /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n */
+    uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
+    uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
+    for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
         for (g.step = 0; g.step < PB_STEPS && g.bad == 0; g.step++) pb_step(f);
@@ -1393,6 +1733,8 @@ static void test_fuzz_pb(void) {
         tmo += P.tmo; ad += P.asr_data; at += P.asr_term; ac += P.asr_closing; drc += P.defer_core;
         drp += P.defer_call; ie += P.imm_err; re += P.reenter; op += P.open_ok; mg += P.merged;
         early += (long)P.d->early_done; rx += P.rx_bytes;
+        uro += P.u_read_ok; utm += P.u_tmo; uwr += P.u_write_ok; urt += P.u_ret_ok; uas += P.u_asr;
+        urp += P.u_rel_pending; uin += P.u_in; eok += P.echo_ok; eto += P.echo_tmo; ese += P.echo_sent;
     }
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "pb: open %ld send ok %ld term %ld rcv ok %ld nocopy %ld returned %ld timeouts %ld "
@@ -1400,6 +1742,12 @@ static void test_fuzz_pb(void) {
                 "immediate errors %ld re-entries %ld sends past the core queue %ld early in merged "
                 "%ld bytes received %ld\n",
                 op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, drc, drp, ie, re, mg, early, rx);
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb udp/icmp: datagrams in %ld reads ok %ld timeouts %ld writes %ld returned %ld "
+                "data asr %ld reads failed by release %ld; echoes sent %ld replied %ld timed out %ld\n",
+                uin, uro, utm, uwr, urt, uas, urp, ese, eok, eto);
+    T_CHECK(uro > 0); T_CHECK(utm > 0); T_CHECK(uwr > 0); T_CHECK(urt > 0); T_CHECK(uas > 0);
+    T_CHECK(urp > 0); T_CHECK(eok > 0); T_CHECK(eto > 0);
     /* coverage: the run must reach the interesting paths */
     T_CHECK(op > 0); T_CHECK(sok > 0); T_CHECK(sterm > 0); T_CHECK(rok > 0); T_CHECK(nc > 0);
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
