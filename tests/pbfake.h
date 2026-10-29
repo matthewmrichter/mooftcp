@@ -75,6 +75,17 @@ StreamPtr pbt_est(pbt *x, MacPtr32 asr, MacPtr32 user, pbt_conn *c);   /* create
 TCPiopb  *pbt_send(pbt *x, StreamPtr s, const void *data, uint16_t len, int push);  /* one entry */
 TCPiopb  *pbt_rcv(pbt *x, StreamPtr s, uint16_t len, int8_t timeout_s);
 int16_t   pbt_simple(pbt *x, int16_t cs, StreamPtr s);    /* zeroed PB with only the stream */
+/* UDP: a stream (UDPCreate with an rcvBuffLen-byte buffer in fake memory; 0 on failure; the
+ * assigned port is stored in *port_out if given), a datagram from T_PEER:sport to T_ME:dport
+ * (checksummed), the last UDP datagram we sent (1 if any; *data points into the frame log). */
+StreamPtr pbt_ucreate(pbt *x, uint16_t port, uint32_t buflen, MacPtr32 asr, MacPtr32 user,
+                      uint16_t *port_out);
+void      pbt_udp_in(pbt *x, uint16_t sport, uint16_t dport, const void *data, uint16_t len);
+typedef struct { uint16_t sport, dport, len, cksum; const uint8_t *data; int cksum_ok; mt_ip4 dst; } pbt_udpv;
+int       pbt_last_udp(pbt *x, pbt_udpv *v);
+/* An ICMP echo reply from `from` to T_ME. */
+void      pbt_echo_reply(pbt *x, mt_ip4 from, uint16_t id, uint16_t seq, const void *data,
+                         uint16_t len);
 /* Log helpers. */
 int      pbf_count(char kind);
 int      pbf_find(char kind, MacPtr32 pb_or_stream, int from);   /* index or -1 */

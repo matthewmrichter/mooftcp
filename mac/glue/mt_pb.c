@@ -13,11 +13,13 @@ MtDrv *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link *
                   uint32_t seed) {
     MtDrv *d = (MtDrv *)mem;
     uint32_t off = DRV_ROUND((uint32_t)sizeof(MtDrv));
-    if (!mem || !lim || lim->max_tcp > MT_PB_MAX_TCP || len < mt_pb_size(lim)) return NULL;
+    if (!mem || !lim || lim->max_tcp > MT_PB_MAX_TCP || lim->max_udp > MT_PB_MAX_UDP || len < mt_pb_size(lim)) return NULL;
     memset(d, 0, sizeof *d);
     d->s = mt_stack_init((uint8_t *)mem + off, len - off, lim, link, seed);
     if (!d->s) return NULL;
     d->ntcp = lim->max_tcp;
+    d->nudp = lim->max_udp;
+    mt_pb_ip_init(d);
     return d;
 }
 
@@ -75,10 +77,14 @@ int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
     d->now = mt_os_ms();
     if ((cs >= TCPCreate && cs <= TCPGlobalInfo) || cs == 50)
         r = mt_pb_tcp_control(d, pb);           /* 50 is stream-checked like them (matrix 120.50) */
+    else if (cs >= UDPCreate && cs <= UDPCtlMax)
+        r = mt_pb_udp_control(d, pb);
+    else if (cs == ipctlGetAddr || cs == ipctlEchoICMP || cs == ipctlLAPStats)
+        r = mt_pb_ip_control(d, pb);
     else if (answers_zero(cs))
         r = 0;
     else
-        r = MT_PB_UNIMP;                        /* UDP / IP calls: Task 8 */
+        r = MT_PB_UNIMP;                        /* matrix 120: the codes MacTCP does not implement */
     if (r != inProgress) pb->hdr.ioResult = r;
     flush_deferred(d);
     mt_os_irq_restore(sv);
@@ -107,6 +113,10 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     d->now = mt_os_ms();
     c = mt_next_deadline(d->s, d->now);
     g = mt_pb_tcp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_udp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_ip_deadline(d);
     mt_os_irq_restore(sv);
     return g < c ? g : c;
 }
@@ -125,6 +135,8 @@ void mt_pb_tick(MtDrv *d) {
         d->in_core = 0;
     }
     mt_pb_tcp_timers(d);
+    mt_pb_udp_timers(d);
+    mt_pb_ip_timers(d);
     mt_pb_tcp_after_core(d);
     flush_deferred(d);
     mt_os_irq_restore(sv);

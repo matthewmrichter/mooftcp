@@ -43,6 +43,14 @@
 #define MT_PB_LOANS       4      /* NoCopyRcv buffers lent out per stream */
 #define MT_PB_MIN_RCVBUF  4096u  /* TCPCreate minimum (matrix 200) */
 #define MT_PB_WDS_MAX     64     /* WDS entries scanned before the WDS counts as unterminated */
+#define MT_PB_MAX_UDP     8      /* UDP stream table size; mt_limits.max_udp may be smaller */
+#define MT_PB_UDPRQ       4      /* UDPRead PBs pending per stream (FIFO; matrix 906 shows two) */
+#define MT_PB_MIN_UDPBUF  2048u  /* UDPCreate minimum (matrix 900) */
+#define MT_PB_UDP_GATHER  1472u  /* largest multi-entry UDPWrite (one frame); a one-entry WDS is unlimited */
+#define MT_PB_ECHOQ       4      /* ICMPEcho requests waiting for a reply or timeout */
+#define MT_PB_ECHO_DATA   64     /* echoed bytes kept for the notify block */
+#define MT_PB_ECHO_TMO_S  3      /* ICMPEcho timeout when the PB gives none (matrix A00..A03 used 3) */
+#define MT_PB_UDP_MTU_OFFNET 548 /* UDPMaxMTUSize towards a host off our subnet (matrix 910) */
 
 /* Results that are not .IPP codes: notOpenErr (Device Manager: driver not open, matrix
  * "Unconfigured run") and the -4 MacTCP returns for csCodes it does not implement (matrix 120). */
@@ -119,12 +127,51 @@ struct MtStream {
     uint32_t  lent;
 };
 
+/* UDPWrite / ICMPEcho destinations the glue refuses with ipBadAddr: 0.0.0.0 and class D / E
+ * other than the limited broadcast (the core does not route them; matrix: not probed). */
+static inline int mt_pb_dest_ok(mt_ip4 a) {
+    return a != 0 && (a < 0xE0000000u || a == 0xFFFFFFFFu);
+}
+
+/* One pending UDPRead. */
+typedef struct MtUdpRead {
+    MtAnyPb *pb;
+    uint32_t dl;                /* absolute ms deadline (timeOut seconds) if timed */
+    uint8_t  timed;
+} MtUdpRead;
+
+/* A UDP stream (UDPCreate .. UDPRelease). UDPRead hands out a pointer to the oldest datagram
+ * inside the app's receive buffer (matrix 903); it stays queued in the core until
+ * UDPBfrReturn, so one datagram is lent at a time (loan = its address, 0 = none). */
+typedef struct MtUdpStream {
+    mt_udp   *u;
+    MtDrv    *d;
+    StreamPtr handle;           /* address of this entry + 2 * (gen & 7) */
+    MacPtr32  asr, user, rbuf, loan;
+    uint32_t  rlen;
+    uint8_t   used;             /* 0 free, 1 live, 2 releasing (pending reads being failed) */
+    uint8_t   gen;
+    uint8_t   rq_n;
+    MtUdpRead rq[MT_PB_UDPRQ];
+} MtUdpStream;
+
+/* One ICMPEcho in flight. blk is MacTCP's own copy of the PB that the icmpCompletion routine
+ * gets (matrix "ICMP echo notify"); the app's PB itself completed 0 when the request was sent. */
+typedef struct MtEcho {
+    ICMPParamBlock blk;
+    uint32_t dl, t0, dest;      /* absolute ms deadline, ms at the request, target address */
+    uint16_t id, seq;
+    uint8_t  state;             /* 0 free, 1 waiting, 2 notifying (slot not reusable yet) */
+} MtEcho;
+
 struct MtDrv {
     mt_stack *s;
     uint8_t   configured;       /* an address is set: otherwise every call gets notOpenErr */
     uint8_t   depth;            /* > 0 while the glue is calling out (app routines, core callbacks) */
     uint8_t   in_core;          /* inside mt_input / mt_tick (they must not be re-entered) */
     uint8_t   ntcp, next_slot;
+    uint8_t   nudp, next_uslot;
+    uint16_t  echo_seq;
     uint16_t  rel_mask;         /* streams whose core release is deferred */
     uint32_t  now;
     uint32_t  reenter_drops;    /* input/tick calls refused because the core was already running */
@@ -134,7 +181,14 @@ struct MtDrv {
     TCPStats  gstats;
     StreamPtr cdb[MT_PB_MAX_TCP];
     TCPConnectionStats cstats;  /* TCPStatus.connStatPtr (not tracked: zeros) */
-    ICMPReport icmp;            /* TCPICMPReceived report, valid during the ASR */
+    ICMPReport icmp;            /* TCP/UDP ICMPReceived report, valid during the ASR */
+    MtUdpStream udp[MT_PB_MAX_UDP];
+    MtEcho    echo[MT_PB_ECHOQ];
+    uint8_t   echo_data[MT_PB_ECHO_DATA];   /* reply payload lent to the notify block */
+    uint8_t   ubuf[MT_PB_UDP_GATHER];       /* gathers a multi-entry UDPWrite */
+    uint8_t   lap_mac[8];       /* LAPStats.ifPhysicalAddress */
+    uint8_t   lap_if[12];       /* LAPStats.ifString: Pascal string, NUL terminated (a guess) */
+    arp_entry arp[ARP_TABLE_SIZE];   /* LAPStats.AddrXlation: all zero (not mirrored from the core) */
 };
 
 /* Bytes needed for the MtDrv plus the core arena for `lim`. */
@@ -164,5 +218,12 @@ void     mt_pb_tcp_after_core(MtDrv *d);       /* close / send progress after in
 void     mt_pb_tcp_timers(MtDrv *d);           /* expire command timeouts */
 uint32_t mt_pb_tcp_deadline(MtDrv *d);         /* earliest command timeout, ms from now */
 void     mt_pb_tcp_free(MtDrv *d, MtStream *s);/* the deferred mt_tcp_release */
+int16_t  mt_pb_udp_control(MtDrv *d, MtAnyPb *pb);   /* csCodes 20..29 (mt_pb_udp.c) */
+void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
+uint32_t mt_pb_udp_deadline(MtDrv *d);
+int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
+void     mt_pb_ip_init(MtDrv *d);              /* echo callback, constant strings */
+void     mt_pb_ip_timers(MtDrv *d);            /* expire ICMPEcho timeouts */
+uint32_t mt_pb_ip_deadline(MtDrv *d);
 
 #endif /* MT_PB_H */

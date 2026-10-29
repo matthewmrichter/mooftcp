@@ -1,6 +1,7 @@
 #include <string.h>
 #include "pbfake.h"
 #include "mt_int.h"
+#include "mt_util.h"
 
 uint32_t pbf_now;
 pbf_ev pbf_log[PBF_LOG];
@@ -274,4 +275,70 @@ int16_t pbt_simple(pbt *x, int16_t cs, StreamPtr s) {
     TCPiopb *pb = pbt_pb(cs, s);
     if (!pb) return -9999;
     return pbt_call(x, pb);
+}
+
+StreamPtr pbt_ucreate(pbt *x, uint16_t port, uint32_t buflen, MacPtr32 asr, MacPtr32 user,
+                      uint16_t *port_out) {
+    UDPiopb *pb = (UDPiopb *)pbt_pb(UDPCreate, 0);
+    uint8_t *buf = (uint8_t *)pbf_alloc(buflen ? buflen : 1);
+    if (!pb || !buf) return 0;
+    pb->csParam.create.rcvBuff = pbf_a(buf);
+    pb->csParam.create.rcvBuffLen = buflen;
+    pb->csParam.create.notifyProc = asr;
+    pb->csParam.create.localPort = port;
+    pb->csParam.create.userDataPtr = user;
+    if (pbt_call(x, (TCPiopb *)pb) != 0) return 0;
+    if (port_out) *port_out = pb->csParam.create.localPort;
+    return pb->udpStream;
+}
+
+void pbt_udp_in(pbt *x, uint16_t sport, uint16_t dport, const void *data, uint16_t len) {
+    uint8_t pl[1500], f[1600];
+    uint32_t t;
+    uint16_t n;
+    mt_wr16(pl, sport);
+    mt_wr16(pl + 2, dport);
+    mt_wr16(pl + 4, (uint16_t)(8 + len));
+    mt_wr16(pl + 6, 0);
+    if (len) memcpy(pl + 8, data, len);
+    t = (T_PEER >> 16) + (T_PEER & 0xFFFFu) + (T_ME >> 16) + (T_ME & 0xFFFFu) + 17u + 8u + len;
+    t = mt_cksum_fold(mt_cksum_add(t, pl, 8u + len));
+    mt_wr16(pl + 6, (uint16_t)(t ? t : 0xFFFFu));
+    n = mk_ip(f, T_PEER, T_ME, 17, 9, 0, pl, (uint16_t)(8 + len));
+    mt_pb_input(x->d, f, n);
+}
+
+int pbt_last_udp(pbt *x, pbt_udpv *v) {
+    int i;
+    for (i = x->fl.n - 1; i >= 0; i--) {
+        ipv iv;
+        if (view_ip(x->fl.f[i], x->fl.len[i], &iv) && iv.proto == 17 && iv.len >= 8 && iv.frag == 0) {
+            uint32_t t = (iv.src >> 16) + (iv.src & 0xFFFFu) + (iv.dst >> 16) + (iv.dst & 0xFFFFu) +
+                         17u + iv.len;
+            v->sport = mt_rd16(iv.payload);
+            v->dport = mt_rd16(iv.payload + 2);
+            v->len = (uint16_t)(mt_rd16(iv.payload + 4) - 8u);
+            v->cksum = mt_rd16(iv.payload + 6);
+            v->data = iv.payload + 8;
+            v->dst = iv.dst;
+            v->cksum_ok = v->cksum == 0 || mt_cksum_fold(mt_cksum_add(t, iv.payload, iv.len)) == 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void pbt_echo_reply(pbt *x, mt_ip4 from, uint16_t id, uint16_t seq, const void *data,
+                    uint16_t len) {
+    uint8_t pl[1500], f[1600];
+    uint16_t n;
+    pl[0] = 0;
+    pl[1] = 0;
+    mt_wr16(pl + 2, 0);
+    mt_wr16(pl + 4, id);
+    mt_wr16(pl + 6, seq);
+    if (len) memcpy(pl + 8, data, len);
+    mt_wr16(pl + 2, mt_cksum_fold(mt_cksum_add(0, pl, 8u + len)));
+    n = mk_ip(f, from, T_ME, 1, 3, 0, pl, (uint16_t)(8 + len));
+    mt_pb_input(x->d, f, n);
 }

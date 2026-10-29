@@ -762,8 +762,18 @@ static int16_t do_global_info(MtDrv *d, MtAnyPb *pb) {
     d->gstats.tcpInputPkts = st->tcp_in;
     d->gstats.tcpOutputPkts = st->tcp_out;
     d->gstats.tcpRetransPkts = st->tcp_rexmt;
-    for (i = 0; i < MT_PB_MAX_TCP; i++)
-        d->cdb[i] = i < d->ntcp && d->tcp[i].used == LIVE ? d->tcp[i].handle : 0;
+    /* The table lists the connections first (TCBs past LISTEN: mt_tcp_count_open of them), then
+     * the other live streams, then zeros. */
+    memset(d->cdb, 0, sizeof d->cdb);
+    {
+        uint8_t open = mt_tcp_count_open(d->s), n = 0, pass;
+        for (pass = 0; pass < 2; pass++)
+            for (i = 0; i < d->ntcp && (pass || n < open); i++) {   /* pass 0 stops at the last connection */
+                const MtStream *s = &d->tcp[i];
+                if (s->used != LIVE) continue;
+                if ((state_of(s) > MT_TCP_LISTEN) == (pass == 0)) d->cdb[n++] = s->handle;
+            }
+    }
     /* matrix 800: the driver's own tables replace the app's pointers; maxTCPConnections is left */
     pb->tcp.csParam.globalInfo.tcpParamPtr = mt_os_addr(&d->gparam);
     pb->tcp.csParam.globalInfo.tcpStatsPtr = mt_os_addr(&d->gstats);
