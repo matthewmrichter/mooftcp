@@ -268,8 +268,11 @@ int  mt_tcp_close(mt_tcp *t, uint32_t now);     /* FIN after queued data; MT_ERR
 void mt_tcp_abort(mt_tcp *t, uint32_t now);     /* RST if synchronized; TERMINATE(ULP_ABORT) */
 void mt_tcp_release(mt_tcp *t);                 /* aborts if needed; frees the TCB; no callbacks */
 void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort);  /* default 120 s, abort */
+/* snd_una / snd_nxt / rcv_nxt are sequence numbers (0 before a connection exists); mss is the
+ * send MSS, cwnd the congestion window in bytes (MacTCP TCPStatus reports all of them). */
 typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
-  uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms; } mt_tcp_info;
+  uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms;
+  uint32_t snd_una, snd_nxt, rcv_nxt, cwnd; uint16_t mss; } mt_tcp_info;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
 
 /* Data transfer. Latency rules: a send with nothing unacked leaves before mt_tcp_send_segs

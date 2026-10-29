@@ -346,7 +346,8 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     i->lport = t->lport;
     i->rport = t->rport;
     if (t->state >= MT_TCP_ESTABLISHED && t->state != MT_TCP_TIME_WAIT) {
-        sent = t->snd_max - t->snd_una - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
+        sent = t->snd_max - t->snd_una;
+        if ((t->flags & MT_TF_FINSENT) && sent) sent--;   /* an ACKed FIN leaves sent 0, not -1 */
         i->unacked = sent;
         i->send_queued = q > sent ? q - sent : 0u;
     }
@@ -355,6 +356,11 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     i->rcv_wnd = mt_ring_free(&t->rcvq);
     i->srtt_ms = t->srtt8 >> 3;
     i->rto_ms = t->rto;
+    i->snd_una = t->snd_una;
+    i->snd_nxt = t->snd_nxt;
+    i->rcv_nxt = t->rcv_nxt;
+    i->cwnd = t->cwnd;
+    i->mss = t->mss;
 }
 
 /* ---- Data transfer API ---- */

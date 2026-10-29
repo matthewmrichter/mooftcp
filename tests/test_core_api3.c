@@ -177,7 +177,37 @@ static void test_ulp_change_moves_deadline_with_start(void) {
     T_EQ(r.n, 2);
 }
 
+/* Plan 2 Task 7: mt_tcp_info carries what TCPStatus reports; once our FIN is ACKed nothing is
+ * unacknowledged (the FIN's sequence number used to make `unacked` wrap to 0xFFFFFFFF). */
+static void test_info_after_fin_acked(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    rec r; uint32_t ps, ms; uint8_t f[200]; uint16_t n;
+    mt_tcp_info in;
+    mt_tcp *t;
+    memset(&r, 0, sizeof r);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(t != NULL);
+    if (!t) return;
+    mt_tcp_get_info(t, &in);
+    T_EQ(in.snd_una, ms);
+    T_EQ(in.snd_nxt, ms);
+    T_EQ(in.rcv_nxt, ps);
+    T_EQ(in.mss, 1460);
+    T_CHECK(in.cwnd >= 1460);
+    T_EQ(mt_tcp_close(t, 1), MT_OK);
+    mt_tcp_get_info(t, &in);
+    T_EQ(in.state, MT_TCP_FIN_WAIT_1);
+    T_EQ(in.unacked, 0);                                    /* only the FIN is outstanding */
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps, ms + 1, TF_ACK, 8192, NULL, 0, NULL, 0);
+    mt_input(s, f, n, 2);
+    mt_tcp_get_info(t, &in);
+    T_EQ(in.state, MT_TCP_FIN_WAIT_2);
+    T_EQ(in.unacked, 0);
+    T_EQ(in.send_queued, 0);
+}
+
 T_MAIN(test_set_config_addr_change_flushes_arp, test_set_config_other_changes_keep_arp,
        test_set_config_mtu_shrink_reclamps_mss,
        test_set_config_dns_change_next_retry_uses_new_server,
-       test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start)
+       test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start,
+       test_info_after_fin_acked)
