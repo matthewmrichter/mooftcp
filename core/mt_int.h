@@ -87,7 +87,8 @@ typedef void (*mt_ip_spy_fn)(void *ctx, uint8_t proto, mt_ip4 src, mt_ip4 dst,
                              const uint8_t *pl, uint16_t len);
 #endif
 
-/* ---- UDP endpoint (arena array of lim.max_udp; port 0 = free slot) ----
+/* ---- UDP endpoint (arena array of lim.max_udp + 1; port 0 = free slot; the last slot is
+ * reserved for the DNS resolver, apps use slots 0..max_udp-1) ----
  * Receive area: records [src(4) sport(2) len(2) data] padded to even, placed contiguously
  * in the caller's buf. head/tail are byte offsets; when a record does not fit before the
  * end, `wrap` remembers where the tail run stopped and the next record starts at 0. */
@@ -191,11 +192,16 @@ typedef struct {
     uint32_t exp;                /* absolute ms expiry */
     uint32_t used;               /* ms stamp of last use (LRU) */
     uint8_t naddr;               /* 0 = free */
+    uint8_t ptr;                 /* 1 = reverse (PTR) entry: addr[0] is the key, canon the name */
 } mt_dns_cent;
 typedef struct {
-    mt_dns_result *out;
+    mt_dns_result *out;          /* NULL for a reverse lookup */
+    char *pbuf;                  /* mt_dns_ptr: the caller's name buffer */
+    mt_dns_ptr_cb pcb;
     mt_dns_cb cb;
     void *user;
+    mt_ip4 paddr;                /* mt_dns_ptr: the address asked about */
+    uint16_t pcap;
     uint32_t t0;                 /* time the current question was first sent */
     uint16_t id;
     uint8_t used, qtype, tries, dom;   /* tries = retransmissions done; dom = domain appended */
@@ -205,9 +211,14 @@ typedef struct {
     mt_udp *udp;                 /* NULL until the first network query */
     uint32_t rnd;                /* xorshift32 state for query IDs */
     mt_dns_q q[MT_DNS_SLOTS];
+    char pname[MT_DNS_NAMELEN + 1];   /* scratch name of the one reverse lookup in flight */
     uint8_t rx[MT_DNS_RXBUF];
 } mt_dns;
 void mt_dns_timers(mt_stack *s, uint32_t now);
+/* The resolver's endpoint lives in the reserved slot after the app endpoints. */
+mt_udp *mt_udp_create_reserved(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen,
+                               mt_udp_cb cb, void *user);
+void mt_dns_reseed(mt_stack *s, uint32_t a, uint32_t b);
 uint32_t mt_dns_deadline(const mt_stack *s, uint32_t now);
 
 struct mt_stack {
@@ -215,12 +226,13 @@ struct mt_stack {
     mt_link link;
     mt_limits lim;
     mt_stats stats;
-    uint32_t seed;
+    uint32_t seed;           /* ISN base (mt_set_entropy a) */
+    uint32_t key;            /* ISN tuple-mix key (mt_set_entropy b); 0 = no mix */
     /* arena sections */
     mt_arp_entry *arp;       /* lim.arp_entries entries */
     mt_pending *pend;
     mt_reasm *reasm;
-    mt_udp *udp;             /* lim.max_udp endpoints */
+    mt_udp *udp;             /* lim.max_udp app endpoints + 1 reserved for DNS (last) */
     mt_tcp *tcp;             /* lim.max_tcp TCBs */
     mt_dns *dns;
     mt_dns_cent *dcache;     /* lim.dns_cache entries */
@@ -232,6 +244,7 @@ struct mt_stack {
     uint8_t log_on;
     uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
+    uint16_t lis_eph;        /* next candidate for a port-0 listen (1024..2047) */
     /* The TCP segment (if any) that mt_arp_insert just released from the held slot; consulted
      * and cleared by mt_tcp_arp_resolved so it does not retransmit that same segment. */
     struct { mt_ip4 dst; uint32_t seq; uint16_t sport, dport, len; uint8_t live; } arp_rel;

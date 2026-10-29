@@ -15,6 +15,9 @@
 #define TCP_ULP_DEFAULT_S 120u
 #define TCP_MSS_DEFAULT 536u
 #define TCP_MSS_MIN 64u
+#define TCP_LIS_BASE 1024u         /* port-0 listens get a port in 1024..2047 (MacTCP does) */
+#define TCP_LIS_N 1024u
+#define TM_RTO_PERSIST ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST))
 
 /* 16 TCBs must fit the 16 KB stack budget: ~210 bytes with 32-bit pointers. */
 typedef char mt_tcp_size_ok[sizeof(struct mt_tcp) <= 300u ? 1 : -1];
@@ -129,7 +132,19 @@ static void conn_reset(mt_tcp *t) {
     t->mss = TCP_MSS_DEFAULT;
 }
 
-static uint32_t isn(const mt_stack *s, uint32_t now) { return s->seed + now * 250u; }
+/* ISN = base + 250 per ms + (once mt_set_entropy has keyed it) a mix of the 4-tuple, so ISNs of
+ * different connections started in the same millisecond differ unpredictably. Computed at
+ * connect time only (two 32-bit multiplies). */
+static uint32_t isn(const mt_stack *s, uint32_t now, mt_ip4 rip, uint16_t rport, uint16_t lport) {
+    uint32_t h = s->key;
+    if (h) {
+        h = (h ^ s->cfg.addr) * 0x9E3779B1u;
+        h = (h ^ (h >> 15) ^ rip) * 0x85EBCA6Bu;
+        h = (h ^ (h >> 13) ^ (((uint32_t)rport << 16) | lport)) * 0xC2B2AE35u;
+        h ^= h >> 16;
+    }
+    return s->seed + now * 250u + h;
+}
 
 static void set_mss(mt_tcp *t, uint16_t peer) {
     uint16_t m = peer >= TCP_MSS_MIN ? peer : (uint16_t)TCP_MSS_DEFAULT;
@@ -168,7 +183,11 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
 }
 
 void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
-    t->ulp_ms = (uint32_t)seconds * 1000u;
+    uint32_t ms = (uint32_t)seconds * 1000u;
+    /* ulp_dl is always start + ulp_ms (set when the RTO/PERSIST timer armed, or pushed out by
+     * progress), so while a timer is armed it moves with the new length. */
+    if (t->tmask & TM_RTO_PERSIST) t->ulp_dl += ms - t->ulp_ms;
+    t->ulp_ms = ms;
     if (abort) t->flags |= MT_TF_ULPABORT;
     else t->flags &= (uint8_t)~MT_TF_ULPABORT;
 }
@@ -217,7 +236,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
     t->flport = t->frport = 0;
     t->frip = 0;
     t->tnow = now;
-    t->iss = isn(s, now);
+    t->iss = isn(s, now, rip, rport, lport);
     t->snd_una = t->snd_nxt = t->snd_max = t->iss;   /* SYN goes out below, advancing snd_nxt */
     mt_tcp_set_state(t, MT_TCP_SYN_SENT);
     s->stats.tcp_active_opens++;
@@ -226,7 +245,20 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
 }
 
 int mt_tcp_listen(mt_tcp *t, mt_ip4 rip_filter, uint16_t rport_filter, uint16_t lport) {
+    mt_stack *s = t->st;
     if (t->state != MT_TCP_CLOSED) return MT_ERR_STATE;
+    if (lport == 0) {                              /* assign an unused port from 1024..2047 */
+        uint32_t tries;
+        uint16_t p = s->lis_eph;
+        for (tries = 0; tries < TCP_LIS_N; tries++) {
+            if (p < TCP_LIS_BASE || p >= TCP_LIS_BASE + TCP_LIS_N) p = TCP_LIS_BASE;
+            if (!port_busy(s, t, p)) break;
+            p = (uint16_t)(p + 1u);
+        }
+        if (tries == TCP_LIS_N) return MT_ERR_INUSE;
+        lport = p;
+        s->lis_eph = (uint16_t)(p + 1u >= TCP_LIS_BASE + TCP_LIS_N ? TCP_LIS_BASE : p + 1u);
+    }
     conn_reset(t);
     t->frip = rip_filter;
     t->frport = rport_filter;
@@ -426,7 +458,6 @@ static void enter_time_wait(mt_tcp *t, uint32_t now) {
     tmr_set(t, MT_TT_TW, now + TCP_TW_MS);
 }
 
-#define TM_RTO_PERSIST ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST))
 #define CWND_MAX 0x100000u
 
 static uint32_t backoff(uint32_t rto) { return rto >= MT_TCP_RTO_MAX / 2u ? MT_TCP_RTO_MAX : rto << 1; }
@@ -634,7 +665,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->rcv_nxt = g->seq + 1u;
     t->rcv_adv = t->rcv_nxt;
     set_mss(t, g->mss);
-    t->iss = isn(s, now);
+    t->iss = isn(s, now, src, sport, dport);
     t->snd_una = t->snd_nxt = t->snd_max = t->iss;
     t->snd_wnd = g->win;
     t->snd_wl1 = g->seq;
@@ -881,7 +912,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         if (t->snd_una != t->snd_max && g->dlen == 0 && !fin && g->win == t->snd_wnd &&
             !(t->tmask & (1u << MT_TT_PERSIST))) {
             if (t->dupacks < 255u) t->dupacks++;
-            if (t->dupacks == dup_thresh(t) && mt_seq_gt(t->snd_una, t->recover)) {
+            if (t->dupacks >= dup_thresh(t) && mt_seq_gt(t->snd_una, t->recover)) {
                 uint32_t half = (t->snd_max - t->snd_una) >> 1, floor_ = (uint32_t)t->mss << 1;
                 t->ssthresh = half > floor_ ? half : floor_;
                 t->cwnd = t->ssthresh;

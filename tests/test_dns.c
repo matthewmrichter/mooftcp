@@ -451,7 +451,7 @@ static void test_dns_cache_lru_and_endpoint(void) {
     char nm[16];
     static uint8_t ubufs[8][1024];
     int i, base;
-    /* the endpoint is created lazily and kept: it takes one of the max_udp slots */
+    /* the endpoint is created lazily and kept, in the reserved slot (not one of max_udp) */
     T_EQ(s->lim.max_udp, 8);
     for (i = 0; i < 7; i++) T_CHECK(mt_udp_create(s, (uint16_t)(2000 + i), ubufs[i], 1024, NULL, NULL) != NULL);
     for (i = 0; i < 8; i++) { sprintf(nm, "n%d.ex", i); resolve(s, &fl, nm, 0x0A000000u + (uint32_t)i, 1000, 100u + (uint32_t)i); }
@@ -463,15 +463,14 @@ static void test_dns_cache_lru_and_endpoint(void) {
     T_EQ(mt_dns_query(s, "n8.ex", MT_DNS_Q_A, &r, NULL, NULL, 700), 0);
     T_EQ(fl.n, base + 1);
     T_EQ(mt_dns_query(s, "n1.ex", MT_DNS_Q_A, &r, NULL, NULL, 700), MT_DNS_IN_PROGRESS);
-    /* all 8 UDP slots are in use now; a fresh stack with 8 foreign endpoints gets BUSY */
+    /* a stack whose app slots are all taken still resolves: the endpoint is a reserved extra slot */
     {
         fake_link fl2; mt_stack *s2 = setup(&fl2, NULL);
         static uint8_t bufs[8][1024];
         mt_dns_result r2;
         for (i = 0; i < 8; i++) T_CHECK(mt_udp_create(s2, (uint16_t)(3000 + i), bufs[i], 1024, NULL, NULL) != NULL);
-        T_EQ(mt_dns_query(s2, "x.example", MT_DNS_Q_A, &r2, NULL, NULL, 0), -MT_DNS_BUSY);
-        T_EQ(fl2.n, 0);
-        T_EQ(mt_dns_deadline(s2, 0), MT_NO_DEADLINE);     /* the failed query left nothing behind */
+        T_EQ(mt_dns_query(s2, "x.example", MT_DNS_Q_A, &r2, NULL, NULL, 0), MT_DNS_IN_PROGRESS);
+        T_EQ(fl2.n, 1);
     }
 }
 

@@ -229,7 +229,7 @@ static int cache_lookup(mt_stack *s, const char *name, size_t n, size_t dl, mt_d
     if (!key_make(name, n, s->cfg.domain, dl, key)) return 0;
     for (i = 0; i < s->lim.dns_cache; i++) {
         mt_dns_cent *c = &s->dcache[i];
-        if (cent_live(c, now) && strcmp(c->name, key) == 0) {
+        if (cent_live(c, now) && !c->ptr && strcmp(c->name, key) == 0) {
             memset(out, 0, sizeof *out);
             out->status = MT_DNS_OK;
             strcpy(out->cname, c->canon);
@@ -242,21 +242,16 @@ static int cache_lookup(mt_stack *s, const char *name, size_t n, size_t dl, mt_d
     return 0;
 }
 
-/* Remember an A result under the FQDN that answered (q->name plus the search domain if one
- * was used). Not cached when that name or the canonical name is longer than 63 characters.
- * TTL is clamped to 60 s..24 h. */
-static void cache_store(mt_stack *s, const mt_dns_q *q, const mt_dns_result *r, uint32_t ttl,
-                        uint32_t now) {
-    char key[MT_DNS_CNAME];
+/* The entry to (over)write: the one holding the same key (name, or address for PTR), else a
+ * free/expired one, else the least recently used. */
+static mt_dns_cent *cent_slot(mt_stack *s, const char *key, mt_ip4 addr, int ptr, uint32_t now) {
     mt_dns_cent *v = NULL;
     uint16_t i;
-    if (s->lim.dns_cache == 0 || r->naddr == 0 || strlen(r->cname) >= MT_DNS_CNAME ||
-        !key_make(q->name, strlen(q->name), s->cfg.domain, q_dom(s, q), key))
-        return;
-    if (ttl < DNS_TTL_MIN) ttl = DNS_TTL_MIN;
-    if (ttl > DNS_TTL_MAX) ttl = DNS_TTL_MAX;
-    for (i = 0; i < s->lim.dns_cache; i++)             /* same name, else a free/expired slot */
-        if (s->dcache[i].naddr && strcmp(s->dcache[i].name, key) == 0) { v = &s->dcache[i]; break; }
+    for (i = 0; i < s->lim.dns_cache; i++) {
+        const mt_dns_cent *c = &s->dcache[i];
+        if (c->naddr && (ptr ? (c->ptr && c->addr[0] == addr) : (!c->ptr && strcmp(c->name, key) == 0)))
+            return &s->dcache[i];
+    }
     for (i = 0; !v && i < s->lim.dns_cache; i++)
         if (!cent_live(&s->dcache[i], now)) v = &s->dcache[i];
     if (!v) {                                          /* LRU */
@@ -264,19 +259,75 @@ static void cache_store(mt_stack *s, const mt_dns_q *q, const mt_dns_result *r, 
         for (i = 1; i < s->lim.dns_cache; i++)
             if (mt_time_before(s->dcache[i].used, v->used)) v = &s->dcache[i];
     }
+    return v;
+}
+
+/* Remember an A result under the FQDN that answered (q->name plus the search domain if one
+ * was used). Not cached when that name or the canonical name is longer than 63 characters.
+ * TTL is clamped to 60 s..24 h. */
+static void cache_store(mt_stack *s, const mt_dns_q *q, const mt_dns_result *r, uint32_t ttl,
+                        uint32_t now) {
+    char key[MT_DNS_CNAME];
+    mt_dns_cent *v;
+    if (s->lim.dns_cache == 0 || r->naddr == 0 || strlen(r->cname) >= MT_DNS_CNAME ||
+        !key_make(q->name, strlen(q->name), s->cfg.domain, q_dom(s, q), key))
+        return;
+    if (ttl < DNS_TTL_MIN) ttl = DNS_TTL_MIN;
+    if (ttl > DNS_TTL_MAX) ttl = DNS_TTL_MAX;
+    v = cent_slot(s, key, 0, 0, now);
     strcpy(v->name, key);
     strcpy(v->canon, r->cname);
     memcpy(v->addr, r->addr, sizeof v->addr);
     v->naddr = r->naddr;
+    v->ptr = 0;
     v->exp = now + ttl * 1000u;
     v->used = now;
+}
+
+/* Remember a PTR answer (name <= 63 characters) keyed on the address; addr[0] holds the key. */
+static void cache_store_ptr(mt_stack *s, mt_ip4 addr, const char *name, uint32_t ttl,
+                            uint32_t now) {
+    mt_dns_cent *v;
+    if (s->lim.dns_cache == 0 || name[0] == 0 || strlen(name) >= MT_DNS_CNAME) return;
+    if (ttl < DNS_TTL_MIN) ttl = DNS_TTL_MIN;
+    if (ttl > DNS_TTL_MAX) ttl = DNS_TTL_MAX;
+    v = cent_slot(s, NULL, addr, 1, now);
+    v->name[0] = 0;
+    strcpy(v->canon, name);
+    memset(v->addr, 0, sizeof v->addr);
+    v->addr[0] = addr;
+    v->naddr = 1;
+    v->ptr = 1;
+    v->exp = now + ttl * 1000u;
+    v->used = now;
+}
+
+/* Copy src into the caller's name buffer: at most cap-1 characters and a NUL (cap >= 1). */
+static void name_out(char *dst, uint16_t cap, const char *src) {
+    size_t n = strlen(src);
+    if (n >= cap) n = (size_t)cap - 1u;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+static int cache_lookup_ptr(mt_stack *s, mt_ip4 addr, char *dst, uint16_t cap, uint32_t now) {
+    uint16_t i;
+    for (i = 0; i < s->lim.dns_cache; i++) {
+        mt_dns_cent *c = &s->dcache[i];
+        if (cent_live(c, now) && c->ptr && c->addr[0] == addr) {
+            name_out(dst, cap, c->canon);
+            c->used = now;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now) {
     uint16_t i;
     for (i = 0; i < s->lim.dns_cache; i++) {
         mt_dns_cent *c = &s->dcache[i];
-        if (cent_live(c, now))
+        if (cent_live(c, now) && !c->ptr)
             cb(user, c->name, c->addr, c->naddr, (c->exp - now + 999u) / 1000u);
     }
 }
@@ -287,7 +338,9 @@ void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now)
  * with *st the outcome and q->out filled (A/PTR/HINFO/MX fields). *ttl = smallest A TTL. */
 static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
                      mt_dns_status *st, uint32_t *ttl) {
-    mt_dns_result *o = q->out;
+    mt_dns_result *o = q->out;                                   /* NULL for a reverse lookup */
+    char *cn = o ? o->cname : s->dns->pname;
+    uint32_t cncap = o ? (uint32_t)sizeof o->cname : (uint32_t)sizeof s->dns->pname;
     uint32_t off, an, i, found = 0, hops = 0, mxbest = 0, tmin = 0xFFFFFFFFu;
     unsigned flags, rcode, tc;
     uint16_t end;
@@ -298,10 +351,10 @@ static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t le
     an = mt_rd16(p + 6);
     rcode = flags & 0xFu;
     tc = flags & 0x0200u;
-    memset(o, 0, sizeof *o);
-    q_attempt(s, q, o->cname);                                   /* current target name */
+    if (o) memset(o, 0, sizeof *o);
+    q_attempt(s, q, cn);                                   /* current target name */
     if ((p[DNS_HDR] & 0xC0u) != 0) return 0;                     /* question: plain labels */
-    if (wire_name(p, len, DNS_HDR, NULL, 0, o->cname, &end) != 1) return 0;
+    if (wire_name(p, len, DNS_HDR, NULL, 0, cn, &end) != 1) return 0;
     off = end;
     if (off + 4u > len || mt_rd16(p + off) != q->qtype || mt_rd16(p + off + 2) != 1) return 0;
     off += 4u;
@@ -312,7 +365,7 @@ static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t le
         uint32_t type, rdl, rd, rttl;
         int own, r;
         if (off >= len) goto bad;
-        own = wire_name(p, len, off, NULL, 0, o->cname, &end);   /* owner == current target? */
+        own = wire_name(p, len, off, NULL, 0, cn, &end);   /* owner == current target? */
         if (own < 0) goto bad;
         off = end;
         if (off + 10u > len) goto bad;
@@ -326,7 +379,7 @@ static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t le
         if (!own || mt_rd16(p + rd - 8) != 1) continue;          /* other owner / not class IN */
         if (type == 5u) {                                        /* CNAME: follow */
             if (++hops > DNS_CNAME_HOPS) goto bad;
-            r = wire_name(p, len, rd, o->cname, sizeof o->cname, NULL, &end);
+            r = wire_name(p, len, rd, cn, cncap, NULL, &end);
             if (r != 1 || end > off) goto bad;
         } else if (type != q->qtype) {
             continue;
@@ -337,8 +390,9 @@ static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t le
             found = 1;
         } else if (type == 12u) {                                /* PTR -> cname */
             if (found) continue;
-            r = wire_name(p, len, rd, o->cname, sizeof o->cname, NULL, &end);
+            r = wire_name(p, len, rd, cn, cncap, NULL, &end);
             if (r != 1 || end > off) goto bad;
+            tmin = rttl;
             found = 1;
         } else if (type == 13u) {                                /* HINFO: cpu, os */
             uint32_t l1, l2, k;
@@ -384,24 +438,31 @@ static void dns_pending(mt_dns_result *o) {
 static int dns_parse(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
                      mt_dns_status *st, uint32_t *ttl) {
     if (dns_parse_raw(s, q, p, len, st, ttl)) return 1;
-    dns_pending(q->out);
+    if (q->out) dns_pending(q->out);
     return 0;
 }
 
 /* ---- completion ---- */
 
-typedef struct { mt_dns_cb cb; void *user; mt_dns_result *out; } dns_done;
+typedef struct { mt_dns_cb cb; mt_dns_ptr_cb pcb; void *user; mt_dns_result *out; char *pbuf;
+                 mt_dns_status st; } dns_done;
 
 /* Free the slot and fix up the result; the caller invokes the callback afterwards (so the
  * callback may start new queries). */
 static void dns_take(mt_stack *s, mt_dns_q *q, mt_dns_status st, dns_done *d) {
     if (st != MT_DNS_OK) mt_log(s, MT_LOG_DNS_FAIL, (uint8_t)st, q->id);
-    d->cb = q->cb; d->user = q->user; d->out = q->out;
-    if (st != MT_DNS_OK) memset(q->out, 0, sizeof *q->out);
-    q->out->status = st;
+    d->cb = q->cb; d->pcb = q->pcb; d->user = q->user; d->out = q->out; d->pbuf = q->pbuf; d->st = st;
+    if (q->pbuf) name_out(q->pbuf, q->pcap, st == MT_DNS_OK ? s->dns->pname : "");
+    if (q->out) {
+        if (st != MT_DNS_OK) memset(q->out, 0, sizeof *q->out);
+        q->out->status = st;
+    }
     q->used = 0;
 }
-static void dns_fire(const dns_done *d) { if (d->cb) d->cb(d->user, d->out); }
+static void dns_fire(const dns_done *d) {
+    if (d->pcb) d->pcb(d->user, d->st, d->pbuf);
+    else if (d->cb) d->cb(d->user, d->out);
+}
 
 /* Handle one received datagram. A completed query is described in *d (d->cb may be NULL even
  * then, so `*fired` says whether it completed). */
@@ -416,6 +477,7 @@ static int dns_rx(mt_stack *s, const mt_udp_dgram *g, dns_done *d) {
         if (dn->q[i].used && dn->q[i].id == mt_rd16(g->data)) { q = &dn->q[i]; break; }
     if (!q || !dns_parse(s, q, g->data, g->len, &st, &ttl)) return 0;
     if (st == MT_DNS_OK && q->qtype == MT_DNS_Q_A) cache_store(s, q, q->out, ttl, s->now);
+    if (st == MT_DNS_OK && q->pbuf) cache_store_ptr(s, q->paddr, s->dns->pname, ttl, s->now);
     if (st != MT_DNS_OK && q->dom && q_dom(s, q)) {            /* negative: try the bare name */
         dns_pending(q->out);                /* parse left the negative answer in `out` */
         q->dom = 0;
@@ -493,10 +555,40 @@ int mt_dns_ptr_name(mt_ip4 a, char out[32]) {
     return n + (int)sizeof suffix - 1;
 }
 
-int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *out,
-                 mt_dns_cb cb, void *user, uint32_t now) {
+/* Start a network query: a free slot, the resolver's endpoint (created on first use in the
+ * reserved UDP slot, on a random ephemeral port), the first send. *qp (if given) gets the slot. */
+static int dns_launch(mt_stack *s, const char *name, size_t n, mt_dns_qtype qt, mt_dns_result *out,
+                      mt_dns_cb cb, void *user, size_t dl, uint32_t now, mt_dns_q **qp) {   /* out NULL: reverse */
     mt_dns *dn = s->dns;
     mt_dns_q *q = NULL;
+    uint32_t i;
+    for (i = 0; i < MT_DNS_SLOTS; i++)
+        if (!dn->q[i].used) { q = &dn->q[i]; break; }
+    if (!q) return -MT_DNS_BUSY;
+    if (!dn->udp) {
+        uint16_t port = (uint16_t)(49152u + (dns_next_id(dn) % 16384u));
+        dn->udp = mt_udp_create_reserved(s, port, dn->rx, MT_DNS_RXBUF, dns_udp_cb, s);
+        if (!dn->udp) dn->udp = mt_udp_create_reserved(s, 0, dn->rx, MT_DNS_RXBUF, dns_udp_cb, s);
+        if (!dn->udp) return -MT_DNS_BUSY;
+    }
+    memset(q, 0, sizeof *q);
+    memcpy(q->name, name, n);
+    if (out) dns_pending(out);
+    q->out = out;
+    q->cb = cb;
+    q->user = user;
+    q->qtype = (uint8_t)qt;
+    q->t0 = now;
+    q->id = dns_next_id(dn);
+    q->dom = (uint8_t)(dl != 0);
+    q->used = 1;
+    if (dns_send(s, q, now) != MT_OK) { q->used = 0; return -MT_DNS_NO_SERVER; }
+    if (qp) *qp = q;
+    return MT_DNS_IN_PROGRESS;
+}
+
+int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *out,
+                 mt_dns_cb cb, void *user, uint32_t now) {
     size_t n = 0, dl;
     mt_ip4 ip;
     int absolute = 0, r;
@@ -527,24 +619,38 @@ int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *
      * name with a domain set, else the bare/absolute name). */
     if (qt == MT_DNS_Q_A && cache_lookup(s, name, n, dl, out, now)) return 0;
     if (s->cfg.dns == 0) return -MT_DNS_NO_SERVER;
-    for (i = 0; i < MT_DNS_SLOTS; i++)
-        if (!dn->q[i].used) { q = &dn->q[i]; break; }
-    if (!q) return -MT_DNS_BUSY;
-    if (!dn->udp) {                                        /* lazy: counts against max_udp */
-        dn->udp = mt_udp_create(s, 0, dn->rx, MT_DNS_RXBUF, dns_udp_cb, s);
-        if (!dn->udp) return -MT_DNS_BUSY;
+    return dns_launch(s, name, n, qt, out, cb, user, dl, now, NULL);
+}
+
+int mt_dns_ptr(mt_stack *s, mt_ip4 addr, char *namebuf, uint16_t cap, mt_dns_ptr_cb cb, void *user,
+               uint32_t now) {
+    mt_dns *dn = s->dns;
+    mt_dns_q *q;
+    char nm[32];
+    uint32_t i;
+    int r;
+    s->now = now;
+    if (!namebuf || cap == 0) return -MT_DNS_BAD_NAME;
+    if (cache_lookup_ptr(s, addr, namebuf, cap, now)) return 0;
+    if (s->cfg.dns == 0) return -MT_DNS_NO_SERVER;
+    for (i = 0; i < MT_DNS_SLOTS; i++)                 /* the single scratch result is in use */
+        if (dn->q[i].used && dn->q[i].pbuf) return -MT_DNS_BUSY;
+    r = mt_dns_ptr_name(addr, nm);
+    r = dns_launch(s, nm, (size_t)r, MT_DNS_Q_PTR, NULL, NULL, user, 0, now, &q);
+    if (r == MT_DNS_IN_PROGRESS) { q->pbuf = namebuf; q->pcap = cap; q->paddr = addr; q->pcb = cb; }
+    return r;
+}
+
+void mt_dns_cancel(mt_stack *s, const void *target) {
+    uint32_t i;
+    if (!target) return;
+    for (i = 0; i < MT_DNS_SLOTS; i++) {
+        mt_dns_q *q = &s->dns->q[i];
+        if (q->used && ((const void *)q->out == target || (const void *)q->pbuf == target))
+            q->used = 0;
     }
-    memset(q, 0, sizeof *q);
-    memcpy(q->name, name, n);
-    dns_pending(out);
-    q->out = out;
-    q->cb = cb;
-    q->user = user;
-    q->qtype = (uint8_t)qt;
-    q->t0 = now;
-    q->id = dns_next_id(dn);
-    q->dom = (uint8_t)(dl != 0);
-    q->used = 1;
-    if (dns_send(s, q, now) != MT_OK) { q->used = 0; return -MT_DNS_NO_SERVER; }
-    return MT_DNS_IN_PROGRESS;
+}
+
+void mt_dns_reseed(mt_stack *s, uint32_t a, uint32_t b) {
+    s->dns->rnd = ((a ^ 0x5DEECE66u) ^ (b * 0x9E3779B1u)) | 1u;
 }

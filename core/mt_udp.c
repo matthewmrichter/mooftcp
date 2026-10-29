@@ -15,7 +15,7 @@
 static mt_udp *udp_find(const mt_stack *s, uint16_t port) {
     uint16_t i;
     if (port == 0) return NULL;
-    for (i = 0; i < s->lim.max_udp; i++)
+    for (i = 0; i <= s->lim.max_udp; i++)               /* includes the reserved DNS slot */
         if (s->udp[i].port == port) return &s->udp[i];
     return NULL;
 }
@@ -25,14 +25,9 @@ static uint32_t pseudo_sum(mt_ip4 src, mt_ip4 dst, uint16_t ulen) {
     return (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + UDP_PROTO + ulen;
 }
 
-mt_udp *mt_udp_create(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen, mt_udp_cb cb,
-                      void *user) {
-    mt_udp *u = NULL;
-    uint16_t i;
-    if (!buf || buflen < UDP_MIN_BUF) return NULL;
-    for (i = 0; i < s->lim.max_udp; i++)
-        if (s->udp[i].port == 0) { u = &s->udp[i]; break; }
-    if (!u) return NULL;
+static mt_udp *udp_create(mt_stack *s, mt_udp *u, uint16_t lport, uint8_t *buf, uint32_t buflen,
+                          mt_udp_cb cb, void *user) {
+    if (!u || !buf || buflen < UDP_MIN_BUF) return NULL;
     if (lport == 0) {
         uint32_t tries;
         uint16_t p = s->udp_eph;
@@ -55,6 +50,21 @@ mt_udp *mt_udp_create(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen
     u->user = user;
     u->port = lport;
     return u;
+}
+
+mt_udp *mt_udp_create(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen, mt_udp_cb cb,
+                      void *user) {
+    mt_udp *u = NULL;
+    uint16_t i;
+    for (i = 0; i < s->lim.max_udp; i++)
+        if (s->udp[i].port == 0) { u = &s->udp[i]; break; }
+    return udp_create(s, u, lport, buf, buflen, cb, user);
+}
+
+mt_udp *mt_udp_create_reserved(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen,
+                               mt_udp_cb cb, void *user) {
+    mt_udp *u = &s->udp[s->lim.max_udp];
+    return u->port == 0 ? udp_create(s, u, lport, buf, buflen, cb, user) : NULL;
 }
 
 uint16_t mt_udp_port(const mt_udp *u) { return u->port; }

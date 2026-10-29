@@ -34,7 +34,9 @@
  *    never after mt_tcp_release (which drops still-queued requests silently: the caller completes
  *    them). On termination the queue is detached first, so every request already pending then gets
  *    its done even if an earlier done re-listens, re-opens or releases the TCB; TERMINATE is then
- *    fired only if the TCB is still CLOSED and not re-created. */
+ *    fired only if the TCB is still CLOSED and not re-created. A release inside a done that
+ *    the ACK path fires drops the remaining queued requests silently, so the glue never releases
+ *    from inside a callback: it defers the release. */
 
 typedef uint32_t mt_ip4;                         /* host byte order */
 #define MT_NO_DEADLINE 0xFFFFFFFFu
@@ -55,6 +57,8 @@ typedef struct {
     uint16_t mtu;
 } mt_ifconfig;
 
+/* max_udp counts application endpoints only: the resolver's own endpoint is an extra reserved
+ * slot (mt_stack_size accounts for it), so apps can never starve DNS. */
 typedef struct { uint8_t max_tcp, max_udp, arp_entries, dns_cache; } mt_limits;
 
 /* Counters (all uint32_t, in this order; tests index the struct as an array). tcp_conns_open is
@@ -99,8 +103,32 @@ uint32_t  mt_stack_size(const mt_limits *l);    /* arena bytes needed */
  * hosts with 64-bit pointers, else 4; an 8-aligned arena is always fine). */
 mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_link *link,
                         uint32_t seed);
-/* A stack with addr==0 sends nothing and answers nothing. */
+/* `seed` is the initial default entropy (deterministic for tests); real embedders follow with
+ * mt_set_entropy. */
+/* A stack with addr==0 sends nothing and answers nothing.
+ * mt_set_config semantics, each applied when the config is set:
+ *  - mtu is clamped to 68..1500.
+ *  - If addr, mask or gateway changes, the ARP table is flushed (every entry, resolved or
+ *    pending) and the frame held for ARP is discarded (counted in arp_drops). Setting the same
+ *    values again (for example only the DNS server) leaves ARP alone.
+ *  - Connections are never aborted, reset or re-addressed by a config change; the glue decides
+ *    what to do with connections bound to an old address.
+ *  - If the MTU shrinks, every TCB whose MSS is larger than the new local MSS (mtu - 40, at
+ *    least 64) is clamped to it; a connection with a smaller MSS keeps it, and a larger MTU
+ *    never raises an MSS. Unacknowledged data is retransmitted at the new size.
+ *  - A DNS server or domain change cancels nothing: queries already in progress keep their
+ *    slot and ID, and their next retry is sent to the new server and (for a name without a
+ *    dot that was being searched with a domain) with the new domain. Answers are accepted
+ *    only from the current server. Queries started afterwards use the new values at once.
+ *  - Call mt_next_deadline afterwards like after any API call. */
 void      mt_set_config(mt_stack *s, const mt_ifconfig *c);
+/* Reseed from the platform's entropy (Ticks, Time, mouse, ...): `a` becomes the base of the
+ * TCP initial sequence numbers and seeds the ephemeral port counters and DNS query IDs / source
+ * port; `b` keys a 32-bit mix of the connection 4-tuple that is added to every ISN (computed at
+ * connect time only). Call it before opening connections; the DNS endpoint's port is chosen
+ * when the first network query is made. A stack that never calls it keeps the deterministic
+ * defaults from mt_stack_init's seed (ISN = seed + now * 250, no tuple mix). */
+void      mt_set_entropy(mt_stack *s, uint32_t a, uint32_t b);
 void      mt_get_config(const mt_stack *s, mt_ifconfig *c);
 const mt_stats *mt_get_stats(const mt_stack *s);
 /* Connections in use for TCPGlobalInfo: TCBs past LISTEN (SYN_SENT .. TIME_WAIT). */
@@ -179,10 +207,27 @@ typedef void (*mt_dns_cb)(void *user, const mt_dns_result *r);
  * valid until then; `name` is copied), or the NEGATED mt_dns_status (e.g. -MT_DNS_BUSY) on an
  * immediate error. (Errors are negative because positive status values would collide with the
  * "in progress" value 1.) The first network query lazily creates one ephemeral UDP endpoint
- * (counts against max_udp; kept for the stack's lifetime); if no slot is free the query fails
- * with -MT_DNS_BUSY. */
+ * (the reserved extra slot, not counted in max_udp; kept for the stack's lifetime); if all query
+ * slots are busy the query fails with -MT_DNS_BUSY. */
 int  mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype q, mt_dns_result *out,
                   mt_dns_cb cb, void *user, uint32_t now);
+/* Reverse lookup of `addr`. The name is copied into namebuf (cap bytes including the NUL; a
+ * longer name is truncated, never written past cap; "" when the lookup fails). Return value as
+ * mt_dns_query: 0 (cache hit: namebuf filled, cb NOT called), MT_DNS_IN_PROGRESS (cb fires
+ * later from mt_input / mt_tick with the final status and `namebuf`, which is filled just
+ * before; `namebuf` must stay valid until then, or be cancelled), or -status
+ * (-MT_DNS_BAD_NAME for namebuf NULL or cap 0, -MT_DNS_NO_SERVER, -MT_DNS_BUSY). Only one
+ * reverse lookup can be in flight at a time (it shares a scratch name buffer in the arena): a
+ * second returns -MT_DNS_BUSY. Successful answers of up to 63 characters are cached in the
+ * same cache as A answers, keyed on the address. */
+typedef void (*mt_dns_ptr_cb)(void *user, mt_dns_status status, const char *name);
+int  mt_dns_ptr(mt_stack *s, mt_ip4 addr, char *namebuf, uint16_t cap, mt_dns_ptr_cb cb,
+                void *user, uint32_t now);
+/* Cancel every query in progress whose result pointer is `target`: the `out` given to
+ * mt_dns_query, or the `namebuf` given to mt_dns_ptr. Afterwards no callback fires for it, the
+ * target is never written, its retries stop, and a late answer is ignored. Harmless if nothing
+ * matches. Legal from callbacks. */
+void mt_dns_cancel(mt_stack *s, const void *target);
 int  mt_dns_ptr_name(mt_ip4 a, char out[32]);    /* "d.c.b.a.in-addr.arpa"; returns its length */
 typedef void (*mt_dns_enum_cb)(void *user, const char *name, const mt_ip4 *addr, uint8_t naddr,
                                uint32_t ttl_left_s);
@@ -213,7 +258,11 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
 /* Active open: sends the SYN before returning. lport 0 = ephemeral. MT_ERR_STATE unless CLOSED,
  * MT_ERR_INUSE if the 4-tuple is taken, MT_ERR_NOROUTE / MT_ERR_UNCONFIGURED / MT_ERR_INVAL. */
 int  mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t now);
-/* Passive open (0 = any for every argument). The TCB itself becomes the one connection. */
+/* Passive open (0 = any for rip_filter and rport_filter). lport 0 assigns an unused local port
+ * from 1024..2047 (as MacTCP does); read it back with mt_tcp_get_info(...).lport. MT_ERR_INUSE
+ * if all of them are taken. Several listeners on the same explicit port are allowed (MacTCP
+ * does too): the SYN goes to the most specific filter match, then to the lowest-numbered TCB.
+ * The TCB itself becomes the one connection. */
 int  mt_tcp_listen(mt_tcp *t, mt_ip4 rip_filter, uint16_t rport_filter, uint16_t lport);
 int  mt_tcp_close(mt_tcp *t, uint32_t now);     /* FIN after queued data; MT_ERR_STATE if not open */
 void mt_tcp_abort(mt_tcp *t, uint32_t now);     /* RST if synchronized; TERMINATE(ULP_ABORT) */

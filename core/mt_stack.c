@@ -27,7 +27,7 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     o->reasm = off;
     off = mt_arena_up(off + (uint32_t)sizeof(mt_reasm));
     o->udp = off;
-    off = mt_arena_up(off + (uint32_t)l->max_udp * (uint32_t)sizeof(mt_udp));
+    off = mt_arena_up(off + ((uint32_t)l->max_udp + 1u) * (uint32_t)sizeof(mt_udp));
     o->tcp = off;
     off = mt_arena_up(off + (uint32_t)l->max_tcp * (uint32_t)sizeof(mt_tcp));
     o->dns = off;
@@ -75,16 +75,44 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->tcp_eph = (uint16_t)(49152u + (seed + 7919u) % 16384u);
     s->dns = (mt_dns *)(void *)(base + lay.dns);
     s->dns->rnd = (seed ^ 0x5DEECE66u) | 1u;
+    s->lis_eph = (uint16_t)(1024u + (seed + 104729u) % 1024u);
     s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
     s->log = (mt_logrec *)(void *)(base + lay.log);
     return s;
 }
 
-/* mtu is clamped to 68..1500 (IPv4 minimum, txbuf limit); 0 means 68, never "unlimited". */
+void mt_set_entropy(mt_stack *s, uint32_t a, uint32_t b) {
+    s->seed = a;
+    s->key = b ? b : 0x9E3779B9u;               /* nonzero: the tuple mix is active */
+    s->ip_id = (uint16_t)(a ^ (b >> 16));
+    s->udp_eph = (uint16_t)(49152u + (a ^ (b * 40503u)) % 16384u);
+    s->tcp_eph = (uint16_t)(49152u + ((a + 7919u) ^ (b >> 3)) % 16384u);
+    s->lis_eph = (uint16_t)(1024u + ((a >> 7) ^ b) % 1024u);
+    mt_dns_reseed(s, a, b);
+}
+
+/* mtu is clamped to 68..1500 (IPv4 minimum, txbuf limit); 0 means 68, never "unlimited".
+ * The full semantics are written down at the declaration in mt.h. */
 void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
+    mt_ifconfig old = s->cfg;
+    uint16_t i, lm;
     s->cfg = *c;
     if (s->cfg.mtu < 68u) s->cfg.mtu = 68u;
     if (s->cfg.mtu > MT_TXBUF_SIZE - MT_ETH_HDR) s->cfg.mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
+    if (old.addr != s->cfg.addr || old.mask != s->cfg.mask || old.gateway != s->cfg.gateway) {
+        memset(s->arp, 0, (size_t)s->lim.arp_entries * sizeof(mt_arp_entry));
+        if (s->pend->len) {                      /* the held frame was addressed from the old setup */
+            s->pend->len = 0;
+            s->stats.arp_drops++;
+            MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
+        }
+        s->arp_rel.live = 0;
+    }
+    if (s->cfg.mtu < old.mtu) {
+        lm = mt_tcp_local_mss(s);
+        for (i = 0; i < s->lim.max_tcp; i++)
+            if (s->tcp[i].used && s->tcp[i].mss > lm) s->tcp[i].mss = lm;
+    }
 }
 void mt_get_config(const mt_stack *s, mt_ifconfig *c) { *c = s->cfg; }
 const mt_stats *mt_get_stats(const mt_stack *s) { return &s->stats; }

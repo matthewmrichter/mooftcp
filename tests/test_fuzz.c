@@ -47,6 +47,10 @@ typedef struct {
     mt_udp *u[NU];
     mt_dns_result dres[ND];
     int dres_busy[ND];
+    mt_dns_result dres_snap[ND];     /* copy taken when cancelled: must never change again */
+    int dres_dead[ND];
+    char pbuf[48], pbuf_snap[48];    /* reverse lookup name buffer; same cancel rule */
+    int pbuf_busy, pbuf_dead;
     uint8_t lastout[8][1514];
     uint16_t lastlen[8];
     int lastn;
@@ -156,7 +160,49 @@ static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
 
 static void dns_cb(void *user, const mt_dns_result *r) {
     (void)r;
+    if (g.dres_dead[(int)(intptr_t)user]) bad("DNS callback after mt_dns_cancel");
     g.dres_busy[(int)(intptr_t)user] = 0;
+}
+
+static void ptr_cb(void *user, mt_dns_status st, const char *name) {
+    (void)user; (void)st;
+    if (g.pbuf_dead) bad("PTR callback after mt_dns_cancel");
+    if (name != g.pbuf || strlen(name) >= sizeof g.pbuf) bad("PTR callback with a bad name");
+    g.pbuf_busy = 0;
+}
+
+static void start_ptr(void) {
+    int r;
+    if (g.pbuf_busy) return;
+    memset(g.pbuf, 'q', sizeof g.pbuf);
+    r = mt_dns_ptr(g.s, rn(3) == 0 ? PEER : rnd(), g.pbuf, (uint16_t)(1 + rn(sizeof g.pbuf)), ptr_cb, NULL, g.now);
+    g.pbuf_dead = 0;
+    if (r == MT_DNS_IN_PROGRESS) g.pbuf_busy = 1;
+}
+
+/* Cancel one of the pending lookups and remember the target's bytes: it must never change. */
+static void cancel_dns(void) {
+    int i = (int)rn(ND + 1);
+    if (i == ND) {
+        if (!g.pbuf_busy) return;
+        mt_dns_cancel(g.s, g.pbuf);
+        memcpy(g.pbuf_snap, g.pbuf, sizeof g.pbuf);
+        g.pbuf_busy = 0; g.pbuf_dead = 1;
+    } else {
+        if (!g.dres_busy[i]) return;
+        mt_dns_cancel(g.s, &g.dres[i]);
+        g.dres_snap[i] = g.dres[i];
+        g.dres_busy[i] = 0; g.dres_dead[i] = 1;
+    }
+}
+
+static void check_cancelled(void) {
+    int i;
+    for (i = 0; i < ND; i++)
+        if (g.dres_dead[i] && memcmp(&g.dres[i], &g.dres_snap[i], sizeof g.dres[i]) != 0)
+            bad("DNS result written after mt_dns_cancel");
+    if (g.pbuf_dead && memcmp(g.pbuf, g.pbuf_snap, sizeof g.pbuf) != 0)
+        bad("PTR buffer written after mt_dns_cancel");
 }
 
 static void start_dns(void) {
@@ -166,6 +212,7 @@ static void start_dns(void) {
     mt_dns_qtype q = rn(2) ? MT_DNS_Q_A : (rn(2) ? MT_DNS_Q_PTR : MT_DNS_Q_MX);
     for (i = 0; i < ND; i++) if (!g.dres_busy[i]) break;
     if (i == ND) return;
+    g.dres_dead[i] = 0;
     r = mt_dns_query(g.s, names[rn(7)], q, &g.dres[i], dns_cb, (void *)(intptr_t)i, g.now);
     if (r == MT_DNS_IN_PROGRESS) g.dres_busy[i] = 1;
 }
@@ -307,7 +354,15 @@ static void tcp_action(mt_tcp *t) {
     case 7: if (rn(4) == 0) mt_tcp_close(t, g.now); break;
     case 8: if (rn(8) == 0) mt_tcp_abort(t, g.now); break;
     case 9: if (rn(10) == 0) drop_tcb(t); break;
-    case 10: if (rn(4) == 0) start_dns(); break;
+    case 10:
+        if (rn(4) == 0) {
+            switch (rn(4)) {
+            case 0: case 1: start_dns(); break;
+            case 2: start_ptr(); break;
+            default: cancel_dns(); break;
+            }
+        }
+        break;
     case 11: if (g.u[0] && rn(3) == 0) mt_udp_send(g.u[0], PEER, 9, b, (uint16_t)rn(300), 1, g.now); break;
     case 12: if (rn(4) == 0) mt_icmp_echo(g.s, PEER, 1, 2, b, (uint16_t)rn(100), g.now); break;
     case 13: { mt_tcp_info info; mt_tcp_get_info(t, &info); break; }
@@ -558,7 +613,7 @@ static uint16_t gen_dns(uint8_t *f) {
             p[n] = (uint8_t)rn(n);
             n++;
         } else {
-            mt_wr16(p + n, q->qtype == 15 ? 15 : 1); mt_wr16(p + n + 2, 1);
+            mt_wr16(p + n, q->qtype == 15 ? 15 : q->qtype == 12 ? 12 : 1); mt_wr16(p + n + 2, 1);
             mt_wr32(p + n + 4, rn(100000)); mt_wr16(p + n + 8, 4);
             n = (uint16_t)(n + 10);
             mt_wr32(p + n, rnd());
@@ -714,6 +769,7 @@ static void fuzz_step(uint8_t *f) {
     }
     if (rn(500) == 0) { mt_logrec lr[16]; mt_log_read(g.s, lr, 16); }
     check_invariants();
+    check_cancelled();
     deadline_check();
     d = mt_next_deadline(g.s, g.now);                       /* early tick: nothing due, nothing sent */
     if (d > 0 && rn(4) == 0) {
