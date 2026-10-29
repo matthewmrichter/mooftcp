@@ -4,6 +4,7 @@
 #   snow.sh stop                     kill Snow (and our Xvfb) by recorded PID
 #   snow.sh status                   exit 0 running / 1 stopped
 #   snow.sh shot <png>               screenshot the whole Xvfb screen
+# MT_ETH_LINK overrides the Ethernet link type of the workspace (default NAT; Down = cable unplugged).
 # MT_DISPLAY overrides the display (default :142). Only :140-:149 are accepted: :0/:1 are
 # the owner's desktop, and other displays (:97, :99, ...) belong to other sessions.
 set -euo pipefail
@@ -53,7 +54,7 @@ cmd_start() {
   need Xvfb xvfb; need xdpyinfo x11-utils
   [ -x "$MT_HOME/snow/snowemu" ] || die "missing $MT_HOME/snow/snowemu (run scripts/fetch-snow.sh)"
   [ -f "$MT_HOME/disks/work.hda" ] || die "missing work.hda (run scripts/fresh-disk.sh)"
-  sed "s#@MT_HOME@#$MT_HOME#g" "$ROOT/tools/mooftcp.snoww.in" > "$WS"
+  sed -e "s#@MT_HOME@#$MT_HOME#g" -e "s#@ETH_LINK@#${MT_ETH_LINK:-NAT}#g" "$ROOT/tools/mooftcp.snoww.in" > "$WS"
 
   if ! xdpyinfo -display "$MT_DISPLAY" >/dev/null 2>&1; then
     Xvfb "$MT_DISPLAY" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &

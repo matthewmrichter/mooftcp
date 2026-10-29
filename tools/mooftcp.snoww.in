@@ -1,7 +1,7 @@
 {
   "rom_path": "@MT_HOME@/rom/MacClassic.rom",
   "scsi_targets": [{"Disk": "@MT_HOME@/disks/work.hda"}, "None", "None", "Ethernet", "None", "None", "None"],
-  "ethernet_link_type": "NAT",
+  "ethernet_link_type": "@ETH_LINK@",
   "model": null,
   "init_args": {
     "audio_disabled": false,
