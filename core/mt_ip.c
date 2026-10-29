@@ -136,11 +136,26 @@ static void ip_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t id, uint16_t
     mt_wr16(h + 10, mt_cksum_fold(mt_cksum_add(0, h, MT_IP_HDR)));
 }
 
-int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
-                     uint32_t now) {
+/* Copy n bytes of the virtual payload hdr[0..hlen) || pl, starting at offset vo, to body. */
+static void ip_gather(uint8_t *body, const uint8_t *hdr, uint32_t hlen, const uint8_t *pl,
+                      uint32_t vo, uint16_t n) {
+    if (vo < hlen) {
+        uint16_t k = (uint16_t)(hlen - vo);
+        if (k > n) k = n;
+        memcpy(body, hdr + vo, k);
+        body += k;
+        n = (uint16_t)(n - k);
+    } else {
+        pl += vo - hlen;
+    }
+    if (n && pl != body) memmove(body, pl, n);   /* in-place source: earlier data already sent */
+}
+
+int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr, uint16_t hlen,
+                     const uint8_t *pl, uint16_t plen, uint32_t now) {
     mt_ip4 nexthop;
     uint16_t id, mtu, chunk;
-    uint32_t off;
+    uint32_t off, tot = (uint32_t)hlen + plen;
     uint8_t *body = s->txbuf + MT_ETH_HDR + MT_IP_HDR;
 
     if (s->cfg.addr == 0) return MT_ERR_UNCONFIGURED;
@@ -151,29 +166,35 @@ int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, 
 
     mtu = s->cfg.mtu;
     if (mtu > MT_TXBUF_SIZE - MT_ETH_HDR) mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
+    if (tot > 65535u - MT_IP_HDR) return MT_ERR_INVAL;
     id = s->ip_id++;
     s->stats.ip_out++;
 
-    if ((uint32_t)MT_IP_HDR + plen <= mtu) {                         /* fast path */
-        if (pl != body) memcpy(body, pl, plen);
-        ip_hdr(s, dst, proto, id, 0, plen);
-        mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + plen), now);
+    if (MT_IP_HDR + tot <= mtu) {                                    /* fast path */
+        ip_gather(body, hdr, hlen, pl, 0, (uint16_t)tot);
+        ip_hdr(s, dst, proto, id, 0, (uint16_t)tot);
+        mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + tot), now);
         return MT_OK;
     }
-    if (mtu < MT_IP_HDR + 8u || plen > 65535u - MT_IP_HDR) { s->stats.ip_out--; return MT_ERR_INVAL; }
+    if (mtu < MT_IP_HDR + 8u) { s->stats.ip_out--; return MT_ERR_INVAL; }
 
     chunk = (uint16_t)(((mtu - MT_IP_HDR) >> 3) << 3);
-    for (off = 0; off < plen; off += chunk) {   /* off is 32-bit: no wrap near 65535 */
-        uint16_t n = (uint16_t)(plen - off);
+    for (off = 0; off < tot; off += chunk) {   /* off is 32-bit: no wrap near 65535 */
+        uint16_t n = (uint16_t)(tot - off);
         uint16_t ff = (uint16_t)(off >> 3);
         if (n > chunk) { n = chunk; ff |= 0x2000u; }
-        if (pl + off != body) memmove(body, pl + off, n);   /* in-place source: earlier data already sent */
+        ip_gather(body, hdr, hlen, pl, off, n);
         ip_hdr(s, dst, proto, id, ff, n);
         s->stats.ip_frag_out++;
         /* Fragments are too big to be held for ARP: stop once one was not sent. */
         if (mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + n), now) != 1) break;
     }
     return MT_OK;
+}
+
+int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
+                     uint32_t now) {
+    return mt_ip_output_hdr(s, dst, proto, NULL, 0, pl, plen, now);
 }
 
 int mt_ip_output(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t plen, uint32_t now) {

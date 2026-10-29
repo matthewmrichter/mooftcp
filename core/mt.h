@@ -43,6 +43,10 @@ typedef struct {
     uint32_t ip_reasm_fail; /* reassemblies abandoned (timeout, overlap, overflow, slot busy) */
     uint32_t icmp_in;       /* ICMP messages accepted (well-formed, checksum ok, from a unicast peer) */
     uint32_t icmp_out;      /* ICMP messages transmitted (echo requests/replies, errors) */
+    uint32_t udp_in;        /* datagrams queued to an endpoint */
+    uint32_t udp_out;       /* datagrams handed to IPv4 output */
+    uint32_t udp_drops;     /* malformed, bad checksum, or receive buffer full */
+    uint32_t udp_noport;    /* datagrams for a port nobody owns */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
@@ -63,6 +67,27 @@ void      mt_set_echo_cb(mt_stack *s, mt_echo_cb cb, void *user);
  * Returns what mt_ip_output returns. */
 int       mt_icmp_echo(mt_stack *s, mt_ip4 dst, uint16_t id, uint16_t seq, const uint8_t *data,
                        uint16_t len, uint32_t now);
+
+/* ---- UDP ---- */
+typedef struct mt_udp mt_udp;
+typedef enum { MT_UDP_EV_DATA = 1, MT_UDP_EV_ICMP = 2 } mt_udp_event;  /* ICMP arg = (type<<8)|code */
+typedef void (*mt_udp_cb)(mt_udp *u, mt_udp_event ev, uint32_t arg, void *user);
+typedef struct { mt_ip4 src; uint16_t sport; const uint8_t *data; uint16_t len; } mt_udp_dgram;
+/* buf (owned by the caller, any alignment, must stay valid until release) receives queued
+ * datagrams. NULL if no free slot, port in use, or buflen < 1024. lport 0 = ephemeral
+ * (49152..65535). DATA fires once per datagram, before mt_input returns; no callback fires
+ * after mt_udp_release. */
+mt_udp  *mt_udp_create(mt_stack *s, uint16_t lport, uint8_t *buf, uint32_t buflen, mt_udp_cb cb,
+                       void *user);
+uint16_t mt_udp_port(const mt_udp *u);
+/* len <= 65507 else MT_ERR_INVAL; checksum 0 sends field 0. Returns what mt_ip_output returns. */
+int      mt_udp_send(mt_udp *u, mt_ip4 dst, uint16_t dport, const uint8_t *p, uint16_t len,
+                     int checksum, uint32_t now);
+/* 1 and *out filled (data points into the receive buffer) if a datagram is queued. */
+int      mt_udp_peek(mt_udp *u, mt_udp_dgram *out);
+void     mt_udp_done(mt_udp *u);                       /* drop the peeked (oldest) datagram */
+uint32_t mt_udp_queued(const mt_udp *u);               /* number of queued datagrams */
+void     mt_udp_release(mt_udp *u);
 
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);

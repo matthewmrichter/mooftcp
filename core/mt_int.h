@@ -76,6 +76,20 @@ typedef void (*mt_ip_spy_fn)(void *ctx, uint8_t proto, mt_ip4 src, mt_ip4 dst,
                              const uint8_t *pl, uint16_t len);
 #endif
 
+/* ---- UDP endpoint (arena array of lim.max_udp; port 0 = free slot) ----
+ * Receive area: records [src(4) sport(2) len(2) data] padded to even, placed contiguously
+ * in the caller's buf. head/tail are byte offsets; when a record does not fit before the
+ * end, `wrap` remembers where the tail run stopped and the next record starts at 0. */
+struct mt_udp {
+    mt_stack *st;
+    uint8_t *buf;
+    uint32_t buflen, head, tail, wrap;
+    mt_udp_cb cb;
+    void *user;
+    uint16_t port;
+    uint16_t n;          /* queued datagrams */
+};
+
 struct mt_stack {
     mt_ifconfig cfg;
     mt_link link;
@@ -86,6 +100,8 @@ struct mt_stack {
     mt_arp_entry *arp;       /* lim.arp_entries entries */
     mt_pending *pend;
     mt_reasm *reasm;
+    mt_udp *udp;             /* lim.max_udp endpoints */
+    uint16_t udp_eph;        /* next ephemeral port candidate */
     uint16_t ip_id;          /* next IPv4 identification */
     mt_echo_cb echo_cb;
     void *echo_user;
@@ -137,11 +153,15 @@ int mt_ip_output(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t plen, uint32_t
  * to send datagrams larger than txbuf. pl may equal mt_ip_payload(). */
 int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
                      uint32_t now);
+/* Same, with the payload being hdr[0..hlen) followed by pl[0..plen) (hlen + plen <= 65515);
+ * lets UDP send big datagrams without a contiguous copy. */
+int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr, uint16_t hlen,
+                     const uint8_t *pl, uint16_t plen, uint32_t now);
 static inline mt_ip4 mt_ip_src_for(const mt_stack *s) { return s->cfg.addr; }
 void mt_ip_timers(mt_stack *s, uint32_t now);
 uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now);
 
-/* Protocol handlers (stubs in mt_stubs.c until Tasks 5-7). */
+/* Protocol handlers (TCP stub in mt_stubs.c until Task 7). */
 void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);

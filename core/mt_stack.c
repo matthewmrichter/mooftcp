@@ -7,6 +7,7 @@ typedef struct {
     uint32_t arp;       /* offset of the ARP table */
     uint32_t pend;      /* offset of the pending-frame slot */
     uint32_t reasm;     /* offset of the IPv4 reassembly slot */
+    uint32_t udp;       /* offset of the UDP endpoint array */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -18,6 +19,9 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off += MT_ALIGN4((uint32_t)sizeof(mt_pending));
     o->reasm = off;
     off += MT_ALIGN4((uint32_t)sizeof(mt_reasm));
+    off = (off + 7u) & ~7u;   /* endpoints hold pointers: 8-byte alignment on 64-bit hosts */
+    o->udp = off;
+    off += MT_ALIGN4((uint32_t)l->max_udp * (uint32_t)sizeof(mt_udp));
     /* Later tasks: add their section here (offset = off; off += MT_ALIGN4(bytes);). */
     o->total = off;
 }
@@ -52,6 +56,8 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->pend = (mt_pending *)(void *)(base + lay.pend);
     s->reasm = (mt_reasm *)(void *)(base + lay.reasm);
     s->ip_id = (uint16_t)seed;
+    s->udp = (mt_udp *)(void *)(base + lay.udp);
+    s->udp_eph = (uint16_t)(49152u + seed % 16384u);
     /* Later tasks: point their sections here. */
     return s;
 }
