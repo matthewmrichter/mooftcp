@@ -188,17 +188,23 @@ static void test_segmentation(void) {
     {
         SETUP(24000, 5000, rec_cb, &r);                 /* send ring 6000 */
         T_EQ(mt_tcp_send(c.t, d, 5000, 0, 0, 10), 5000);
-        T_EQ(fl.n, 4);
-        for (i = 0; i < 4; i++) {
-            static const uint16_t want[4] = {1460, 1460, 1460, 620};
+        T_EQ(fl.n, 3);                                  /* initial cwnd 4380: three full segments */
+        for (i = 0; i < 3; i++) {
+            static const uint16_t want[3] = {1460, 1460, 1460};
             T_CHECK(view_tcp(fl.f[i], fl.len[i], &v));
             T_EQ(v.dlen, want[i]); T_EQ(v.seq, c.ms + off); T_CHECK(v.checksum_ok);
             memcpy(got + off, v.data, v.dlen);
             off += v.dlen;
         }
+        inject(&c, c.ps, c.ms + 4380, TF_ACK, NULL, 0, 20);   /* all acked: the 620-byte tail goes */
+        T_EQ(fl.n, 4);
+        T_CHECK(view_tcp(fl.f[3], fl.len[3], &v));
+        T_EQ(v.dlen, 620); T_EQ(v.seq, c.ms + off); T_CHECK(v.checksum_ok);
+        memcpy(got + off, v.data, v.dlen);
+        off += v.dlen;
         T_EQ(off, 5000);
         T_MEMEQ(got, d, 5000);
-        T_CHECK(view_tcp(fl.f[3], fl.len[3], &v)); T_EQ(v.flags & TF_PSH, TF_PSH);
+        T_EQ(v.flags & TF_PSH, TF_PSH);
     }
 }
 

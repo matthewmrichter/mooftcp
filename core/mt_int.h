@@ -101,7 +101,7 @@ struct mt_udp {
 enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] slots / tmask bits */
 #define MT_TF_ACKNOW   0x01u   /* an ACK is owed: mt_tcp_output sends one if nothing carries it */
 #define MT_TF_FINQ     0x02u   /* app closed: send FIN after the queued data */
-#define MT_TF_FINSENT  0x04u   /* FIN transmitted (occupies seq snd_nxt-1) */
+#define MT_TF_FINSENT  0x04u   /* FIN transmitted at least once (occupies seq snd_max-1) */
 #define MT_TF_PASSIVE  0x08u   /* SYN_RCVD reached from LISTEN: RST/timeout re-listens */
 #define MT_TF_EST      0x10u   /* counted in stats.tcp_conns_open */
 #define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
@@ -111,6 +111,8 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_T2_SNDWANT  0x04u   /* a send was short: fire SEND_SPACE when ACKs free ring space */
 #define MT_T2_SNDURG   0x08u   /* snd_up is live: segments before it carry URG */
 #define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
+#define MT_T2_RTTING   0x20u   /* rtt_seq/rtt_t0 hold a timed (never retransmitted) segment */
+#define MT_T2_RECOV    0x40u   /* in fast recovery (until ACK >= recover) */
 #define MT_TH_FIN 0x01u
 #define MT_TH_SYN 0x02u
 #define MT_TH_RST 0x04u
@@ -120,23 +122,32 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TCP_DELACK_MS 100u
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
+#define MT_TCP_RTO_MIN  200u
+#define MT_TCP_FW2_MS   60000u   /* FIN_WAIT_2 idle limit (refreshed by received data) */
 struct mt_tcp {
     mt_stack *st;
     uint32_t snd_una, snd_nxt, snd_wnd, rcv_nxt;
+    uint32_t snd_max;         /* highest sequence ever sent (snd_nxt is pulled back to snd_una by
+                               * go-back-N recovery; ACKs are valid up to snd_max) */
     mt_ring sndq, rcvq;
     uint32_t snd_wl1, snd_wl2, iss, irs;
     uint32_t rcv_adv;         /* right edge of the window last advertised (receiver SWS) */
     uint32_t rcv_up, snd_up;  /* urgent marks: sequence number just past the urgent data */
     uint32_t tmr[MT_TT_N];    /* absolute ms deadlines, valid where the tmask bit is set */
-    uint32_t rto, srtt;       /* ms; srtt 0 until measured (Task 9) */
-    uint32_t ulp_start;       /* when the oldest unacked data last made progress */
+    uint32_t rto;             /* ms, current (backed-off) retransmission timeout */
+    uint32_t srtt8, rttvar4;  /* RFC 6298 state in fixed point: srtt*8, rttvar*4 (ms); srtt8 0 = unmeasured */
+    uint32_t cwnd, ssthresh, ca_acc;   /* congestion window; bytes acked toward the next CA step */
+    uint32_t recover;         /* snd_max when loss recovery began (NewReno) */
+    uint32_t rtt_seq, rtt_t0; /* timed segment: ACK >= rtt_seq yields a sample (t0 = send time) */
+    uint32_t ulp_dl;          /* absolute ULP deadline (valid while RTO or PERSIST is armed) */
+    uint32_t ulp_ms;          /* ULP timeout in ms, 0 = none */
     uint32_t tnow;            /* last clock value seen (for APIs without a `now` argument) */
     mt_ip4 rip, frip;         /* peer; listen filter */
     mt_tcp_cb cb;
     void *user;
     uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
-    uint16_t mss, ulp_s;
-    uint8_t state, flags, flags2, tmask, used;
+    uint16_t mss;
+    uint8_t state, flags, flags2, tmask, used, dupacks;
     uint8_t gen;              /* bumped on create/release/terminate/abort: stale deferred events are dropped */
 };
 
@@ -156,7 +167,7 @@ struct mt_stack {
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
     /* The TCP segment (if any) that mt_arp_insert just released from the held slot; consulted
      * and cleared by mt_tcp_arp_resolved so it does not retransmit that same segment. */
-    struct { mt_ip4 dst; uint32_t seq; uint16_t sport, dport; uint8_t live; } arp_rel;
+    struct { mt_ip4 dst; uint32_t seq; uint16_t sport, dport, len; uint8_t live; } arp_rel;
     uint16_t udp_eph;        /* next ephemeral port candidate */
     uint16_t ip_id;          /* next IPv4 identification */
     mt_echo_cb echo_cb;
@@ -243,8 +254,9 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
 void mt_tcp_timers(mt_stack *s, uint32_t now);
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now);
 /* An ARP entry for `ip` just resolved: every connection whose next hop is `ip` and that has
- * unacked data retransmits its first unacked segment, except the one mt_arp_insert released
- * from the held slot a moment ago (recorded in s->arp_rel via mt_tcp_note_released). */
+ * unacked data goes back to snd_una (go-back-N, bounded by cwnd) and resends, except for the
+ * segment mt_arp_insert released from the held slot a moment ago (s->arp_rel, set by
+ * mt_tcp_note_released), which is on the wire already and is skipped. */
 void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now);
 void mt_tcp_note_released(mt_stack *s, const uint8_t *iphdr);   /* held frame about to be sent */
 /* Transmit whatever the state permits: SYN / SYN-ACK, queued data within the peer window,
@@ -259,6 +271,15 @@ uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit);
 void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);
 /* Retransmit the first unacked segment (SYN, SYN-ACK, data from the ring, or FIN). */
 void mt_tcp_rexmit(mt_tcp *t, uint32_t now);
+/* Zero-window probe: one byte of the first unsent data (does not advance snd_nxt). */
+void mt_tcp_probe(mt_tcp *t, uint32_t now);
+/* RTO from the RFC 6298 state (srtt + 4*rttvar, clamped), INIT while nothing is measured. */
+static inline uint32_t mt_tcp_rto_base(const mt_tcp *t) {
+    uint32_t r;
+    if (t->srtt8 == 0) return MT_TCP_RTO_INIT;
+    r = (t->srtt8 >> 3) + t->rttvar4;
+    return r < MT_TCP_RTO_MIN ? MT_TCP_RTO_MIN : r > MT_TCP_RTO_MAX ? MT_TCP_RTO_MAX : r;
+}
 /* Segment without a TCB (reset replies) or with explicit fields. */
 void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
                      uint32_t ack, uint8_t flags, uint32_t now);

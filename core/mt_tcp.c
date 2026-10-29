@@ -16,7 +16,7 @@
 #define TCP_MSS_DEFAULT 536u
 #define TCP_MSS_MIN 64u
 
-/* 16 TCBs must fit the 16 KB stack budget: ~140 bytes with 32-bit pointers. */
+/* 16 TCBs must fit the 16 KB stack budget: ~180 bytes with 32-bit pointers. */
 typedef char mt_tcp_size_ok[sizeof(struct mt_tcp) <= 300u ? 1 : -1];
 
 enum { EV_EST = 1, EV_DATA = 2, EV_CLOSING = 4, EV_SPACE = 8, EV_URG = 16 };
@@ -61,11 +61,12 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
 static void conn_reset(mt_tcp *t) {
     mt_ring_init(&t->sndq, t->sndq.base, t->sndq.size);
     mt_ring_init(&t->rcvq, t->rcvq.base, t->rcvq.size);
-    t->snd_una = t->snd_nxt = t->snd_wnd = t->rcv_nxt = 0;
+    t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
     t->snd_wl1 = t->snd_wl2 = t->iss = t->irs = 0;
     t->tmask = 0;
     t->rto = MT_TCP_RTO_INIT;
-    t->srtt = 0;
+    t->srtt8 = t->rttvar4 = 0;
+    t->dupacks = 0;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
     t->rcv_adv = t->rcv_up = t->snd_up = 0;
@@ -105,7 +106,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     t->cb = cb;
     t->user = user;
     t->used = 1;
-    t->ulp_s = TCP_ULP_DEFAULT_S;
+    t->ulp_ms = TCP_ULP_DEFAULT_S * 1000u;
     t->flags = MT_TF_ULPABORT;
     t->rto = MT_TCP_RTO_INIT;
     t->mss = TCP_MSS_DEFAULT;
@@ -114,7 +115,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
 }
 
 void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
-    t->ulp_s = seconds;
+    t->ulp_ms = (uint32_t)seconds * 1000u;
     if (abort) t->flags |= MT_TF_ULPABORT;
     else t->flags &= (uint8_t)~MT_TF_ULPABORT;
 }
@@ -163,7 +164,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
     t->frip = 0;
     t->tnow = now;
     t->iss = isn(s, now);
-    t->snd_una = t->snd_nxt = t->iss;      /* SYN goes out below, advancing snd_nxt */
+    t->snd_una = t->snd_nxt = t->snd_max = t->iss;   /* SYN goes out below, advancing snd_nxt */
     t->state = MT_TCP_SYN_SENT;
     s->stats.tcp_active_opens++;
     mt_tcp_output(t, now);
@@ -186,7 +187,7 @@ int mt_tcp_listen(mt_tcp *t, mt_ip4 rip_filter, uint16_t rport_filter, uint16_t 
 /* RST for a synchronized connection. */
 static void send_rst(mt_tcp *t, uint32_t now) {
     if (is_sync(t->state))
-        mt_tcp_send_raw(t->st, t->rip, t->lport, t->rport, t->snd_nxt, t->rcv_nxt,
+        mt_tcp_send_raw(t->st, t->rip, t->lport, t->rport, t->snd_max, t->rcv_nxt,
                         MT_TH_RST | MT_TH_ACK, now);
 }
 
@@ -255,14 +256,14 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     i->lport = t->lport;
     i->rport = t->rport;
     if (t->state >= MT_TCP_ESTABLISHED && t->state != MT_TCP_TIME_WAIT) {
-        sent = t->snd_nxt - t->snd_una - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
+        sent = t->snd_max - t->snd_una - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
         i->unacked = sent;
         i->send_queued = t->sndq.used > sent ? t->sndq.used - sent : 0u;
     }
     i->rcv_avail = t->rcvq.used;
     i->snd_wnd = t->snd_wnd;
     i->rcv_wnd = mt_ring_free(&t->rcvq);
-    i->srtt_ms = t->srtt;
+    i->srtt_ms = t->srtt8 >> 3;
     i->rto_ms = t->rto;
 }
 
@@ -353,7 +354,50 @@ static void enter_time_wait(mt_tcp *t, uint32_t now) {
     tmr_set(t, MT_TT_TW, now + TCP_TW_MS);
 }
 
-static uint32_t ulp_ms(const mt_tcp *t) { return (uint32_t)t->ulp_s * 1000u; }
+#define TM_RTO_PERSIST ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST))
+#define CWND_MAX 0x100000u
+
+static uint32_t backoff(uint32_t rto) { return rto >= MT_TCP_RTO_MAX / 2u ? MT_TCP_RTO_MAX : rto << 1; }
+
+/* ULP timeout: no progress on unacked data (or no answer to window probes) for ulp_ms. The
+ * deadline is the absolute ulp_dl, set when a timer arms and pushed out by progress. */
+static void ulp_expired(mt_tcp *t, uint32_t now) {
+    uint8_t g0 = t->gen;
+    if (!(t->flags & MT_TF_ULPABORT)) {
+        t->ulp_dl = now + t->ulp_ms;                       /* report only: keep retrying */
+        fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
+    } else if (t->state == MT_TCP_SYN_SENT) {
+        tcp_term(t, MT_TERM_OPEN_FAILED);
+    } else if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE)) {
+        back_to_listen(t);
+    } else {
+        fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
+        if (t->gen == g0) {
+            send_rst(t, now);
+            tcp_term(t, MT_TERM_ULP_TIMEOUT);
+        }
+    }
+}
+
+/* Retransmission timeout. Data states: back to Loss Window (cwnd = 1 MSS, ssthresh halved) and
+ * go-back-N from snd_una; SYN states resend the SYN / SYN-ACK. */
+static void rto_fire(mt_tcp *t, uint32_t now) {
+    if (t->state == MT_TCP_SYN_SENT || t->state == MT_TCP_SYN_RCVD) {
+        mt_tcp_rexmit(t, now);
+    } else {
+        uint32_t half = (t->snd_max - t->snd_una) >> 1, floor_ = (uint32_t)t->mss << 1;
+        t->ssthresh = half > floor_ ? half : floor_;
+        t->cwnd = t->mss;
+        t->ca_acc = 0;
+        t->dupacks = 0;
+        t->recover = t->snd_max;
+        t->flags2 &= (uint8_t)~(MT_T2_RECOV | MT_T2_RTTING);
+        t->snd_nxt = t->snd_una;
+        mt_tcp_output(t, now);
+    }
+    t->rto = backoff(t->rto);
+    if (t->tmask & (1u << MT_TT_RTO)) tmr_set(t, MT_TT_RTO, now + t->rto);
+}
 
 void mt_tcp_timers(mt_stack *s, uint32_t now) {
     uint16_t i;
@@ -362,7 +406,8 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
         if (!t->used || !t->tmask) continue;
         t->tnow = now;
         if ((t->tmask & (1u << MT_TT_TW)) && !mt_time_before(now, t->tmr[MT_TT_TW])) {
-            tcp_term(t, MT_TERM_ULP_CLOSE);
+            /* TIME_WAIT over, or FIN_WAIT_2 idle limit (the peer never sent its FIN) */
+            tcp_term(t, t->state == MT_TCP_FIN_WAIT_2 ? MT_TERM_ULP_TIMEOUT : MT_TERM_ULP_CLOSE);
             continue;
         }
         if ((t->tmask & (1u << MT_TT_DELACK)) && !mt_time_before(now, t->tmr[MT_TT_DELACK])) {
@@ -370,25 +415,16 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
             t->flags |= MT_TF_ACKNOW;
             mt_tcp_output(t, now);
         }
-        if (!(t->tmask & (1u << MT_TT_RTO))) continue;
-        if (ulp_ms(t) && !mt_time_before(now, t->ulp_start + ulp_ms(t))) {   /* ULP timeout */
-            if (t->flags & MT_TF_ULPABORT) {
-                if (t->state == MT_TCP_SYN_SENT) {
-                    tcp_term(t, MT_TERM_OPEN_FAILED);
-                } else if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE)) {
-                    back_to_listen(t);
-                } else {
-                    send_rst(t, now);
-                    tcp_term(t, MT_TERM_ULP_TIMEOUT);
-                }
-            } else {
-                t->ulp_start = now;
-                fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
-            }
-        } else if (!mt_time_before(now, t->tmr[MT_TT_RTO])) {
-            mt_tcp_rexmit(t, now);
-            t->rto = t->rto * 2u > MT_TCP_RTO_MAX ? MT_TCP_RTO_MAX : t->rto * 2u;
-            tmr_set(t, MT_TT_RTO, now + t->rto);
+        if (!(t->tmask & TM_RTO_PERSIST)) continue;
+        if (t->ulp_ms && !mt_time_before(now, t->ulp_dl)) {
+            ulp_expired(t, now);
+        } else if ((t->tmask & (1u << MT_TT_RTO)) && !mt_time_before(now, t->tmr[MT_TT_RTO])) {
+            rto_fire(t, now);
+        } else if ((t->tmask & (1u << MT_TT_PERSIST)) &&
+                   !mt_time_before(now, t->tmr[MT_TT_PERSIST])) {
+            mt_tcp_probe(t, now);
+            t->rto = backoff(t->rto);
+            tmr_set(t, MT_TT_PERSIST, now + t->rto);
         }
     }
 }
@@ -402,10 +438,8 @@ uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now) {
         if (t->tmask & (1u << MT_TT_TW)) best = mt_dl_min(best, rel(t->tmr[MT_TT_TW], now));
         if (t->tmask & (1u << MT_TT_DELACK)) best = mt_dl_min(best, rel(t->tmr[MT_TT_DELACK], now));
         if (t->tmask & (1u << MT_TT_PERSIST)) best = mt_dl_min(best, rel(t->tmr[MT_TT_PERSIST], now));
-        if (t->tmask & (1u << MT_TT_RTO)) {
-            best = mt_dl_min(best, rel(t->tmr[MT_TT_RTO], now));
-            if (ulp_ms(t)) best = mt_dl_min(best, rel(t->ulp_start + ulp_ms(t), now));
-        }
+        if (t->tmask & (1u << MT_TT_RTO)) best = mt_dl_min(best, rel(t->tmr[MT_TT_RTO], now));
+        if ((t->tmask & TM_RTO_PERSIST) && t->ulp_ms) best = mt_dl_min(best, rel(t->ulp_dl, now));
     }
     return best;
 }
@@ -421,7 +455,9 @@ void mt_tcp_note_released(mt_stack *s, const uint8_t *ip) {
     {
         const uint8_t *th = ip + ihl;
         uint16_t seglen = (uint16_t)(mt_rd16(ip + 2) - ihl - ((th[12] >> 4) << 2));
-        if (seglen == 0 && !(th[13] & (MT_TH_SYN | MT_TH_FIN))) return;   /* pure ACK: nothing owed */
+        uint16_t space = (uint16_t)(seglen + ((th[13] & MT_TH_SYN) != 0) + ((th[13] & MT_TH_FIN) != 0));
+        if (space == 0) return;                                   /* pure ACK: nothing owed */
+        s->arp_rel.len = space;
         s->arp_rel.dst = mt_rd32(ip + 16);
         s->arp_rel.sport = mt_rd16(th);
         s->arp_rel.dport = mt_rd16(th + 2);
@@ -434,16 +470,26 @@ void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now) {
     uint16_t i;
     for (i = 0; i < s->lim.max_tcp; i++) {
         mt_tcp *t = &s->tcp[i];
+        uint32_t skip = 0;
         if (!t->used || t->state == MT_TCP_CLOSED || t->state == MT_TCP_LISTEN ||
             t->state == MT_TCP_TIME_WAIT)
             continue;
-        if (t->snd_una == t->snd_nxt || nexthop(s, t->rip) != ip) continue;
-        /* Skip a connection whose first unacked segment is the very frame that was just
-         * released from the held slot: it is on the wire already. */
+        if (t->snd_una == t->snd_max || nexthop(s, t->rip) != ip) continue;
+        /* The very frame just released from the held slot is first-unacked and already on the
+         * wire: resend only what follows it. */
         if (s->arp_rel.live && s->arp_rel.dst == t->rip && s->arp_rel.sport == t->lport &&
             s->arp_rel.dport == t->rport && s->arp_rel.seq == t->snd_una)
+            skip = s->arp_rel.len;
+        if (skip >= t->snd_max - t->snd_una) continue;
+        if (t->state == MT_TCP_SYN_SENT || t->state == MT_TCP_SYN_RCVD) {
+            mt_tcp_rexmit(t, now);
             continue;
-        mt_tcp_rexmit(t, now);
+        }
+        /* Go-back-N: frames sent while the next hop was unresolved were dropped (only one small
+         * frame is held), so resend from the ring, bounded by cwnd. Not a congestion event. */
+        t->flags2 &= (uint8_t)~MT_T2_RTTING;
+        t->snd_nxt = t->snd_una + skip;
+        mt_tcp_output(t, now);
     }
     s->arp_rel.live = 0;
 }
@@ -506,7 +552,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->rcv_adv = t->rcv_nxt;
     set_mss(t, g->mss);
     t->iss = isn(s, now);
-    t->snd_una = t->snd_nxt = t->iss;
+    t->snd_una = t->snd_nxt = t->snd_max = t->iss;
     t->snd_wnd = g->win;
     t->snd_wl1 = g->seq;
     t->snd_wl2 = t->iss;
@@ -516,7 +562,60 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     mt_tcp_output(t, now);                 /* SYN-ACK */
 }
 
+/* RFC 6298 estimator in shifts: srtt8 = 8*SRTT, rttvar4 = 4*RTTVAR (ms). */
+static void rtt_sample(mt_tcp *t, uint32_t r) {
+    if (r == 0) r = 1;                                     /* srtt8 == 0 means unmeasured */
+    if (r > 0xFFFFFu) r = 0xFFFFFu;
+    if (t->srtt8 == 0) {
+        t->srtt8 = r << 3;
+        t->rttvar4 = r << 1;
+    } else {
+        int32_t err = (int32_t)r - (int32_t)(t->srtt8 >> 3);
+        t->srtt8 += (uint32_t)err;
+        if (err < 0) err = -err;
+        err -= (int32_t)(t->rttvar4 >> 2);
+        t->rttvar4 += (uint32_t)err;
+    }
+}
+
+/* New data was acked (snd_una already advanced): RTT sample, congestion window, RTO and timer
+ * rearm in one pass; no loops, no divisions. */
+static void ack_progress(mt_tcp *t, uint32_t acked, uint32_t now) {
+    if ((t->flags2 & MT_T2_RTTING) && mt_seq_ge(t->snd_una, t->rtt_seq)) {
+        t->flags2 &= (uint8_t)~MT_T2_RTTING;
+        rtt_sample(t, now - t->rtt_t0);
+    }
+    t->dupacks = 0;
+    if (t->flags2 & MT_T2_RECOV) {
+        if (mt_seq_ge(t->snd_una, t->recover)) {
+            t->flags2 &= (uint8_t)~MT_T2_RECOV;            /* full ACK: recovery over */
+            t->cwnd = t->ssthresh;
+        } else {
+            mt_tcp_rexmit(t, now);                         /* partial ACK: the next hole */
+        }
+    } else if (t->cwnd < t->ssthresh) {
+        t->cwnd += acked < t->mss ? acked : t->mss;        /* slow start */
+    } else {
+        t->ca_acc += acked;                                /* congestion avoidance: +1 MSS per cwnd acked */
+        if (t->ca_acc >= t->cwnd) {
+            t->ca_acc -= t->cwnd;
+            t->cwnd += t->mss;
+        }
+    }
+    if (t->cwnd > CWND_MAX) t->cwnd = CWND_MAX;
+    t->rto = mt_tcp_rto_base(t);
+    t->ulp_dl = now + t->ulp_ms;
+    if (t->snd_una == t->snd_max) tmr_clr(t, MT_TT_RTO);
+    else if (!(t->tmask & (1u << MT_TT_PERSIST))) tmr_set(t, MT_TT_RTO, now + t->rto);
+}
+
 static void established(mt_tcp *t) {
+    uint32_t m4 = (uint32_t)t->mss << 2, m2 = (uint32_t)t->mss << 1;
+    t->cwnd = m4 < 4380u ? m4 : (m2 > 4380u ? m2 : 4380u);   /* min(4*MSS, max(2*MSS, 4380)) */
+    t->ssthresh = 0xFFFFFFFFu;
+    t->ca_acc = 0;
+    t->dupacks = 0;
+    t->recover = t->snd_una - 1u;
     t->state = MT_TCP_ESTABLISHED;
     t->flags |= MT_TF_EST;
     t->st->stats.tcp_conns_open++;
@@ -558,8 +657,7 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
         fire(t, MT_TCP_EV_ESTABLISHED, 0);
     } else {                                               /* simultaneous open */
         t->state = MT_TCP_SYN_RCVD;
-        mt_tcp_rexmit(t, now);                             /* SYN-ACK */
-        t->st->stats.tcp_rexmt--;                          /* first SYN-ACK, not a retransmission */
+        mt_tcp_xmit(t, t->iss, MT_TH_SYN | MT_TH_ACK, 0, 0, now);   /* first SYN-ACK */
     }
 }
 
@@ -665,13 +763,31 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         established(t);
         ev |= EV_EST;
     }
-    if (mt_seq_gt(g->ack, t->snd_nxt)) {                   /* acks something never sent */
+    if (mt_seq_gt(g->ack, t->snd_max)) {                   /* acks something never sent */
         t->flags |= MT_TF_ACKNOW;
         goto out;
     }
-    if (mt_seq_gt(g->ack, t->snd_una)) {                   /* new data acknowledged */
-        uint32_t n = g->ack - t->snd_una;
-        int fa = (t->flags & MT_TF_FINSENT) && g->ack == t->snd_nxt;
+    if (t->tmask & (1u << MT_TT_PERSIST))                  /* a peer that answers is not gone: it has */
+        t->ulp_dl = t->tmr[MT_TT_PERSIST] + t->ulp_ms;     /* until a full ULP after the next probe */
+    if (g->ack == t->snd_una) {
+        /* Duplicate ACK (RFC 5681): no data, window unchanged, data outstanding, not a probe
+         * answer. The third one fast-retransmits the first unacked segment; recovery then
+         * (NewReno-lite) ends at an ACK >= recover, resending the next hole on partial ACKs. */
+        if (t->snd_una != t->snd_max && g->dlen == 0 && !fin && g->win == t->snd_wnd &&
+            !(t->tmask & (1u << MT_TT_PERSIST))) {
+            if (t->dupacks < 255u) t->dupacks++;
+            if (t->dupacks == 3 && mt_seq_gt(t->snd_una, t->recover)) {
+                uint32_t half = (t->snd_max - t->snd_una) >> 1, floor_ = (uint32_t)t->mss << 1;
+                t->ssthresh = half > floor_ ? half : floor_;
+                t->cwnd = t->ssthresh;
+                t->recover = t->snd_max;
+                t->flags2 |= MT_T2_RECOV;
+                mt_tcp_rexmit(t, now);
+            }
+        }
+    } else {                                               /* new data acknowledged */
+        uint32_t acked = g->ack - t->snd_una, n = acked;
+        int fa = (t->flags & MT_TF_FINSENT) && g->ack == t->snd_max;
         n -= (uint32_t)fa;
         mt_ring_consume(&t->sndq, n);
         if (n && (t->flags2 & MT_T2_SNDWANT)) {            /* a short send is waiting for room */
@@ -679,15 +795,14 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             ev |= EV_SPACE;
         }
         t->snd_una = g->ack;
+        if (mt_seq_lt(t->snd_nxt, g->ack)) t->snd_nxt = g->ack;   /* go-back-N: peer had more */
         if ((t->flags2 & MT_T2_SNDURG) && mt_seq_ge(g->ack, t->snd_up))
             t->flags2 &= (uint8_t)~MT_T2_SNDURG;
-        t->rto = MT_TCP_RTO_INIT;
-        t->ulp_start = now;
-        if (t->snd_una == t->snd_nxt) tmr_clr(t, MT_TT_RTO);
-        else tmr_set(t, MT_TT_RTO, now + t->rto);
+        ack_progress(t, acked, now);
         if (fa) {
             if (t->state == MT_TCP_FIN_WAIT_1) {
                 t->state = MT_TCP_FIN_WAIT_2;
+                tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);
             } else if (t->state == MT_TCP_CLOSING) {
                 enter_time_wait(t, now);
             } else if (t->state == MT_TCP_LAST_ACK) {
@@ -716,6 +831,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         }
         if (g->acc_n || g->acc_fin) {
             if (g->acc_n) {                                /* commit what mt_tcp_input copied */
+                if (t->state == MT_TCP_FIN_WAIT_2) tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);
                 t->rcvq.used += g->acc_n;
                 t->rcv_nxt += g->acc_n;
                 ev |= EV_DATA;
