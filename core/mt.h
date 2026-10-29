@@ -9,9 +9,11 @@
  * Embedder contract (what the glue must guarantee):
  *  - One context at a time per stack. mt_input and mt_tick must never be re-entered, neither
  *    from a callback nor from link.tx; every other API call is legal from callbacks.
- *  - Timers: re-query mt_next_deadline after EVERY API call that can arm one (mt_tcp_send/open/
- *    close/abort/listen, mt_dns_query, mt_udp_send, mt_icmp_echo, mt_set_config), not only after
- *    mt_input and mt_tick. Call mt_tick when it reaches 0, and at least once every 2^31 ms.
+ *  - Timers: re-query mt_next_deadline after EVERY API call, not only after mt_input and
+ *    mt_tick (almost any call can arm a timer: sends, opens, closes, mt_tcp_recv/consume window
+ *    updates, mt_tcp_release RSTs, DNS and UDP calls, mt_set_config, and mt_tcp_set_ulp_timeout
+ *    changes the deadline itself). Call mt_tick when it reaches 0, and at least once every
+ *    2^31 ms. link.tx must not call back into the stack.
  *  - Clock: `now` (ms, uint32, wraps) comes from one monotonic source shared by every context
  *    that calls into the stack.
  *  - Lifetimes: the `frame` given to mt_input need only live for that call. Pointers handed to
