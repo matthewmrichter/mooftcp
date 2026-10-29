@@ -2,6 +2,7 @@
 #include "net.h"
 #include "mt_int.h"
 #include "mt_util.h"
+#include "pbfake.h"
 
 /* Stateful system fuzzer. One stack, one simulated peer that crafts frames from the stack's live
  * state (TCB sequence numbers, pending DNS ids, ...) and from raw mutations of those frames,
@@ -845,4 +846,520 @@ static void test_fuzz_clock_wrap(void) {
     T_CHECK(found);
 }
 
-T_MAIN(test_fuzz_seeds, test_fuzz_clock_wrap)
+
+/* ---- PB-level fuzzer: random MacTCP calls through the glue (mac/glue/mt_pb*.c) ----
+ * The same peer model drives a stack owned by the PB dispatcher; the "application" issues
+ * random csCodes with random fields on live, released and made-up streams, also from inside
+ * its completion routines and ASRs. Properties, in addition to every frame/TCB check above:
+ *  - every PB the glue accepted (inProgress) completes exactly once; an immediate result
+ *    never also runs the completion routine;
+ *  - nothing completes after its stream was released (TCPRelease completes everything before
+ *    it returns), and no PB of the stream is still pending then;
+ *  - no TCPDataArrival while one of the stream's reads is pending; no PB of the stream is
+ *    pending when its TCPTerminate ASR runs (except the call that caused it);
+ *  - completed PBs, their buffers and descriptor arrays, and the receive buffer of a released
+ *    stream are filled with a canary and must never be written again (nor sent: TCPSend data
+ *    is the sequence-number pattern, so a canary byte on the wire fails verify_l4);
+ *  - the glue's queues agree with the PBs the application has outstanding; interrupts are
+ *    restored and no deferred release is left after every entry. */
+#define PS_N 8
+#define PR_N 128
+#define PR_PB 104
+#define PR_BUF 1800
+#define PR_DS 12
+#define PR_BLK (PR_PB + PR_BUF + PR_DS * 6)
+#define PS_BUF 16400
+#define CAN2 0x5Au
+#define PB_STEPS 12000
+#define PB_SEEDS 6
+
+typedef struct {
+    uint8_t *blk;              /* PB, then buffer, then the WDS/RDS array (fake memory) */
+    int busy, loan, incall, slot;
+    long ncompl;
+    StreamPtr h;
+    int16_t cs;
+} prec;
+typedef struct { StreamPtr h; uint8_t *rbuf; int live; } pstream;
+
+static struct {
+    MtDrv *d;
+    prec r[PR_N];
+    pstream ps[PS_N];
+    MacPtr32 compl, asr;
+    long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
+         defer_rel, imm_err, reenter, open_ok, merged;
+} P;
+
+static TCPiopb *pr_pb(prec *r) { return (TCPiopb *)r->blk; }
+static uint8_t *pr_buf(prec *r) { return r->blk + PR_PB; }
+static uint8_t *pr_ds(prec *r) { return r->blk + PR_PB + PR_BUF; }
+
+static void canary_check(const uint8_t *p, uint32_t n, const char *what) {
+    uint32_t i;
+    for (i = 0; i < n; i++) if (p[i] != CAN2) { bad(what); return; }
+}
+
+static void pr_free(prec *r) {
+    r->busy = r->loan = r->incall = 0;
+    memset(r->blk, CAN2, PR_BLK);
+}
+
+static prec *pr_get(void) {
+    int i, k = (int)rn(PR_N);
+    for (i = 0; i < PR_N; i++, k = (k + 1) % PR_N) {
+        prec *r = &P.r[k];
+        if (r->busy || r->loan || r->incall) continue;
+        canary_check(r->blk, PR_BLK, "a completed PB or its buffers were written");
+        memset(r->blk, 0, PR_BLK);
+        pr_pb(r)->ioCompletion = P.compl;
+        pr_pb(r)->ioNamePtr = (MacPtr32)(k + 1);
+        r->slot = -1;
+        r->h = 0;
+        return r;
+    }
+    return NULL;
+}
+
+static MtStream *pb_stream(StreamPtr h) {
+    uint8_t i;
+    for (i = 0; i < P.d->ntcp; i++)
+        if (P.d->tcp[i].used == 1 && P.d->tcp[i].handle == h) return &P.d->tcp[i];
+    return NULL;
+}
+
+static void pb_action(void);
+
+static void pb_reenter(void) {
+    if (g.cb_depth >= 3 || rn(3)) return;
+    g.cb_depth++;
+    P.reenter++;
+    pb_action();
+    g.cb_depth--;
+}
+
+static void fz_compl(MtAnyPb *pb) {
+    uint32_t k = pb->hdr.ioNamePtr - 1u;
+    prec *r;
+    int16_t res = pb->hdr.ioResult;
+    if (k >= PR_N) { bad("completion for an unknown PB"); return; }
+    r = &P.r[k];
+    if (!r->busy) { bad("completion of a PB that is not pending (twice, or after an immediate result)"); return; }
+    r->busy = 0;
+    r->ncompl++;
+    if (r->slot >= 0 && P.ps[r->slot].h != r->h) bad("completion after its stream was released");
+    if (r->cs == TCPSend) { if (res == 0) P.ok_send++; else if (res == connectionTerminated) P.term_send++; }
+    if (r->cs == TCPRcv && res == 0) P.ok_rcv++;
+    if (res == commandTimeout) P.tmo++;
+    if ((r->cs == TCPActiveOpen || r->cs == TCPPassiveOpen) && res == 0) P.open_ok++;
+    if (r->cs == TCPNoCopyRcv && res == 0) { r->loan = 1; P.ok_nocopy++; }
+    if (!r->incall && !r->loan) pr_free(r);
+    pb_reenter();
+}
+
+static void fz_asr(StreamPtr s, uint16_t ev, MacPtr32 user, uint16_t reason, MacPtr32 icmp) {
+    int slot = (int)user - 1, k;
+    (void)reason; (void)icmp;
+    if (slot < 0 || slot >= PS_N || P.ps[slot].h != s) { bad("ASR for an unknown stream"); return; }
+    if (ev == TCPDataArrival) {
+        P.asr_data++;
+        for (k = 0; k < PR_N; k++)
+            if (P.r[k].busy && !P.r[k].incall && P.r[k].slot == slot &&
+                (P.r[k].cs == TCPRcv || P.r[k].cs == TCPNoCopyRcv))
+                bad("TCPDataArrival while a read is pending");
+    } else if (ev == TCPTerminate) {
+        P.asr_term++;
+        for (k = 0; k < PR_N; k++)
+            if (P.r[k].busy && !P.r[k].incall && P.r[k].slot == slot)
+                bad("PB still pending at its stream's TCPTerminate ASR");
+    } else if (ev == TCPClosing) {
+        P.asr_closing++;
+    }
+    pb_reenter();
+}
+
+/* A live stream (mostly), a released one, 0, or garbage. */
+static StreamPtr pick_handle(int *slot) {
+    int i, k = (int)rn(PS_N);
+    *slot = -1;
+    if (rn(12) == 0) return rn(2) ? 0 : (rn(2) ? rnd() : P.ps[k].h + 2u);
+    for (i = 0; i < PS_N; i++, k = (k + 1) % PS_N)
+        if (P.ps[k].live) { *slot = k; return P.ps[k].h; }
+    return 0;
+}
+
+static void stream_dead(int slot) {
+    int k;
+    for (k = 0; k < PR_N; k++) {
+        prec *r = &P.r[k];
+        if (r->slot != slot) continue;
+        if (r->busy && !r->incall) bad("PB still pending after TCPRelease returned");
+        if (r->loan) pr_free(r);
+    }
+    P.ps[slot].live = 0;
+    P.ps[slot].h = 0;
+    memset(P.ps[slot].rbuf, CAN2, PS_BUF);
+}
+
+static void free_loans(int slot) {
+    int k;
+    for (k = 0; k < PR_N; k++) if (P.r[k].slot == slot && P.r[k].loan) pr_free(&P.r[k]);
+}
+
+/* Issue a PB: busy before the call (its completion may run inside), then the result. */
+static int16_t issue(prec *r, int16_t cs, StreamPtr h, int slot) {
+    TCPiopb *pb = pr_pb(r);
+    long nc = r->ncompl;
+    int16_t res;
+    pb->csCode = cs;
+    pb->tcpStream = h;
+    r->cs = cs;
+    r->h = h;
+    r->slot = slot;
+    r->busy = 1;
+    r->incall = 1;
+    res = mt_pb_control(P.d, (MtAnyPb *)pb);
+    r->incall = 0;
+    if (res != inProgress) {
+        if (r->ncompl != nc) bad("an immediate result also ran the completion routine");
+        if (pb->ioResult != res) bad("ioResult differs from the immediate result");
+        r->busy = 0;
+        if (res < 0) P.imm_err++;
+        if (slot < 0 && cs >= TCPPassiveOpen && cs <= TCPRelease && cs != TCPGlobalInfo &&
+            res != invalidStreamPtr && !pb_stream(h))
+            bad("bad stream not refused with invalidStreamPtr");
+    }
+    return res;
+}
+
+static void act_create(void) {
+    int slot = -1, k, k0 = (int)rn(PS_N);
+    prec *r;
+    TCPiopb *pb;
+    int16_t res;
+    uint32_t len;
+    for (k = 0; k < PS_N; k++) if (!P.ps[(k0 + k) % PS_N].live) { slot = (k0 + k) % PS_N; break; }
+    if (slot < 0 || !(r = pr_get())) return;
+    pb = pr_pb(r);
+    canary_check(P.ps[slot].rbuf, PS_BUF, "receive buffer of a released stream was written");
+    len = rn(10) == 0 ? rn(4096) : 4096 + rn(PS_BUF - 4096 - 1);
+    pb->csParam.create.rcvBuff = rn(20) ? pbf_a(P.ps[slot].rbuf + rn(2)) : 0;
+    pb->csParam.create.rcvBuffLen = len;
+    pb->csParam.create.notifyProc = rn(8) ? P.asr : 0;
+    pb->csParam.create.userDataPtr = (MacPtr32)(slot + 1);
+    res = issue(r, TCPCreate, 0, -1);
+    if (res == 0) {
+        P.ps[slot].h = pb->tcpStream;
+        P.ps[slot].live = 1;
+        memset(P.ps[slot].rbuf, 0, PS_BUF);
+    } else if (len >= 4096 && pb->csParam.create.rcvBuff && res != insufficientResources) {
+        bad("valid TCPCreate refused");
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void act_open(int passive) {
+    int slot;
+    StreamPtr h = pick_handle(&slot);
+    prec *r = pr_get();
+    TCPiopb *pb;
+    if (!r) return;
+    pb = pr_pb(r);
+    pb->csParam.open.remoteHost = passive ? (rn(4) ? 0 : PEER) : (rn(8) ? PEER : (rn(2) ? T_FAR : 0));
+    pb->csParam.open.remotePort = passive ? 0 : (uint16_t)(80 + rn(3));
+    pb->csParam.open.localPort = (uint16_t)(passive ? (rn(3) ? 23 : rn(2) ? 21 : 0)
+                                            : (rn(4) ? 0 : 1024 + rn(4)));
+    pb->csParam.open.validityFlags = (int8_t)(rn(2) ? (timeoutValue | timeoutAction) : rn(2) ? timeoutValue : 0);
+    pb->csParam.open.ulpTimeoutValue = (int8_t)rn(30);
+    pb->csParam.open.ulpTimeoutAction = (int8_t)rn(2);
+    pb->csParam.open.commandTimeoutValue = (int8_t)(rn(3) ? 0 : rn(6));
+    if (issue(r, passive ? TCPPassiveOpen : TCPActiveOpen, h, slot) == inProgress && slot >= 0)
+        free_loans(slot);                       /* a new connection forgets old loans */
+    if (!r->busy) pr_free(r);
+}
+
+static void act_send(void) {
+    int slot;
+    StreamPtr h = pick_handle(&slot);
+    prec *r = pr_get();
+    TCPiopb *pb;
+    MtStream *ms;
+    uint32_t seq0 = 0, total = 0, pos = rn(2);
+    uint16_t lport = 0;
+    int i, ne = rn(12) == 0 ? 0 : 1 + (int)rn(PR_DS - 1);
+    wdsEntry e;
+    if (!r) return;
+    pb = pr_pb(r);
+    ms = pb_stream(h);
+    if (ms && ms->t) {
+        seq0 = ms->t->snd_una + mt_tcp_sq_total(ms->t) + (ms->q_total - ms->sub_total);
+        lport = ms->t->lport;
+    }
+    memset(pr_buf(r), CAN2, PR_BUF);
+    for (i = 0; i < ne; i++) {
+        uint32_t len = rn(5) == 0 ? 0 : rn(8) == 0 ? 600 : rn(150), j;
+        if (len == 0 && rn(2)) len = 1;          /* zero-length entries terminate: keep a few */
+        pos += rn(3);
+        if (pos + len > PR_BUF) len = pos < PR_BUF ? PR_BUF - pos : 0;
+        e.length = (uint16_t)len;
+        e.ptr = pbf_a(pr_buf(r) + pos);
+        memcpy(pr_ds(r) + i * 6, &e, 6);
+        if (len == 0) break;
+        for (j = 0; j < len; j++) pr_buf(r)[pos + j] = spat(seq0 + total + j, lport);
+        pos += len;
+        total += len;
+    }
+    if (i == ne) {
+        e.length = 0; e.ptr = 0;
+        memcpy(pr_ds(r) + i * 6, &e, 6);
+    }
+    pb->csParam.send.wdsPtr = rn(30) ? pbf_a(pr_ds(r)) : 0;
+    pb->csParam.send.pushFlag = (uint8_t)rn(2);
+    pb->csParam.send.urgentFlag = (uint8_t)(rn(12) == 0);
+    pb->csParam.send.validityFlags = (int8_t)(rn(4) == 0 ? timeoutValue : 0);
+    pb->csParam.send.ulpTimeoutValue = (int8_t)(5 + rn(60));
+    if (ms && ms->req_n >= MT_SENDQ_MAX && total) P.merged++;
+    issue(r, TCPSend, h, slot);
+    if (!r->busy) pr_free(r);
+}
+
+static void act_rcv(int nocopy) {
+    int slot;
+    StreamPtr h = pick_handle(&slot);
+    prec *r = pr_get();
+    TCPiopb *pb;
+    if (!r) return;
+    pb = pr_pb(r);
+    pb->csParam.receive.commandTimeoutValue = (int8_t)(rn(3) ? 0 : rn(4));
+    if (nocopy) {
+        pb->csParam.receive.rdsPtr = rn(20) ? pbf_a(pr_ds(r)) : 0;
+        pb->csParam.receive.rdsLength = (uint16_t)(rn(10) == 0 ? rn(2) : 2 + rn(PR_DS - 1));
+    } else {
+        pb->csParam.receive.rcvBuff = rn(20) ? pbf_a(pr_buf(r) + rn(2)) : 0;
+        pb->csParam.receive.rcvBuffLen = (uint16_t)(rn(20) == 0 ? 0 : 1 + rn(PR_BUF - 2));
+    }
+    if (issue(r, nocopy ? TCPNoCopyRcv : TCPRcv, h, slot) == 0 && nocopy) {
+        r->loan = 1;
+        P.ok_nocopy++;
+    }
+    if (!r->busy && !r->loan) pr_free(r);
+}
+
+static void act_return(void) {
+    int k = (int)rn(PR_N), i;
+    prec *r = NULL;
+    int16_t res;
+    for (i = 0; i < PR_N; i++, k = (k + 1) % PR_N)
+        if (P.r[k].loan && !P.r[k].busy && !P.r[k].incall) { r = &P.r[k]; break; }
+    if (!r) return;
+    r->incall = 1;
+    if (rn(10) == 0) {                          /* a made-up RDS first */
+        rdsEntry e;
+        memcpy(&e, pr_ds(r), sizeof e);
+        e.ptr ^= 0x10u;
+        memcpy(pr_ds(r) + 6 * (PR_DS - 2), &e, sizeof e);
+        pr_pb(r)->csParam.receive.rdsPtr = pbf_a(pr_ds(r) + 6 * (PR_DS - 2));
+        pr_pb(r)->csCode = TCPRcvBfrReturn;
+        res = mt_pb_control(P.d, (MtAnyPb *)pr_pb(r));
+        if (res == 0) bad("a made-up RDS was accepted");
+        pr_pb(r)->csParam.receive.rdsPtr = pbf_a(pr_ds(r));
+    }
+    pr_pb(r)->csCode = TCPRcvBfrReturn;
+    res = mt_pb_control(P.d, (MtAnyPb *)pr_pb(r));
+    if (res == 0) P.ret_ok++;
+    pr_free(r);
+}
+
+static void act_simple(int16_t cs) {
+    int slot;
+    StreamPtr h = pick_handle(&slot);
+    prec *r = pr_get();
+    int16_t res;
+    if (!r) return;
+    if (cs == TCPClose) {
+        pr_pb(r)->csParam.close.validityFlags = (int8_t)(rn(3) ? 0 : timeoutValue);
+        pr_pb(r)->csParam.close.ulpTimeoutValue = (int8_t)rn(30);
+    }
+    res = issue(r, cs, h, slot);
+    if (cs == TCPRelease && res == 0 && slot >= 0) {
+        if (g.cb_depth) P.defer_rel++;
+        stream_dead(slot);
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void pb_action(void) {
+    switch (rn(18)) {
+    case 0: act_create(); break;
+    case 1: act_open(0); break;
+    case 2: act_open(1); break;
+    case 3: case 4: case 5: case 15: act_send(); break;
+    case 6: case 7: act_rcv(0); break;
+    case 8: act_rcv(1); break;
+    case 9: act_return(); break;
+    case 10: if (rn(3) == 0) act_simple(TCPClose); break;
+    case 11: if (rn(6) == 0) act_simple(TCPAbort); break;
+    case 12: if (rn(10) == 0) act_simple(TCPRelease); break;
+    case 13: act_simple(rn(3) ? TCPStatus : rn(2) ? TCPGlobalInfo : TCPExtendedStat); break;
+    case 14: {                                  /* any other csCode with a zeroed PB */
+        int16_t cs = (int16_t)rn(61);
+        if (cs != TCPRelease && cs != TCPSend && cs != TCPCreate) act_simple(cs);
+        break;
+    }
+    default: break;
+    }
+}
+
+static void pb_invariants(void) {
+    int i, k;
+    if (pbf_irq != 0) bad("interrupt mask not restored");
+    if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
+    if (P.d->rel_mask) bad("deferred release left over");
+    if (pbf_bad) { bad("misuse seen by the fake OS (pointer, routine, irq nesting)"); pbf_bad = 0; }
+    for (i = 0; i < PS_N; i++) {
+        MtStream *s;
+        int nsend = 0, nrcv = 0, nopen = 0, nclose = 0;
+        uint32_t lent = 0;
+        uint8_t j;
+        if (!P.ps[i].live) {
+            for (k = 0; k < PR_N; k++)
+                if (P.r[k].slot == i && P.r[k].busy && !P.r[k].incall) bad("PB pending on a released stream");
+            continue;
+        }
+        s = pb_stream(P.ps[i].h);
+        if (!s) { bad("live stream unknown to the glue"); continue; }
+        for (k = 0; k < PR_N; k++) {
+            const prec *r = &P.r[k];
+            if (r->slot != i || !r->busy || r->incall) continue;
+            if (r->cs == TCPSend) nsend++;
+            else if (r->cs == TCPRcv || r->cs == TCPNoCopyRcv) nrcv++;
+            else if (r->cs == TCPActiveOpen || r->cs == TCPPassiveOpen) nopen++;
+            else if (r->cs == TCPClose) nclose++;
+        }
+        if (nsend != s->sq_n) bad("pending TCPSend PBs differ from the glue's queue");
+        if (nrcv != s->rq_n) bad("pending reads differ from the glue's queue");
+        if (nopen != (s->open_pb != NULL)) bad("pending open differs");
+        if (nclose != (s->close_pb != NULL)) bad("pending close differs");
+        if (s->sub_i > s->sq_n || s->req_n > MT_SENDQ_MAX || s->loan_n > MT_PB_LOANS) bad("glue queue bounds");
+        if ((int32_t)(s->sub_total - s->acked) < 0 || (int32_t)(s->q_total - s->sub_total) < 0)
+            bad("glue send offsets out of order");
+        for (j = 0; j < s->loan_n; j++) lent += s->loan[j].len;
+        if (lent != s->lent) bad("loan bytes disagree");
+        if (s->t) {
+            mt_tcp_info in;
+            mt_tcp_get_info(s->t, &in);
+            if (s->lent > in.rcv_avail) bad("more lent than the ring holds");
+            if (in.state >= MT_TCP_ESTABLISHED && in.state != MT_TCP_TIME_WAIT &&
+                in.unacked + in.send_queued > s->sub_total - s->acked)
+                bad("core holds more bytes than the glue submitted");
+        }
+    }
+}
+
+static void pb_full_canary_check(void) {
+    int k;
+    for (k = 0; k < PR_N; k++)
+        if (!P.r[k].busy && !P.r[k].loan && !P.r[k].incall)
+            canary_check(P.r[k].blk, PR_BLK, "a completed PB or its buffers were written");
+    for (k = 0; k < PS_N; k++)
+        if (!P.ps[k].live) canary_check(P.ps[k].rbuf, PS_BUF, "receive buffer of a released stream was written");
+}
+
+static void pb_setup(uint32_t seed) {
+    mt_limits lim;
+    mt_link link;
+    mt_ifconfig c;
+    uint32_t n;
+    int k;
+    memset(&g, 0, sizeof g);
+    memset(&P, 0, sizeof P);
+    memset(g_rq, 0, sizeof g_rq);               /* the core fuzzer's records: none here */
+    memset(g_serial, 0, sizeof g_serial);
+    memset(g_next_done, 0, sizeof g_next_done);
+    g.seed = seed;
+    g.rng = seed * 2654435761u + 7u;
+    pbf_reset();
+    P.compl = pbf_compl(fz_compl);
+    P.asr = pbf_asr(fz_asr);
+    link.ctx = NULL;
+    link.tx = link_tx;
+    mt_limits_default(&lim);
+    n = mt_pb_size(&lim);
+    P.d = mt_pb_init(pbf_alloc(n), n, &lim, &link, rnd());
+    T_CHECK(P.d != NULL);
+    if (!P.d) return;
+    g.s = P.d->s;
+    memset(&c, 0, sizeof c);
+    c.addr = ME; c.mask = 0xFFFFFF00u; c.gateway = GW; c.dns = PEER;
+    memcpy(c.mac, T_ME_MAC, 6);
+    c.mtu = rn(3) ? 1500 : 576;
+    mt_pb_set_config(P.d, &c);
+    for (k = 0; k < PR_N; k++) { P.r[k].blk = (uint8_t *)pbf_alloc(PR_BLK); pr_free(&P.r[k]); }
+    for (k = 0; k < PS_N; k++) { P.ps[k].rbuf = (uint8_t *)pbf_alloc(PS_BUF); memset(P.ps[k].rbuf, CAN2, PS_BUF); }
+    g.now = rn(2) ? 0xFFF00000u + rnd() % 0x100000u : rnd();
+    pbf_now = g.now;
+}
+
+static void pb_step(uint8_t *f) {
+    uint32_t d, dt;
+    int k, live = 0;
+    pbf_now = g.now;
+    for (k = 0; k < PS_N; k++) live += P.ps[k].live;
+    if (live < 3) act_create();
+    if (rn(3)) {
+        uint16_t n = gen_frame(f);
+        if (rn(20) == 0 && n > 14) mutate(f, n);
+        mt_pb_input(P.d, f, n);
+    }
+    if (rn(8) == 0 && g.lastn) {
+        k = (int)rn(g.lastn < 8 ? (uint32_t)g.lastn : 8u);
+        mt_pb_input(P.d, g.lastout[k], g.lastlen[k]);
+    }
+    for (k = (int)rn(3); k > 0; k--) pb_action();
+    check_invariants();
+    pb_invariants();
+    if ((g.step & 63) == 0) pb_full_canary_check();
+    for (k = 0; k < 6 && mt_pb_next_deadline_ms(P.d) == 0; k++) mt_pb_tick(P.d);
+    if (k == 6) bad("expired deadline survives mt_pb_tick");
+    d = mt_pb_next_deadline_ms(P.d);
+    dt = rn(10) == 0 ? rn(5000) : rn(150);
+    if (d != MT_NO_DEADLINE && d < dt && rn(2)) {
+        g.now += d;
+        pbf_now = g.now;
+        mt_pb_tick(P.d);
+        dt -= d;
+    }
+    g.now += dt;
+    pbf_now = g.now;
+    if (mt_pb_next_deadline_ms(P.d) == 0) mt_pb_tick(P.d);
+    pb_invariants();
+}
+
+static void test_fuzz_pb(void) {
+    static uint8_t f[1514];
+    uint32_t seed;
+    long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, dr = 0,
+         ie = 0, re = 0, op = 0, mg = 0;
+    for (seed = 1; seed <= PB_SEEDS; seed++) {
+        pb_setup(seed);
+        if (!P.d) return;
+        for (g.step = 0; g.step < PB_STEPS && g.bad == 0; g.step++) pb_step(f);
+        if (g.bad == 0) pb_full_canary_check();
+        T_EQ(g.bad, 0);
+        if (g.bad) fprintf(stderr, "pb fuzz seed %u failed at step %ld\n", (unsigned)seed, g.step);
+        sok += P.ok_send; sterm += P.term_send; rok += P.ok_rcv; nc += P.ok_nocopy; ret += P.ret_ok;
+        tmo += P.tmo; ad += P.asr_data; at += P.asr_term; ac += P.asr_closing; dr += P.defer_rel;
+        ie += P.imm_err; re += P.reenter; op += P.open_ok; mg += P.merged;
+    }
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb: open %ld send ok %ld term %ld rcv ok %ld nocopy %ld returned %ld timeouts %ld "
+                "asr data %ld term %ld closing %ld deferred releases %ld immediate errors %ld "
+                "re-entries %ld sends past the core queue %ld\n",
+                op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, dr, ie, re, mg);
+    /* coverage: the run must reach the interesting paths */
+    T_CHECK(op > 0); T_CHECK(sok > 0); T_CHECK(sterm > 0); T_CHECK(rok > 0); T_CHECK(nc > 0);
+    T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
+    T_CHECK(dr > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
+}
+
+T_MAIN(test_fuzz_seeds, test_fuzz_clock_wrap, test_fuzz_pb)
