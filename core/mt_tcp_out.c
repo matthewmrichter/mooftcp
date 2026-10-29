@@ -12,7 +12,7 @@
 uint16_t mt_tcp_local_mss(const mt_stack *s) {
     uint16_t mtu = s->cfg.mtu;
     if (mtu > MT_TXBUF_SIZE - MT_ETH_HDR) mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
-    return mtu > 40u ? (uint16_t)(mtu - 40u) : 0u;
+    return mtu > 104u ? (uint16_t)(mtu - 40u) : 64u;   /* floor 64: output can never spin */
 }
 
 /* Header at the IP payload area; returns its length. */
@@ -136,6 +136,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         uint8_t fl = MT_TH_ACK;
         n = unsent < wnd ? unsent : wnd;
         if (n > t->mss) n = t->mss;
+        if (n == 0) break;
         if (n == unsent) {
             fl |= MT_TH_PSH;
             if ((t->flags & MT_TF_FINQ) && !(t->flags & MT_TF_FINSENT)) fl |= MT_TH_FIN;

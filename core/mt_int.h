@@ -127,6 +127,7 @@ struct mt_tcp {
     uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
     uint16_t mss, ulp_s;
     uint8_t state, flags, tmask, used;
+    uint8_t gen;              /* bumped on create/release/terminate/abort: stale deferred events are dropped */
 };
 
 

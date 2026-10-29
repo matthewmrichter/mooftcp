@@ -50,6 +50,7 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
     t->flags &= MT_TF_ULPABORT;
     t->tmask = 0;
     t->state = MT_TCP_CLOSED;
+    t->gen++;
     fire(t, MT_TCP_EV_TERMINATE, r);
 }
 
@@ -84,11 +85,14 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     mt_tcp *t = NULL;
     uint16_t i;
     uint32_t sq;
+    uint8_t gen;
     if (!buf || buflen < TCP_MIN_BUF) return NULL;
     for (i = 0; i < s->lim.max_tcp; i++)
         if (!s->tcp[i].used) { t = &s->tcp[i]; break; }
     if (!t) return NULL;
+    gen = (uint8_t)(t->gen + 1u);
     memset(t, 0, sizeof *t);
+    t->gen = gen;
     sq = buflen / 4u;
     mt_ring_init(&t->sndq, buf, sq);
     mt_ring_init(&t->rcvq, buf + sq, buflen - sq);
@@ -229,7 +233,11 @@ void mt_tcp_release(mt_tcp *t) {
     if (!t->used) return;
     send_rst(t, t->tnow);
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
-    memset(t, 0, sizeof *t);               /* used = 0, cb = NULL: no further callbacks */
+    {
+        uint8_t gen = (uint8_t)(t->gen + 1u);
+        memset(t, 0, sizeof *t);           /* used = 0, cb = NULL: no further callbacks */
+        t->gen = gen;
+    }
 }
 
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
@@ -490,6 +498,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
     int fin = (g->fl & MT_TH_FIN) != 0, inwin;
     unsigned ev = 0;
     uint32_t dacc = 0;
+    uint8_t g0 = t->gen;
 
     inwin = free_ ? (seq - t->rcv_nxt) < free_ : seq == t->rcv_nxt;
     if (g->fl & MT_TH_RST) {
@@ -505,8 +514,21 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         return;
     }
     if (g->fl & MT_TH_SYN) {
-        if (t->state == MT_TCP_SYN_RCVD && seq == t->irs) {
-            mt_tcp_rexmit(t, now);                         /* our SYN-ACK was lost */
+        if (t->state == MT_TCP_SYN_RCVD && seq == t->irs &&
+            (g->fl & MT_TH_ACK) && mt_seq_lt(t->snd_una, g->ack) &&
+            mt_seq_le(g->ack, t->snd_nxt)) {              /* simultaneous open completes */
+            t->snd_una = g->ack;
+            t->snd_wnd = g->win;
+            t->snd_wl1 = seq;
+            t->snd_wl2 = g->ack;
+            tmr_clr(t, MT_TT_RTO);
+            t->rto = MT_TCP_RTO_INIT;
+            established(t);
+            t->flags |= MT_TF_ACKNOW;
+            mt_tcp_output(t, now);
+            fire(t, MT_TCP_EV_ESTABLISHED, 0);
+        } else if (t->state == MT_TCP_SYN_RCVD && seq == t->irs && !(g->fl & MT_TH_ACK)) {
+            mt_tcp_rexmit(t, now);                         /* bare SYN: our SYN-ACK was lost */
         } else {
             t->flags |= MT_TF_ACKNOW;                      /* challenge ACK, connection kept */
             mt_tcp_output(t, now);
@@ -516,10 +538,17 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
     seglen = dlen + (uint32_t)fin;
     if (seglen == 0 ? !inwin
                     : !(free_ && (inwin || (seq + seglen - 1u - t->rcv_nxt) < free_))) {
-        if (t->state == MT_TCP_TIME_WAIT && fin) tmr_set(t, MT_TT_TW, now + TCP_TW_MS);
-        t->flags |= MT_TF_ACKNOW;
-        mt_tcp_output(t, now);
-        return;
+        if (free_ == 0 && seglen && seq == t->rcv_nxt && (g->fl & MT_TH_ACK) &&
+            t->state != MT_TCP_TIME_WAIT) {
+            dlen = 0;                    /* zero window: refuse the data but honour its ACK */
+            fin = 0;
+            t->flags |= MT_TF_ACKNOW;
+        } else {
+            if (t->state == MT_TCP_TIME_WAIT && fin) tmr_set(t, MT_TT_TW, now + TCP_TW_MS);
+            t->flags |= MT_TF_ACKNOW;
+            mt_tcp_output(t, now);
+            return;
+        }
     }
     if (!(g->fl & MT_TH_ACK)) return;
 
@@ -601,9 +630,10 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
     }
 out:
     mt_tcp_output(t, now);
+    /* A callback may abort/release/re-listen: gen changes and the rest of the batch is stale. */
     if (ev & EV_EST) fire(t, MT_TCP_EV_ESTABLISHED, 0);
-    if (ev & EV_DATA) fire(t, MT_TCP_EV_DATA, dacc);
-    if (ev & EV_CLOSING) fire(t, MT_TCP_EV_CLOSING, 0);
+    if ((ev & EV_DATA) && t->gen == g0) fire(t, MT_TCP_EV_DATA, dacc);
+    if ((ev & EV_CLOSING) && t->gen == g0) fire(t, MT_TCP_EV_CLOSING, 0);
 }
 
 void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len,

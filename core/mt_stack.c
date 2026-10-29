@@ -69,7 +69,12 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     return s;
 }
 
-void mt_set_config(mt_stack *s, const mt_ifconfig *c) { s->cfg = *c; }
+/* mtu is clamped to 68..1500 (IPv4 minimum, txbuf limit); 0 means 68, never "unlimited". */
+void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
+    s->cfg = *c;
+    if (s->cfg.mtu < 68u) s->cfg.mtu = 68u;
+    if (s->cfg.mtu > MT_TXBUF_SIZE - MT_ETH_HDR) s->cfg.mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
+}
 void mt_get_config(const mt_stack *s, mt_ifconfig *c) { *c = s->cfg; }
 const mt_stats *mt_get_stats(const mt_stack *s) { return &s->stats; }
 
