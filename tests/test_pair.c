@@ -406,13 +406,37 @@ static void targeted(int kind, uint32_t delay, uint32_t total, const char *what,
     check_run(&r, &s, what, (uint32_t)kind);
     T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
     T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
-    if (kind != TL_FINAL_ACK3) T_EQ(tl.hits, 1);
-    else T_EQ(tl.hits, 3);
+    if (kind == TL_FINAL_ACK3) T_EQ(tl.hits, 3);
+    else if (kind) T_EQ(tl.hits, 1);                 /* kind 0: no directed fault (tl not reset) */
     if (elapsed) *elapsed = r.elapsed;
     if (est) *est = r.a.est_t - r.t0;
     if (resend_dt) *resend_dt = tl.resend_dt;
     if (rexmt) *rexmt = mt_get_stats(pair_a(r.p))->tcp_rexmt + mt_get_stats(pair_b(r.p))->tcp_rexmt;
     run_free(&r);
+}
+
+/* Repair cost of one mid-stream loss on a clean link. NewReno resends one hole per partial ACK,
+ * so the penalty over the lossless transfer is the detection time (3 duplicate ACKs, about one
+ * RTT after the loss) plus one RTT per resent segment (`rex` of them): (rex + 1) RTTs. A receiver
+ * that held each lone resent segment for the 100 ms delayed ACK would add 100 ms per hole, so
+ * the bound is (rex + 2) RTTs (one RTT of slack) + 2 ms of timer rounding; the delayed ACKs
+ * alone would exceed it by far. */
+static void mid_loss_penalty(uint32_t delay) {
+    uint32_t clean, loss, rex, rex0, dt, rtt = 2 * delay;
+    targeted(0, delay, 131072, "penalty clean", &clean, &rex0, NULL, NULL);
+    targeted(TL_MID, delay, 131072, "penalty loss", &loss, &rex, &dt, NULL);
+    T_EQ(rex0, 0);
+    T_CHECK(rex >= 1 && rex <= 8);
+    T_CHECK(loss > clean);
+    T_CHECK(loss - clean <= (rex + 2) * rtt + 2);
+    if (t_failed)
+        fprintf(stderr, "  delay %u: clean %u ms, loss %u ms, %u resends\n", (unsigned)delay,
+                (unsigned)clean, (unsigned)loss, (unsigned)rex);
+}
+
+static void test_pair_loss_penalty(void) {
+    mid_loss_penalty(1);
+    mid_loss_penalty(5);
 }
 
 static void test_pair_targeted_loss(void) {
@@ -433,7 +457,6 @@ static void test_pair_targeted_loss(void) {
     T_EQ(rex0, 0);
     T_CHECK(rex >= 1 && rex <= 8);
     T_CHECK(dt > 0 && dt < MT_TCP_RTO_MIN);
-    (void)clean; (void)loss;
     /* Slow link (400 ms each way), the first three final ACKs lost. A's FIN retransmits at +1 s,
      * +2 s, +4 s and each arrival renews B's 2 s TIME_WAIT, so the fourth FIN finds B gone and is
      * answered with an RST; A (LAST_ACK, all data acked) must still report a clean close. (With
@@ -442,4 +465,5 @@ static void test_pair_targeted_loss(void) {
 }
 
 T_MAIN(test_pair_bulk_clean, test_pair_bulk_lossy, test_pair_interactive_clean,
-       test_pair_bidirectional_close, test_pair_wrap, test_pair_slow_reader, test_pair_targeted_loss)
+       test_pair_bidirectional_close, test_pair_wrap, test_pair_slow_reader, test_pair_targeted_loss,
+       test_pair_loss_penalty)

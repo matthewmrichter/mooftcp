@@ -70,6 +70,7 @@ static void conn_reset(mt_tcp *t) {
     t->dupacks = 0;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
+    t->ooo_hi = 0;
     t->rcv_adv = t->rcv_up = t->snd_up = 0;
     t->mss = TCP_MSS_DEFAULT;
 }
@@ -860,9 +861,10 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 dacc = g->acc_n;
                 /* ACK policy: sub-MSS, PSH or FIN -> ACK before mt_input returns (output below,
                  * after the callbacks, so a reply sent by the app carries it); a full segment is
-                 * ACKed with every second one, else by the 100 ms timer. */
+                 * ACKed with every second one, else by the 100 ms timer; while MT_T2_GAP is set (a hole is
+                 * being repaired) every in-order segment is ACKed at once. */
                 if (g->acc_n >= t->mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
-                    !(t->flags2 & MT_T2_ACKHALF)) {
+                    !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
                     t->flags2 |= MT_T2_ACKHALF;
                     if (!(t->tmask & (1u << MT_TT_DELACK)))
                         tmr_set(t, MT_TT_DELACK, now + MT_TCP_DELACK_MS);
@@ -878,8 +880,16 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 else if (t->state == MT_TCP_FIN_WAIT_1) mt_tcp_set_state(t, MT_TCP_CLOSING);
                 else enter_time_wait(t, now);
             }
+            if ((t->flags2 & MT_T2_GAP) && mt_seq_ge(t->rcv_nxt, t->ooo_hi))
+                t->flags2 &= (uint8_t)~MT_T2_GAP;          /* the hole is filled */
         } else if (dlen || fin) {                          /* a gap or duplicate: duplicate ACK */
+            uint32_t end = seq + dlen + (uint32_t)fin;
             t->flags |= MT_TF_ACKNOW;
+            if (mt_seq_gt(seq, t->rcv_nxt)) {              /* RFC 5681 4.2: while a hole is open, */
+                if (!(t->flags2 & MT_T2_GAP) || mt_seq_gt(end, t->ooo_hi))   /* ACK every segment */
+                    t->ooo_hi = end;                       /* that advances rcv_nxt (no delayed ACK) */
+                t->flags2 |= MT_T2_GAP;
+            }
         }
     }
 out:

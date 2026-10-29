@@ -176,6 +176,52 @@ static void test_nagle_holds_tail_in_flight(void) {
     }
 }
 
+/* RFC 5681 4.2: while a hole is open (data seen beyond rcv_nxt), every segment that advances
+ * rcv_nxt is ACKed at once, until rcv_nxt reaches the end of the highest out-of-order segment.
+ * The receiver keeps no out-of-order data, so the sender resends each hole segment alone. */
+static void gap_scenario(uint32_t isn) {
+    rec r; tcpv v; mt_tcp_info in;
+    uint32_t i, ooo_end;
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, isn, rec_cb, &r);                   /* receive ring 6144 = 4 segments + 304 */
+        ooo_end = c.ps + 4u * 1460u;
+        inject_data(&c, 3u * 1460u, 1460, 0, 10);       /* segment 3 first: sets the high mark */
+        inject_data(&c, 1460, 1460, 0, 11);             /* segment 1: lower, must not lower it */
+        T_EQ(fl.n, 2);                                  /* two duplicate ACKs */
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps);
+        T_CHECK(c.t->flags2 & MT_T2_GAP);
+        T_EQ(c.t->ooo_hi, ooo_end);
+        fake_clear(&fl);
+        for (i = 0; i < 3; i++) {                       /* the hole segments 0, 1, 2 arrive alone */
+            inject_data(&c, i * 1460u, 1460, 0, 20 + i);
+            T_EQ(fl.n, (int)i + 1);                     /* ACKed before mt_input returned */
+            T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + (i + 1u) * 1460u);
+            T_CHECK(!(c.t->tmask & (1u << MT_TT_DELACK)));
+            T_CHECK(!(c.t->flags2 & MT_T2_ACKHALF));
+            T_CHECK(c.t->flags2 & MT_T2_GAP);           /* below the high mark: persists */
+        }
+        inject_data(&c, 3u * 1460u, 1460, 0, 30);       /* reaches ooo_hi: immediate, then done */
+        T_EQ(fl.n, 4);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, ooo_end);
+        T_CHECK(!(c.t->flags2 & MT_T2_GAP));
+        mt_tcp_get_info(c.t, &in); T_EQ(in.rcv_avail, 4u * 1460u);
+        mt_tcp_consume(c.t, 4u * 1460u, 31);
+        fake_clear(&fl);
+        inject_data(&c, 4u * 1460u, 1460, 0, 40);       /* normal policy again: delayed ACK */
+        T_EQ(fl.n, 0);
+        T_CHECK(c.t->tmask & (1u << MT_TT_DELACK));
+        inject_data(&c, 5u * 1460u, 1460, 0, 41);       /* every second segment */
+        T_EQ(fl.n, 1);
+    }
+}
+
+static void test_gap_acks_every_fill_segment(void) { gap_scenario(5000); }
+
+/* The high mark crosses 2^32: the compares must be wrap-safe. */
+static void test_gap_high_mark_wraps(void) { gap_scenario(0xFFFFFA00u); }
+
 T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_psh_full_segment_acked_now, test_send_state_and_no_events_after_terminate,
-       test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight)
+       test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight,
+       test_gap_acks_every_fill_segment, test_gap_high_mark_wraps)

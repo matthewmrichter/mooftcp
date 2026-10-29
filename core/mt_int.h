@@ -113,6 +113,7 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
 #define MT_T2_RTTING   0x20u   /* rtt_seq/rtt_t0 hold a timed (never retransmitted) segment */
 #define MT_T2_RECOV    0x40u   /* in fast recovery (until ACK >= recover) */
+#define MT_T2_GAP      0x80u   /* data seen beyond rcv_nxt: ACK every in-order segment until rcv_nxt >= ooo_hi */
 #define MT_TH_FIN 0x01u
 #define MT_TH_SYN 0x02u
 #define MT_TH_RST 0x04u
@@ -133,6 +134,7 @@ struct mt_tcp {
                                * go-back-N recovery; ACKs are valid up to snd_max) */
     mt_ring sndq, rcvq;
     uint32_t snd_wl1, snd_wl2, iss, irs;
+    uint32_t ooo_hi;          /* end of the highest out-of-order segment seen (valid while MT_T2_GAP) */
     uint32_t rcv_adv;         /* right edge of the window last advertised (receiver SWS) */
     uint32_t rcv_up, snd_up;  /* urgent marks: sequence number just past the urgent data */
     uint32_t tmr[MT_TT_N];    /* absolute ms deadlines, valid where the tmask bit is set */
