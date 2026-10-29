@@ -122,6 +122,7 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     ulen = mt_rd16(pl + 4);
     if (ulen < UDP_HDR || ulen > len) MT_DROP_GOTO(why);
     dlen = (uint16_t)(ulen - UDP_HDR);
+    if (mt_rd16(pl + 2) == 0) MT_DROP_GOTO(why);                  /* destination port 0 */
     checked = mt_rd16(pl + 6) != 0;
     u = udp_find(s, mt_rd16(pl + 2));
 

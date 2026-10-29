@@ -16,11 +16,18 @@
 #define ICMP_PARAMPROB  12
 
 #define ICMP_HDR 8u
+#define ICMP_ERR_GAP_MS 100u
 /* Largest ICMP message that fits one frame: mt_ip_payload() capacity. */
 #define ICMP_ONE_FRAME (MT_TXBUF_SIZE - MT_ETH_HDR - MT_IP_HDR)
 
 static int unicast_src(const mt_stack *s, mt_ip4 a) {
     return a != 0 && a < 0xE0000000u && a != s->cfg.addr && a != (s->cfg.addr | ~s->cfg.mask);
+}
+
+/* icmp_out counts messages handed to the link: call after a successful mt_ip_output* (which
+ * also reports MT_OK when the link refused the frame); err0 is eth_tx_err from before it. */
+static void icmp_counted(mt_stack *s, uint32_t err0) {
+    if (s->stats.eth_tx_err == err0) s->stats.icmp_out++;
 }
 
 void mt_set_echo_cb(mt_stack *s, mt_echo_cb cb, void *user) {
@@ -33,7 +40,7 @@ void mt_set_echo_cb(mt_stack *s, mt_echo_cb cb, void *user) {
 static void icmp_echo_reply(mt_stack *s, mt_ip4 src, const uint8_t *pl, uint16_t len,
                             uint32_t now) {
     uint8_t *out;
-    uint32_t t;
+    uint32_t t, err0;
     if (len <= ICMP_ONE_FRAME) {
         /* One pass: copy into txbuf while summing the request for verification. */
         out = mt_ip_payload(s);
@@ -52,9 +59,10 @@ static void icmp_echo_reply(mt_stack *s, mt_ip4 src, const uint8_t *pl, uint16_t
     t = (uint32_t)(uint16_t)~mt_rd16(out + 2) + 0xF7FFu;
     t = (t & 0xFFFFu) + (t >> 16);
     mt_wr16(out + 2, (uint16_t)~t);
-    s->stats.icmp_out++;
-    if (out == mt_ip_payload(s)) mt_ip_output(s, src, 1, len, now);
-    else mt_ip_output_buf(s, src, 1, out, len, now);
+    err0 = s->stats.eth_tx_err;
+    if (out == mt_ip_payload(s) ? mt_ip_output(s, src, 1, len, now) == MT_OK
+                                : mt_ip_output_buf(s, src, 1, out, len, now) == MT_OK)
+        icmp_counted(s, err0);
 }
 
 /* Error message about a datagram we sent: body = embedded original IP header + >= 8 bytes. */
@@ -109,6 +117,7 @@ int mt_icmp_echo(mt_stack *s, mt_ip4 dst, uint16_t id, uint16_t seq, const uint8
                  uint16_t len, uint32_t now) {
     uint8_t *m = mt_ip_payload(s);
     uint32_t t;
+    uint32_t err0 = s->stats.eth_tx_err;
     int r;
     if (len > ICMP_ONE_FRAME - ICMP_HDR || (len && !data)) return MT_ERR_INVAL;
     m[0] = ICMP_ECHO; m[1] = 0; m[2] = 0; m[3] = 0;
@@ -118,7 +127,7 @@ int mt_icmp_echo(mt_stack *s, mt_ip4 dst, uint16_t id, uint16_t seq, const uint8
     t = mt_cksum_copy(t, m + ICMP_HDR, data, len);
     mt_wr16(m + 2, mt_cksum_fold(t));
     r = mt_ip_output(s, dst, 1, (uint16_t)(ICMP_HDR + len), now);
-    if (r == MT_OK) s->stats.icmp_out++;
+    if (r == MT_OK) icmp_counted(s, err0);
     return r;
 }
 
@@ -127,7 +136,11 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
     uint8_t *m = mt_ip_payload(s);
     uint8_t *h = m + ICMP_HDR;
     uint16_t q = len < 8 ? len : 8;
+    uint32_t err0;
     if (s->cfg.addr == 0 || dst != s->cfg.addr || !unicast_src(s, src) || proto == 1) return;
+    /* Error messages we originate: at most one per ICMP_ERR_GAP_MS per stack (RFC 1812 4.3.2.8). */
+    if (mt_time_before(now, s->icmp_err_next)) return;
+    s->icmp_err_next = now + ICMP_ERR_GAP_MS;
     memset(m, 0, ICMP_HDR);
     m[0] = ICMP_UNREACH; m[1] = code;
     /* Synthesised original header (see mt_int.h). */
@@ -141,6 +154,7 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
     mt_wr16(h + 10, mt_cksum_fold(mt_cksum_add(0, h, MT_IP_HDR)));
     memcpy(h + MT_IP_HDR, pl, q);
     mt_wr16(m + 2, mt_cksum_fold(mt_cksum_add(0, m, ICMP_HDR + MT_IP_HDR + (uint32_t)q)));
-    s->stats.icmp_out++;
-    mt_ip_output(s, src, 1, (uint16_t)(ICMP_HDR + MT_IP_HDR + q), now);
+    err0 = s->stats.eth_tx_err;
+    if (mt_ip_output(s, src, 1, (uint16_t)(ICMP_HDR + MT_IP_HDR + q), now) == MT_OK)
+        icmp_counted(s, err0);
 }

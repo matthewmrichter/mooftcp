@@ -130,6 +130,7 @@ static void conn_reset(mt_tcp *t) {
     t->ooo_hi = 0;
     t->rcv_adv = t->rcv_up = t->snd_up = 0;
     t->mss = TCP_MSS_DEFAULT;
+    t->rcv_mss = 0;
 }
 
 /* ISN = base + 250 per ms + (once mt_set_entropy has keyed it) a mix of the 4-tuple, so ISNs of
@@ -482,9 +483,20 @@ static void ulp_expired(mt_tcp *t, uint32_t now) {
     }
 }
 
+/* A half-open connection made from a listener (SYN_RCVD) sends its SYN-ACK at 0, +1, +3 and +7 s
+ * (rto 1, 2, 4 s, doubling per timeout); when the 4th one times out (rto has reached 8 s) it
+ * gives up and the TCB listens again, rather than holding the listener for the 120 s ULP
+ * timeout. An actively opened SYN_SENT is not affected (it keeps the ULP connect timeout). */
+#define SYNRCVD_GIVEUP_RTO (8u * MT_TCP_RTO_INIT)
+
 /* Retransmission timeout. Data states: back to Loss Window (cwnd = 1 MSS, ssthresh halved) and
  * go-back-N from snd_una; SYN states resend the SYN / SYN-ACK. */
 static void rto_fire(mt_tcp *t, uint32_t now) {
+    if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE) &&
+        t->rto >= SYNRCVD_GIVEUP_RTO) {
+        back_to_listen(t);          /* 4 SYN-ACKs sent and the 4th timed out: free the listener */
+        return;
+    }
     if (t->state == MT_TCP_SYN_SENT || t->state == MT_TCP_SYN_RCVD) {
         mt_tcp_rexmit(t, now);
     } else {
@@ -747,6 +759,7 @@ static void established(mt_tcp *t) {
     t->recover = t->snd_una - 1u;
     mt_tcp_set_state(t, MT_TCP_ESTABLISHED);
     t->flags |= MT_TF_EST;
+    t->rcv_mss = t->mss < 536u ? t->mss : 536u;     /* grows to the largest segment received */
     t->st->stats.tcp_conns_open++;
     t->flags &= (uint8_t)~MT_TF_PASSIVE;
 }
@@ -828,7 +841,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
 
     inwin = free_ ? (seq - t->rcv_nxt) < free_ : seq == t->rcv_nxt;
     if (g->fl & MT_TH_RST) {
-        if (inwin) {
+        if (seq == t->rcv_nxt) {                           /* RFC 5961 3.2: exact match only */
             if (t->state == MT_TCP_TIME_WAIT) return;      /* never let an RST cut TIME_WAIT short */
             t->st->stats.tcp_resets_in++;
             if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE)) back_to_listen(t);
@@ -839,7 +852,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                                                             * TIME_WAIT expired): a clean close */
             else tcp_term(t, MT_TERM_REMOTE_ABORT);
         } else {
-            t->flags |= MT_TF_ACKNOW;                      /* challenge ACK */
+            t->flags |= MT_TF_ACKNOW;                      /* in window but not exact (or outside): challenge ACK */
             mt_tcp_output(t, now);
         }
         return;
@@ -972,7 +985,11 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                  * after the callbacks, so a reply sent by the app carries it); a full segment is
                  * ACKed with every second one, else by the 100 ms timer; while MT_T2_GAP is set (a hole is
                  * being repaired) every in-order segment is ACKed at once. */
-                if (g->acc_n >= t->mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
+                if (g->acc_n > t->rcv_mss) {               /* largest segment seen, <= local MSS */
+                    uint16_t lm = mt_tcp_local_mss(t->st);
+                    t->rcv_mss = g->acc_n < lm ? (uint16_t)g->acc_n : lm;
+                }
+                if (g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
                     !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
                     t->flags2 |= MT_T2_ACKHALF;
                     if (!(t->tmask & (1u << MT_TT_DELACK)))
@@ -1068,6 +1085,7 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     g.fl = (uint8_t)(pl[13] & 0x3Fu);                      /* FIN SYN RST PSH ACK URG */
     g.win = mt_rd16(pl + 14);
     g.up = mt_rd16(pl + 18);
+    if (dport == 0 || (sport == 0 && (g.fl & MT_TH_SYN))) MT_DROP_GOTO(why);   /* port 0: no RST */
     g.data = pl + hl;
     g.dlen = (uint16_t)(len - hl);
     /* Single pass over the payload: the header sum first (hl is a multiple of 4, so chaining

@@ -66,7 +66,9 @@ static void test_simultaneous_open_two_stacks(void) {
     mt_tcp *ta = mt_tcp_create(sa, ba, sizeof ba, rec_cb, &ra);
     mt_tcp *tb = mt_tcp_create(sb, bb, sizeof bb, rec_cb, &rb);
     memset(&ra, 0, sizeof ra); memset(&rb, 0, sizeof rb);
-    mt_arp_insert(sa, T_PEER, T_ME_MAC, 0);   /* both stacks share one MAC */
+    { mt_ifconfig c; mt_get_config(sb, &c); memcpy(c.mac, T_PEER_MAC, 6); mt_set_config(sb, &c); }
+    /* (Task 5: frames sourced from our own MAC are ignored, so the two stacks need distinct MACs) */
+    mt_arp_insert(sa, T_PEER, T_PEER_MAC, 0);
     mt_arp_insert(sb, T_ME, T_ME_MAC, 0);
     T_EQ(mt_tcp_open(ta, T_PEER, 2000, 2000, 0), MT_OK);
     T_EQ(mt_tcp_open(tb, T_ME, 2000, 2000, 0), MT_OK);
@@ -277,8 +279,9 @@ static void test_fast_retransmit_of_lone_fin(void) {
     T_EQ(mt_get_stats(s)->tcp_rexmt, 1);
 }
 
-/* A half-open connection backs its RTO off while SYN-ACKs go unanswered; once the ULP timeout
- * returns the listener to LISTEN, the next SYN's SYN-ACK is armed with the initial RTO again. */
+/* A half-open connection backs its RTO off while SYN-ACKs go unanswered; once the 4th SYN-ACK
+ * times out (Task 5: 15 s, no longer the 120 s ULP timeout) the listener is back in LISTEN and the
+ * next SYN's SYN-ACK is armed with the initial RTO again. */
 static void test_listener_rto_reset_after_half_open(void) {
     fake_link fl; rec r; tcpv v; mt_tcp_info in;
     mt_stack *s = setup(&fl);
@@ -299,8 +302,8 @@ static void test_listener_rto_reset_after_half_open(void) {
     }
     mt_tcp_get_info(t, &in);
     T_EQ(in.state, MT_TCP_LISTEN);
-    T_CHECK(now >= 100000);                             /* the 120 s ULP timeout, not an early exit */
-    T_CHECK(fl.n >= 5);                                 /* 1 s, 2 s, 4 s ... retransmits happened */
+    T_EQ(now, 15000);                                   /* 4 SYN-ACKs: at 0, 1, 3 and 7 s, then give up */
+    T_EQ(fl.n, 4);                                      /* 1 s, 2 s, 4 s ... retransmits happened */
     fake_clear(&fl);
     now += 10;
     inject(s, 1026, 21, 9000, 0, TF_SYN, NULL, 0, now);

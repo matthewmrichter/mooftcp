@@ -139,14 +139,25 @@ void mt_arp_insert(mt_stack *s, mt_ip4 ip, const uint8_t mac[6], uint32_t now) {
 void mt_arp_input(mt_stack *s, const uint8_t *arp, uint16_t len, uint32_t now) {
     uint16_t op;
     mt_ip4 spa;
+    int known;
     s->stats.arp_in++;
     if (len < ARP_LEN || mt_rd16(arp) != 1 || mt_rd16(arp + 2) != 0x0800 ||
         arp[4] != 6 || arp[5] != 4)
         return;
     op = mt_rd16(arp + 6);
-    if ((op != 1 && op != 2) || s->cfg.addr == 0 || mt_rd32(arp + 24) != s->cfg.addr) return;
+    if ((op != 1 && op != 2) || s->cfg.addr == 0) return;
+    /* A multicast/broadcast sender hardware address is never valid, and our own MAC means a
+     * reflection or a duplicate: ignore the packet entirely. */
+    if ((arp[8] & 1u) || memcmp(arp + 8, s->cfg.mac, 6) == 0) return;
     spa = mt_rd32(arp + 14);
-    if (spa != 0 && spa != s->cfg.addr && spa != MT_ETH_BCAST_IP) mt_arp_insert(s, spa, arp + 8, now);
+    /* RFC 826 merge: an existing entry (resolved or pending) for the sender is refreshed from
+     * any well-formed ARP, whoever it is addressed to, so a changed gateway MAC is followed. A new
+     * entry is only learned from a packet addressed to us. */
+    known = spa != 0 && spa < 0xE0000000u && spa != s->cfg.addr && arp_find(s, spa) != NULL;
+    if (known) mt_arp_insert(s, spa, arp + 8, now);
+    if (mt_rd32(arp + 24) != s->cfg.addr) return;
+    if (!known && spa != 0 && spa < 0xE0000000u && spa != s->cfg.addr)
+        mt_arp_insert(s, spa, arp + 8, now);
     if (op == 1) arp_send(s, 2, arp + 8, arp + 8, spa);
 }
 

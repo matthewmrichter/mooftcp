@@ -78,7 +78,7 @@ bad:
 
 void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
     uint16_t ihl, tot, ff, why;
-    mt_ip4 dst;
+    mt_ip4 dst, src;
     if (len < MT_IP_HDR || (ip[0] >> 4) != 4) MT_DROP_GOTO(why);
     ihl = (uint16_t)((ip[0] & 15u) << 2);
     if (ihl < MT_IP_HDR || ihl > len) MT_DROP_GOTO(why);
@@ -89,12 +89,18 @@ void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
     if (s->cfg.addr == 0 ||
         (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
         MT_DROP_GOTO(why);
+    /* Source validation (RFC 1122 3.2.1.3, RFC 6890): never a multicast / class E / limited
+     * broadcast address, our own address or the directed broadcast, so no reply (RST, ICMP,
+     * SYN-ACK) is ever aimed at one. 0.0.0.0 stays legal (BOOTP-style UDP). */
+    src = mt_rd32(ip + 12);
+    if (src >= 0xE0000000u || src == s->cfg.addr || src == (s->cfg.addr | ~s->cfg.mask))
+        MT_DROP_GOTO(why);
     s->stats.ip_in++;
     ff = mt_rd16(ip + 6);
     if ((ff & 0x3FFFu) == 0) {                                      /* fast path: whole datagram */
-        ip_dispatch(s, ip[9], mt_rd32(ip + 12), dst, ip + ihl, (uint16_t)(tot - ihl), now);
+        ip_dispatch(s, ip[9], src, dst, ip + ihl, (uint16_t)(tot - ihl), now);
     } else {
-        ip_reasm(s, mt_rd32(ip + 12), dst, ip[9], mt_rd16(ip + 4),
+        ip_reasm(s, src, dst, ip[9], mt_rd16(ip + 4),
                  (uint16_t)((ff & 0x1FFFu) << 3), (ff & 0x2000u) != 0, ip + ihl,
                  (uint16_t)(tot - ihl), now);
     }

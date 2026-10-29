@@ -28,7 +28,7 @@ void fake_clear(fake_link *fl) {
 }
 
 mt_stack *tstack_new(fake_link *fl, mt_ip4 addr) {
-    static uint64_t pool[4][16384 / 8];   /* 8-aligned: MT_ARENA_ALIGN */
+    static uint64_t pool[4][20480 / 8];   /* 8-aligned: MT_ARENA_ALIGN */
     static int next;
     mt_limits lim;
     mt_link link;

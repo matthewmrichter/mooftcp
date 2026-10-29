@@ -173,6 +173,7 @@ struct mt_tcp {
     uint8_t sq_idx, sq_n;          /* cursor segment index; requests queued (incl. completed ones) */
     uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
     uint16_t mss;
+    uint16_t rcv_mss;         /* largest payload received in one segment (clamped to the local MSS) */
     uint8_t state, flags, flags2, tmask, used, dupacks;
     uint8_t gen;              /* bumped on create/release/terminate/abort: stale deferred events are dropped */
 };
@@ -250,6 +251,7 @@ struct mt_stack {
     struct { mt_ip4 dst; uint32_t seq; uint16_t sport, dport, len; uint8_t live; } arp_rel;
     uint16_t udp_eph;        /* next ephemeral port candidate */
     uint16_t ip_id;          /* next IPv4 identification */
+    uint32_t icmp_err_next;  /* earliest time (ms) the next ICMP error we originate may be sent */
     mt_echo_cb echo_cb;
     void *echo_user;
 #ifdef MT_TEST_HOOKS
