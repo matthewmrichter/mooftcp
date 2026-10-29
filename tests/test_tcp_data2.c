@@ -153,6 +153,29 @@ static void test_data_with_fin_single_segment(void) {
     }
 }
 
+static void test_nagle_holds_tail_in_flight(void) {
+    rec r; tcpv v; static uint8_t d[1560];
+    memset(&r, 0, sizeof r);
+    pattern(d, 0, sizeof d);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        T_EQ(mt_tcp_send(c.t, (const uint8_t *)"x", 1, 1, 0, 10), 1);
+        T_EQ(fl.n, 1);                                  /* 1 byte now in flight */
+        T_EQ(mt_tcp_send(c.t, d, 1560, 0, 0, 11), 1560);
+        T_EQ(fl.n, 2);                                  /* one full segment only */
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.dlen, 1460);
+        inject(&c, c.ps, c.ms + 1, TF_ACK, NULL, 0, 12);   /* ACKs x only: 1460 still in flight */
+        T_EQ(fl.n, 2);                                  /* 100-byte tail still held */
+        inject(&c, c.ps, c.ms + 1461, TF_ACK, NULL, 0, 13);
+        T_EQ(fl.n, 3);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.dlen, 100); T_EQ(v.seq, c.ms + 1461);
+        /* with push the tail goes at once, data still in flight */
+        T_EQ(mt_tcp_send(c.t, d, 1560, 1, 0, 20), 1560);
+        T_EQ(fl.n, 5);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.dlen, 100);
+    }
+}
+
 T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_psh_full_segment_acked_now, test_send_state_and_no_events_after_terminate,
-       test_data_with_fin_single_segment)
+       test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight)

@@ -117,7 +117,7 @@ static void arm_rto(mt_tcp *t, uint32_t now) {
 
 void mt_tcp_output(mt_tcp *t, uint32_t now) {
     uint32_t sent, unsent, inflight, wnd, n;
-    int any = 0, idle, burst;
+    int any = 0, idle;
     t->tnow = now;
     switch (t->state) {
     case MT_TCP_SYN_SENT:
@@ -144,7 +144,6 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
     idle = inflight == 0;
     sent = inflight - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
     unsent = t->sndq.used > sent ? t->sndq.used - sent : 0u;
-    burst = unsent >= t->mss;
     wnd = t->snd_wnd > inflight ? t->snd_wnd - inflight : 0u;   /* provisional cwnd: peer window */
     while (unsent && wnd) {
         uint8_t fl = MT_TH_ACK;
@@ -153,10 +152,10 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         if (n > t->mss) n = t->mss;
         if (n == 0) break;
         /* Nagle / sender SWS: a sub-MSS segment goes out when nothing was unacked, or when it
-         * ends the queue and the app pushed (or closed), or when the queue held a full MSS to
-         * begin with. Otherwise it waits for the ACK that opens the window or completes data. */
+         * ends the queue and the app pushed (or closed). Otherwise (data in flight, no push) it
+         * waits for the ACK; `idle` is sampled once, so a bulk write from idle goes out whole. */
         ok = idle || n >= t->mss ||
-             (n == unsent && (burst || (t->flags2 & MT_T2_PUSHQ) || (t->flags & MT_TF_FINQ)));
+             (n == unsent && ((t->flags2 & MT_T2_PUSHQ) || (t->flags & MT_TF_FINQ)));
         if (!ok) break;
         if (n == unsent) {
             fl |= MT_TH_PSH;
