@@ -51,7 +51,7 @@ typedef struct {
     uint16_t lastlen[8];
     int lastn;
     long ev[9];               /* TCP events seen, by mt_tcp_event */
-    long done_ok, done_abort, busy, two_queued, inval;
+    long done_ok, done_abort, busy, two_queued, inval, reopen_in_done;
 } fz;
 
 /* Send request records: three per fuzzer TCB slot (at most MT_SENDQ_MAX are queued, so one is
@@ -62,6 +62,7 @@ typedef struct {
 #define CANARY 0xC3u
 typedef struct {
     int busy, slot;
+    uint8_t gen;              /* TCB generation at submit: MT_ERR_ABORTED needs a termination since */
     long serial;
     uint8_t nsegs;
     mt_seg segs[MT_SEGS_MAX + 1], segs_copy[MT_SEGS_MAX + 1];
@@ -197,13 +198,19 @@ static void send_done(void *ud, int st) {
     t = g.t[r->slot];
     if (st == MT_OK) g.done_ok++;
     else if (st == MT_ERR_ABORTED) {
-        g.done_abort++;
-        if (t && t->state != MT_TCP_CLOSED) bad("send aborted on a live connection");
+        g.done_abort++;                                     /* only after a termination (gen bump) */
+        if (t && t->used && t->gen == r->gen) bad("send aborted without a termination");
     } else bad("send done with an unknown status");
     rq_release(r);
-    if (t && t->used && g.cb_depth <= 3 && rn(3) == 0) {   /* re-enter from the done callback */
+    if (t && t->used && g.cb_depth <= 3) {
         g.cb_depth++;
-        tcp_action(t);
+        if (t->state == MT_TCP_CLOSED && rn(2) == 0) {      /* re-use the stream from inside done */
+            g.reopen_in_done++;
+            if (rn(2)) mt_tcp_listen(t, 0, 0, (uint16_t)(rn(2) ? 23 : 0));
+            else mt_tcp_open(t, PEER, (uint16_t)(80 + rn(3)), 0, g.now);
+        } else if (rn(3) == 0) {                            /* re-enter from the done callback */
+            tcp_action(t);
+        }
         g.cb_depth--;
     }
 }
@@ -241,6 +248,7 @@ static void fuzz_send(mt_tcp *t) {
     q->slot = slot;
     q->nsegs = ns;
     q->serial = g_serial[slot];
+    q->gen = t->gen;
     k = t->sq_n;
     r = mt_tcp_send_segs(t, q->segs, ns, (int)rn(2), rn(10) == 0, send_done, q, g.now);
     if (ns == 0 || ns > MT_SEGS_MAX || total == 0) {
@@ -262,14 +270,22 @@ static void fuzz_send(mt_tcp *t) {
     if (t->used && t->sq_n == MT_SENDQ_MAX) g.two_queued++;
 }
 
+/* Release: the requests still queued in the TCB are dropped silently (the caller owns them);
+ * requests a terminating TCB already detached keep their pending done calls. */
 static void drop_tcb(mt_tcp *t) {
     int i = tslot(t), k;
-    mt_tcp_release(t);                                      /* queued requests: dropped silently */
+    uint8_t r;
+    if (i >= 0)
+        for (k = 0; k < RQ_PER; k++)
+            for (r = 0; r < t->sq_n; r++)
+                if (g_rq[i][k].busy && t->sq[r].segs == g_rq[i][k].segs) rq_release(&g_rq[i][k]);
+    mt_tcp_release(t);
     if (i >= 0) {
+        long next = g_serial[i];
         g.t[i] = NULL;
         for (k = 0; k < RQ_PER; k++)
-            if (g_rq[i][k].busy) rq_release(&g_rq[i][k]);
-        g_next_done[i] = g_serial[i];
+            if (g_rq[i][k].busy && g_rq[i][k].serial < next) next = g_rq[i][k].serial;
+        g_next_done[i] = next;
     }
 }
 
@@ -398,6 +414,12 @@ static void check_sendq(const mt_tcp *t) {
 static void check_invariants(void) {
     const uint8_t rp = (1u << MT_TT_RTO) | (1u << MT_TT_PERSIST);
     uint16_t i;
+    int k, n;
+    for (i = 0; i < NT; i++) {                              /* every pending record is queued */
+        for (k = 0, n = 0; k < RQ_PER; k++) n += g_rq[i][k].busy;
+        if (g.t[i] && g.t[i]->used ? n != g.t[i]->sq_n : n != 0)
+            bad("pending send records differ from the TCB's queue");
+    }
     for (i = 0; i < g.s->lim.max_tcp; i++) {
         const mt_tcp *t = &g.s->tcp[i];
         if (!t->used) continue;
@@ -722,16 +744,18 @@ static void fuzz_seed(uint32_t seed) {
 static void test_fuzz_seeds(void) {
     uint32_t seed;
     long est = 0, data = 0, term = 0, tx = 0, dok = 0, dab = 0, busy = 0, two = 0, inval = 0;
+    long reopen = 0;
     for (seed = 1; seed <= NSEEDS; seed++) {
         fuzz_seed(seed);
         est += g.ev[MT_TCP_EV_ESTABLISHED]; data += g.ev[MT_TCP_EV_DATA];
         term += g.ev[MT_TCP_EV_TERMINATE]; tx += g.ntx;
         dok += g.done_ok; dab += g.done_abort; busy += g.busy; two += g.two_queued;
+        reopen += g.reopen_in_done;
         inval += g.inval;
     }
     if (getenv("FUZZ_VERBOSE"))
-        fprintf(stderr, "est %ld data %ld term %ld tx %ld done ok %ld abort %ld busy %ld two %ld inval %ld\n",
-                est, data, term, tx, dok, dab, busy, two, inval);
+        fprintf(stderr, "est %ld data %ld term %ld tx %ld done ok %ld abort %ld busy %ld two %ld inval %ld"
+                " reopen %ld\n", est, data, term, tx, dok, dab, busy, two, inval, reopen);
     /* The fuzzer must actually exercise the stack: connections come up, carry data and die;
      * sends complete and abort, the queue fills to two and refuses a third. */
     T_CHECK(est > 0);
@@ -743,6 +767,7 @@ static void test_fuzz_seeds(void) {
     T_CHECK(two > 0);
     T_CHECK(busy > 0);
     T_CHECK(inval > 0);
+    T_CHECK(reopen > 0);
 }
 
 /* A long run whose clock starts just below the 32-bit wrap (the seed picks near-wrap starts for

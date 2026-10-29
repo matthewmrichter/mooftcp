@@ -232,7 +232,8 @@ static void test_gap_high_mark_wraps(void) { gap_scenario(0xFFFFFA00u); }
 /* ---- send queue (mt_tcp_send_segs) ---- */
 
 /* Ordered log shared by done callbacks (100 + request id, status in st[]) and TCP events. */
-typedef struct { rec r; int ord[32], st[32], n; mt_tcp *t; int queue_on_done; } qlog;
+typedef struct { rec r; int ord[32], st[32], n; mt_tcp *t; int queue_on_done; int act[8]; } qlog;
+enum { ACT_NONE, ACT_LISTEN, ACT_OPEN, ACT_ABORT };   /* qlog.act[id]: what done(id) does */
 static mt_seg g_extra_seg[1];
 static void qlog_ev(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     qlog *q = (qlog *)user;
@@ -246,6 +247,12 @@ static void qlog_done(void *ud, int st) {
     int id = (int)(intptr_t)ud;
     if (q->n < 32) { q->ord[q->n] = 100 + id; q->st[q->n] = st; }
     q->n++;
+    switch (id >= 0 && id < 8 ? q->act[id] : ACT_NONE) {
+    case ACT_LISTEN: T_EQ(mt_tcp_listen(q->t, 0, 0, 7777), MT_OK); break;
+    case ACT_OPEN: T_EQ(mt_tcp_open(q->t, T_PEER, 24, 0, 30), MT_OK); break;
+    case ACT_ABORT: mt_tcp_abort(q->t, 30); break;
+    default: break;
+    }
     if (q->queue_on_done && id == 1) {               /* a slot is free: queue request 3 now */
         static const uint8_t z[3] = {'Z', 'Z', 'Z'};
         g_extra_seg[0].p = z; g_extra_seg[0].len = 3;
@@ -590,6 +597,107 @@ static void test_push_per_request(void) {
     }
 }
 
+/* ---- done callbacks that re-use the stream while it terminates ---- */
+
+static int count_q(const qlog *q, int what) {
+    int i, n = 0;
+    for (i = 0; i < q->n && i < 32; i++) n += q->ord[i] == what;
+    return n;
+}
+
+/* Two requests pending, peer RST; the first done re-listens on the (CLOSED) stream: the second
+ * request must still get its done, and no TERMINATE may reach the new listener. */
+static void test_term_done_relisten_both_dones_fire(void) {
+    qlog q; mt_tcp_info in;
+    static const uint8_t a[100] = {1}, b[100] = {2};
+    static mt_seg sa[1], sb[1];
+    memset(&q, 0, sizeof q); g_q = &q;
+    {
+        SETUP(4096, 5000, qlog_ev, &q);
+        q.t = c.t; q.n = 0; q.act[1] = ACT_LISTEN;
+        sa[0].p = a; sa[0].len = 100;
+        sb[0].p = b; sb[0].len = 100;
+        T_EQ(mt_tcp_send_segs(c.t, sa, 1, 1, 0, qlog_done, (void *)(intptr_t)1, 10), MT_OK);
+        T_EQ(mt_tcp_send_segs(c.t, sb, 1, 1, 0, qlog_done, (void *)(intptr_t)2, 11), MT_OK);
+        inject(&c, c.ps, c.ms, TF_RST | TF_ACK, NULL, 0, 20);
+        T_EQ(q.n, 2);
+        T_EQ(q.ord[0], 101); T_EQ(q.st[0], MT_ERR_ABORTED);
+        T_EQ(q.ord[1], 102); T_EQ(q.st[1], MT_ERR_ABORTED);
+        T_EQ(count_q(&q, MT_TCP_EV_TERMINATE), 0);
+        mt_tcp_get_info(c.t, &in); T_EQ(in.state, MT_TCP_LISTEN);
+        T_EQ(c.t->sq_n, 0);
+    }
+}
+
+/* The stream re-used from the first done (listen, then open) behaves as a fresh connection: no
+ * stale TERMINATE, the next connection comes up normally. */
+static void test_term_done_relisten_no_terminate_on_new_conn(void) {
+    qlog q; mt_tcp_info in; tcpv v;
+    static const uint8_t a[100] = {1}, b[100] = {2};
+    static mt_seg sa[1], sb[1];
+    uint8_t f[200];
+    uint16_t n;
+    memset(&q, 0, sizeof q); g_q = &q;
+    sa[0].p = a; sa[0].len = 100;
+    sb[0].p = b; sb[0].len = 100;
+    {   /* re-listen, then a peer connects to the new listener */
+        SETUP(4096, 5000, qlog_ev, &q);
+        q.t = c.t; q.n = 0; q.act[1] = ACT_LISTEN;
+        T_EQ(mt_tcp_send_segs(c.t, sa, 1, 1, 0, qlog_done, (void *)(intptr_t)1, 10), MT_OK);
+        T_EQ(mt_tcp_send_segs(c.t, sb, 1, 1, 0, qlog_done, (void *)(intptr_t)2, 11), MT_OK);
+        mt_tcp_abort(c.t, 20);
+        T_EQ(count_q(&q, MT_TCP_EV_TERMINATE), 0);
+        fake_clear(&fl);
+        n = mk_tcp(f, T_PEER, 3000, T_ME, 7777, 90000, 0, TF_SYN, 8192, NULL, 0, NULL, 0);
+        mt_input(c.s, f, n, 30);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_SYN | TF_ACK);
+        n = mk_tcp(f, T_PEER, 3000, T_ME, 7777, 90001, v.seq + 1, TF_ACK, 8192, NULL, 0, NULL, 0);
+        mt_input(c.s, f, n, 31);
+        mt_tcp_get_info(c.t, &in); T_EQ(in.state, MT_TCP_ESTABLISHED); T_EQ(in.rport, 3000);
+        T_EQ(count_q(&q, MT_TCP_EV_ESTABLISHED), 1);
+        T_EQ(count_q(&q, MT_TCP_EV_TERMINATE), 0);
+        T_EQ(count_q(&q, 101) + count_q(&q, 102), 2);
+    }
+    memset(&q, 0, sizeof q); g_q = &q;
+    {   /* re-open (active) from the first done: SYN_SENT, no TERMINATE */
+        SETUP(4096, 5000, qlog_ev, &q);
+        q.t = c.t; q.n = 0; q.act[1] = ACT_OPEN;
+        T_EQ(mt_tcp_send_segs(c.t, sa, 1, 1, 0, qlog_done, (void *)(intptr_t)1, 10), MT_OK);
+        T_EQ(mt_tcp_send_segs(c.t, sb, 1, 1, 0, qlog_done, (void *)(intptr_t)2, 11), MT_OK);
+        fake_clear(&fl);
+        inject(&c, c.ps, c.ms, TF_RST | TF_ACK, NULL, 0, 20);
+        T_EQ(q.n, 2); T_EQ(q.ord[1], 102); T_EQ(q.st[1], MT_ERR_ABORTED);
+        mt_tcp_get_info(c.t, &in); T_EQ(in.state, MT_TCP_SYN_SENT); T_EQ(in.rport, 24);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_SYN); T_EQ(v.dport, 24);
+    }
+}
+
+/* An ACK completes A; A's done aborts; inside that abort B's done(ABORTED) re-listens. Order A OK,
+ * B ABORTED, no TERMINATE (the stream is a listener again), RST sent, queue empty. */
+static void test_ack_done_abort_nested_relisten(void) {
+    qlog q; mt_tcp_info in; tcpv v;
+    static const uint8_t a[100] = {1}, b[100] = {2};
+    static mt_seg sa[1], sb[1];
+    memset(&q, 0, sizeof q); g_q = &q;
+    {
+        SETUP(4096, 5000, qlog_ev, &q);
+        q.t = c.t; q.n = 0; q.act[1] = ACT_ABORT; q.act[2] = ACT_LISTEN;
+        sa[0].p = a; sa[0].len = 100;
+        sb[0].p = b; sb[0].len = 100;
+        T_EQ(mt_tcp_send_segs(c.t, sa, 1, 1, 0, qlog_done, (void *)(intptr_t)1, 10), MT_OK);
+        T_EQ(mt_tcp_send_segs(c.t, sb, 1, 1, 0, qlog_done, (void *)(intptr_t)2, 11), MT_OK);
+        fake_clear(&fl);
+        inject(&c, c.ps, c.ms + 100, TF_ACK, NULL, 0, 20);        /* A acked */
+        T_EQ(q.n, 2);
+        T_EQ(q.ord[0], 101); T_EQ(q.st[0], MT_OK);
+        T_EQ(q.ord[1], 102); T_EQ(q.st[1], MT_ERR_ABORTED);
+        T_EQ(count_q(&q, MT_TCP_EV_TERMINATE), 0);
+        mt_tcp_get_info(c.t, &in); T_EQ(in.state, MT_TCP_LISTEN);
+        T_EQ(c.t->sq_n, 0);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags & TF_RST, TF_RST);
+    }
+}
+
 T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_psh_full_segment_acked_now, test_send_state_and_no_events_after_terminate,
        test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight,
@@ -597,4 +705,6 @@ T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_send_segs_retransmit_from_caller, test_send_done_fires_on_ack_only,
        test_send_queue_second_request_fifo, test_send_queue_third_busy,
        test_done_order_matches_request_order, test_abort_with_send_pending_fires_done_with_abort,
-       test_send_zero_len_seg_skipped, test_recv_window_equals_buflen, test_push_per_request)
+       test_send_zero_len_seg_skipped, test_recv_window_equals_buflen, test_push_per_request,
+       test_term_done_relisten_both_dones_fire, test_term_done_relisten_no_terminate_on_new_conn,
+       test_ack_done_abort_nested_relisten)

@@ -48,22 +48,17 @@ static int is_sync(unsigned st) {      /* a SYN-ACK has been sent or received: R
            st == MT_TCP_LAST_ACK;
 }
 
-/* Fire done for the send requests at the head of the queue, in order: completed ones (left == 0)
- * with MT_OK, and with `all` the rest too, with MT_ERR_ABORTED. Each entry is popped before its
- * callback runs; a callback may queue (appended behind), abort (which empties the queue) or
- * release (which clears it silently), so the loop re-reads the queue every time. */
-static void sq_complete(mt_tcp *t, int all) {
-    while (t->sq_n && (all || t->sq[0].left == 0)) {
+/* Fire done(MT_OK) for the completed requests (left == 0) at the head of the queue, in order.
+ * Each entry is popped before its callback runs (the cursor belongs to the next request with bytes
+ * left, so it is unaffected); a callback may queue (appended behind), abort (tcp_term detaches the
+ * rest) or release (clears the queue), so the loop re-reads the queue every time. */
+static void sq_complete(mt_tcp *t) {
+    while (t->sq_n && t->sq[0].left == 0) {
         mt_send_done_cb done = t->sq[0].done;
         void *ud = t->sq[0].ud;
-        int st = t->sq[0].left == 0 ? MT_OK : MT_ERR_ABORTED;
         t->sq[0] = t->sq[1];
         t->sq_n--;
-        if (st != MT_OK) {                                 /* an aborted head held the cursor */
-            t->sq_idx = 0;
-            t->sq_off = 0;
-        }
-        if (done) done(ud, st);
+        if (done) done(ud, MT_OK);
     }
 }
 
@@ -91,8 +86,17 @@ static void sq_ack(mt_tcp *t, uint32_t n) {
     }
 }
 
+/* The queue is detached into locals before any callback runs: a done callback may re-listen or
+ * re-open this TCB (it is CLOSED), which must neither lose the remaining done calls nor receive
+ * this connection's TERMINATE. Completed requests report MT_OK, the rest MT_ERR_ABORTED, in order;
+ * TERMINATE follows only if the TCB is still this closed connection (gen unchanged, CLOSED). */
 static void tcp_term(mt_tcp *t, mt_term_reason r) {
-    uint8_t g;
+    mt_sendreq q[MT_SENDQ_MAX];
+    uint8_t g, n = t->sq_n, i;
+    for (i = 0; i < n; i++) q[i] = t->sq[i];
+    t->sq_n = 0;
+    t->sq_idx = 0;
+    t->sq_off = 0;
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
@@ -100,14 +104,16 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
     mt_tcp_set_state(t, MT_TCP_CLOSED);
     mt_log(t->st, MT_LOG_TCP_TERM, (uint8_t)r, t->lport);
     g = ++t->gen;
-    sq_complete(t, 1);                 /* pending sends complete first (MacTCP order), then the ASR */
-    if (t->gen == g) fire(t, MT_TCP_EV_TERMINATE, r);
+    for (i = 0; i < n; i++)            /* pending sends complete first (MacTCP order), then the ASR */
+        if (q[i].done) q[i].done(q[i].ud, q[i].left == 0 ? MT_OK : MT_ERR_ABORTED);
+    if (t->gen == g && t->state == MT_TCP_CLOSED) fire(t, MT_TCP_EV_TERMINATE, r);
 }
 
 /* Reset connection variables and rings for a new open/listen. */
 static void conn_reset(mt_tcp *t) {
     mt_ring_init(&t->rcvq, t->rcvq.base, t->rcvq.size);
-    t->sq_n = 0;                     /* already empty: every way to CLOSED completes the queue */
+    t->sq_n = 0;                     /* already empty: tcp_term detaches the queue before any
+                                      * callback can re-open the TCB; normal closes ACK it all */
     t->sq_idx = 0;
     t->sq_off = 0;
     t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
@@ -640,6 +646,20 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     mt_tcp_output(t, now);                 /* SYN-ACK */
 }
 
+/* Duplicate-ACK threshold. RFC 5827 early retransmit: with no unsent data and fewer than four
+ * segments outstanding, three duplicates may never come, so the threshold is oseg - 1. oseg is
+ * estimated in full-MSS units by compares (no division); flights of smaller segments keep 3. */
+static uint8_t dup_thresh(const mt_tcp *t) {
+    uint32_t out = t->snd_max - t->snd_una, m = t->mss;
+    uint32_t data = out - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
+    if (mt_tcp_sq_total(t) > data || (t->flags & MT_TF_FINQ && !(t->flags & MT_TF_FINSENT)))
+        return 3;                                          /* new data could still clock out ACKs */
+    if (out <= m) return 3;                                /* one segment: no duplicates possible */
+    if (out <= 2u * m) return 1;
+    if (out <= 3u * m) return 2;
+    return 3;
+}
+
 /* RFC 6298 estimator in shifts: srtt8 = 8*SRTT, rttvar4 = 4*RTTVAR (ms). */
 static void rtt_sample(mt_tcp *t, uint32_t r) {
     if (r == 0) r = 1;                                     /* srtt8 == 0 means unmeasured */
@@ -861,7 +881,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         if (t->snd_una != t->snd_max && g->dlen == 0 && !fin && g->win == t->snd_wnd &&
             !(t->tmask & (1u << MT_TT_PERSIST))) {
             if (t->dupacks < 255u) t->dupacks++;
-            if (t->dupacks == 3 && mt_seq_gt(t->snd_una, t->recover)) {
+            if (t->dupacks == dup_thresh(t) && mt_seq_gt(t->snd_una, t->recover)) {
                 uint32_t half = (t->snd_max - t->snd_una) >> 1, floor_ = (uint32_t)t->mss << 1;
                 t->ssthresh = half > floor_ ? half : floor_;
                 t->cwnd = t->ssthresh;
@@ -953,11 +973,11 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
 out:
     /* Data events run before the ACK goes out so a reply from the callback carries it. Other
      * work (ACK, window, queued data) is sent first. Completed sends are reported first, in order
-     * (sq_complete copes with callbacks that queue, abort or release). A callback may
+     * (sq_complete copes with callbacks that queue, abort, re-listen or release). A callback may
      * abort/release/re-listen: gen changes and the rest of the batch is stale. */
     if (!(ev & EV_DATA)) mt_tcp_output(t, now);
     if (t->sq_n && t->sq[0].left == 0) {
-        sq_complete(t, 0);
+        sq_complete(t);
         if (t->gen != g0) return;
     }
     if (ev & EV_EST) fire(t, MT_TCP_EV_ESTABLISHED, 0);

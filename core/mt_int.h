@@ -23,6 +23,13 @@
  */
 
 #define MT_ALIGN4(x) (((x) + 3u) & ~3u)
+/* Internal consistency check: active in test builds only (no code in production / 68k builds). */
+#ifdef MT_TEST_HOOKS
+#include <assert.h>
+#define MT_ASSERT(x) assert(x)
+#else
+#define MT_ASSERT(x) ((void)0)
+#endif
 /* Arena base and every section start are aligned to this: 8 where pointers are 64-bit (host
  * tests), 4 otherwise (68k). */
 #define MT_ARENA_ALIGN ((uint32_t)(sizeof(void *) > 4 ? 8u : 4u))

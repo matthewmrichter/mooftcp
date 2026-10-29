@@ -167,4 +167,48 @@ static void test_go_back_n_across_segment_boundaries(void) {
     }
 }
 
-T_MAIN(test_stale_ack_ignored, test_stale_ack_window_rule, test_go_back_n_across_segment_boundaries)
+/* RFC 5827 early retransmit: a 2-segment request (nothing else to send) whose first segment is
+ * lost gets only one duplicate ACK; that one is enough. With 3 segments out the threshold is 2,
+ * and with unsent data behind the flight it stays 3. */
+static void test_early_retransmit_small_flight(void) {
+    static uint8_t d[5000];
+    uint32_t i;
+    for (i = 0; i < sizeof d; i++) d[i] = (uint8_t)(i * 5u + 3u);
+    {
+        SETUP();
+        T_EQ(tsend(c.t, d, 2000, 1, 0, 10), 2000);              /* 1460 + 540 */
+        T_EQ(fl.n, 2);
+        fake_clear(&fl);
+        inject(&c, c.ps, c.ms, 8192, 20);                        /* dup ACK for segment 2 */
+        T_EQ(mt_get_stats(c.s)->tcp_fast_rexmt, 1);
+        T_EQ(fl.n, 1);
+        T_CHECK(frame_is(&fl, 0, c.ms, d, MSS));
+        inject(&c, c.ps, c.ms + 2000, 8192, 30);
+        T_EQ(c.t->sq_n, 0);
+    }
+    {
+        SETUP();
+        T_EQ(tsend(c.t, d, 3 * MSS, 1, 0, 10), 3 * MSS);        /* three segments out */
+        fake_clear(&fl);
+        inject(&c, c.ps, c.ms, 8192, 20);
+        T_EQ(mt_get_stats(c.s)->tcp_fast_rexmt, 0);
+        inject(&c, c.ps, c.ms, 8192, 21);                        /* second duplicate: oseg - 1 */
+        T_EQ(mt_get_stats(c.s)->tcp_fast_rexmt, 1);
+        T_CHECK(frame_is(&fl, fl.n - 1, c.ms, d, MSS));
+    }
+    {
+        SETUP();
+        T_EQ(tsend(c.t, d, 2 * MSS, 0, 0, 10), 2 * MSS);
+        T_EQ(tsend(c.t, d + 2 * MSS, 100, 0, 0, 11), 100);      /* 100 unsent bytes held (Nagle) */
+        T_EQ(mt_tcp_sq_total(c.t), 2 * MSS + 100);
+        T_EQ(c.t->snd_max - c.t->snd_una, 2 * MSS);
+        inject(&c, c.ps, c.ms, 8192, 20);
+        inject(&c, c.ps, c.ms, 8192, 21);
+        T_EQ(mt_get_stats(c.s)->tcp_fast_rexmt, 0);              /* unsent data: threshold 3 */
+        inject(&c, c.ps, c.ms, 8192, 22);
+        T_EQ(mt_get_stats(c.s)->tcp_fast_rexmt, 1);
+    }
+}
+
+T_MAIN(test_stale_ack_ignored, test_stale_ack_window_rule, test_go_back_n_across_segment_boundaries,
+       test_early_retransmit_small_flight)

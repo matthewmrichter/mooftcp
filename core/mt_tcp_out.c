@@ -91,6 +91,7 @@ static uint32_t copy_segs(const mt_tcp *t, uint32_t off, uint8_t *dst, uint32_t 
         pos = 0;
         i++;
     }
+    MT_ASSERT(n == 0);                                     /* callers never ask past the queue */
     return sum;
 }
 

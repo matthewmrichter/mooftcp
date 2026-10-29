@@ -31,7 +31,10 @@
  *    request's `done` fires (retransmissions re-read them). The core never writes to them. `done`
  *    fires from inside mt_input (the ACK that completes it), mt_tick (a timeout that terminates the
  *    connection) or mt_tcp_abort / mt_tcp_close (termination), never from mt_tcp_send_segs, and
- *    never after mt_tcp_release (which drops queued requests silently: the caller completes them). */
+ *    never after mt_tcp_release (which drops still-queued requests silently: the caller completes
+ *    them). On termination the queue is detached first, so every request already pending then gets
+ *    its done even if an earlier done re-listens, re-opens or releases the TCB; TERMINATE is then
+ *    fired only if the TCB is still CLOSED and not re-created. */
 
 typedef uint32_t mt_ip4;                         /* host byte order */
 #define MT_NO_DEADLINE 0xFFFFFFFFu
