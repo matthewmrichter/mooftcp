@@ -47,11 +47,21 @@ typedef struct {
     uint32_t udp_out;       /* datagrams handed to IPv4 output */
     uint32_t udp_drops;     /* malformed, bad checksum, or receive buffer full */
     uint32_t udp_noport;    /* datagrams for a port nobody owns */
+    uint32_t tcp_in;           /* well-formed segments (checksum, header, options ok) */
+    uint32_t tcp_out;          /* segments handed to IPv4 output */
+    uint32_t tcp_in_drops;     /* malformed / bad checksum / bad options */
+    uint32_t tcp_rexmt;        /* retransmitted segments */
+    uint32_t tcp_active_opens;
+    uint32_t tcp_passive_opens;
+    uint32_t tcp_resets_in;    /* RSTs that tore a connection down */
+    uint32_t tcp_resets_out;   /* RSTs transmitted */
+    uint32_t tcp_conns_open;   /* connections currently established (gauge) */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
 uint32_t  mt_stack_size(const mt_limits *l);    /* arena bytes needed */
-/* NULL if len < mt_stack_size(l) or mem is not 4-byte aligned. */
+/* NULL if len < mt_stack_size(l) or mem is not aligned to MT_ARENA_ALIGN (mt_int.h: 8 bytes on
+ * hosts with 64-bit pointers, else 4; an 8-aligned arena is always fine). */
 mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_link *link,
                         uint32_t seed);
 /* A stack with addr==0 sends nothing and answers nothing. */
@@ -88,6 +98,39 @@ int      mt_udp_peek(mt_udp *u, mt_udp_dgram *out);
 void     mt_udp_done(mt_udp *u);                       /* drop the peeked (oldest) datagram */
 uint32_t mt_udp_queued(const mt_udp *u);               /* number of queued datagrams */
 void     mt_udp_release(mt_udp *u);
+
+/* ---- TCP ---- */
+typedef struct mt_tcp mt_tcp;
+typedef enum {
+  MT_TCP_EV_ESTABLISHED = 1, MT_TCP_EV_DATA, MT_TCP_EV_URGENT, MT_TCP_EV_CLOSING,
+  MT_TCP_EV_ULP_TIMEOUT, MT_TCP_EV_TERMINATE, MT_TCP_EV_ICMP, MT_TCP_EV_SEND_SPACE
+} mt_tcp_event;
+typedef enum {   /* mirrors MacTCP TCPTermReason; Plan 2 maps to numeric values */
+  MT_TERM_REMOTE_ABORT = 1, MT_TERM_NETWORK_FAILURE, MT_TERM_SEC_PREC_MISMATCH,
+  MT_TERM_ULP_TIMEOUT, MT_TERM_ULP_ABORT, MT_TERM_ULP_CLOSE, MT_TERM_SERVICE_ERROR,
+  MT_TERM_OPEN_FAILED  /* RST or timeout during SYN-SENT */
+} mt_term_reason;
+typedef enum { MT_TCP_CLOSED, MT_TCP_LISTEN, MT_TCP_SYN_RCVD, MT_TCP_SYN_SENT, MT_TCP_ESTABLISHED,
+  MT_TCP_FIN_WAIT_1, MT_TCP_FIN_WAIT_2, MT_TCP_CLOSE_WAIT, MT_TCP_CLOSING, MT_TCP_LAST_ACK,
+  MT_TCP_TIME_WAIT } mt_tcp_state;   /* order matches MacTCP connectionState / 2 */
+/* Callbacks run synchronously inside mt_input / mt_tick / the API call that caused them.
+ * The ICMP arg is (type<<8)|code; DATA's arg is the number of bytes just queued. */
+typedef void (*mt_tcp_cb)(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user);
+/* buf is caller-owned (any alignment, valid until release): send ring = buflen/4, receive ring
+ * = the rest. NULL if no free TCB or buflen < 4096. The TCB starts CLOSED. */
+mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, void *user);
+/* Active open: sends the SYN before returning. lport 0 = ephemeral. MT_ERR_STATE unless CLOSED,
+ * MT_ERR_INUSE if the 4-tuple is taken, MT_ERR_NOROUTE / MT_ERR_UNCONFIGURED / MT_ERR_INVAL. */
+int  mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t now);
+/* Passive open (0 = any for every argument). The TCB itself becomes the one connection. */
+int  mt_tcp_listen(mt_tcp *t, mt_ip4 rip_filter, uint16_t rport_filter, uint16_t lport);
+int  mt_tcp_close(mt_tcp *t, uint32_t now);     /* FIN after queued data; MT_ERR_STATE if not open */
+void mt_tcp_abort(mt_tcp *t, uint32_t now);     /* RST if synchronized; TERMINATE(ULP_ABORT) */
+void mt_tcp_release(mt_tcp *t);                 /* aborts if needed; frees the TCB; no callbacks */
+void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort);  /* default 120 s, abort */
+typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
+  uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms; } mt_tcp_info;
+void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
 
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);

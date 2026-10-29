@@ -8,21 +8,26 @@ typedef struct {
     uint32_t pend;      /* offset of the pending-frame slot */
     uint32_t reasm;     /* offset of the IPv4 reassembly slot */
     uint32_t udp;       /* offset of the UDP endpoint array */
+    uint32_t tcp;       /* offset of the TCB array */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
+/* Every section starts at an MT_ARENA_ALIGN boundary (sections hold pointers). */
+static uint32_t mt_arena_up(uint32_t x) { return (x + MT_ARENA_ALIGN - 1u) & ~(MT_ARENA_ALIGN - 1u); }
+
 static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
-    uint32_t off = MT_ALIGN4((uint32_t)sizeof(struct mt_stack));
+    uint32_t off = mt_arena_up((uint32_t)sizeof(struct mt_stack));
     o->arp = off;
-    off += MT_ALIGN4((uint32_t)l->arp_entries * (uint32_t)sizeof(mt_arp_entry));
+    off = mt_arena_up(off + (uint32_t)l->arp_entries * (uint32_t)sizeof(mt_arp_entry));
     o->pend = off;
-    off += MT_ALIGN4((uint32_t)sizeof(mt_pending));
+    off = mt_arena_up(off + (uint32_t)sizeof(mt_pending));
     o->reasm = off;
-    off += MT_ALIGN4((uint32_t)sizeof(mt_reasm));
-    off = (off + 7u) & ~7u;   /* endpoints hold pointers: 8-byte alignment on 64-bit hosts */
+    off = mt_arena_up(off + (uint32_t)sizeof(mt_reasm));
     o->udp = off;
-    off += MT_ALIGN4((uint32_t)l->max_udp * (uint32_t)sizeof(mt_udp));
-    /* Later tasks: add their section here (offset = off; off += MT_ALIGN4(bytes);). */
+    off = mt_arena_up(off + (uint32_t)l->max_udp * (uint32_t)sizeof(mt_udp));
+    o->tcp = off;
+    off = mt_arena_up(off + (uint32_t)l->max_tcp * (uint32_t)sizeof(mt_tcp));
+    /* Later tasks: add their section here (offset = off; off = mt_arena_up(off + bytes);). */
     o->total = off;
 }
 
@@ -44,7 +49,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     mt_layout lay;
     mt_stack *s;
     uint8_t *base = (uint8_t *)mem;
-    if (!mem || !l || !link || ((uintptr_t)mem & 3u)) return NULL;
+    if (!mem || !l || !link || ((uintptr_t)mem & (MT_ARENA_ALIGN - 1u))) return NULL;
     mt_layout_calc(l, &lay);
     if (len < lay.total) return NULL;
     memset(mem, 0, lay.total);
@@ -58,6 +63,8 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->ip_id = (uint16_t)seed;
     s->udp = (mt_udp *)(void *)(base + lay.udp);
     s->udp_eph = (uint16_t)(49152u + seed % 16384u);
+    s->tcp = (mt_tcp *)(void *)(base + lay.tcp);
+    s->tcp_eph = (uint16_t)(49152u + (seed + 7919u) % 16384u);
     /* Later tasks: point their sections here. */
     return s;
 }
@@ -120,12 +127,14 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
 void mt_tick(mt_stack *s, uint32_t now) {
     mt_arp_tick(s, now);
     mt_ip_timers(s, now);
-    /* Later: mt_tcp_timers, mt_dns_timers. */
+    mt_tcp_timers(s, now);
+    /* Later: mt_dns_timers. */
 }
 
 uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     uint32_t d = mt_arp_deadline(s, now);
     d = mt_dl_min(d, mt_ip_deadline(s, now));
-    /* Later: d = mt_dl_min(d, mt_tcp_deadline(s, now)); likewise DNS. */
+    d = mt_dl_min(d, mt_tcp_deadline(s, now));
+    /* Later: likewise DNS. */
     return d;
 }

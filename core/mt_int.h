@@ -10,7 +10,8 @@
  *
  * ADDING A MODULE (TCP, UDP, DNS, reassembly, log, ...):
  *  1. Arena: add its size to mt_layout_calc() in mt_stack.c (one line: offset
- *     = running total, then total += MT_ALIGN4(bytes)) and its pointer
+ *     = running total, then total = mt_arena_up(total + bytes), so the NEXT section
+ *     starts MT_ARENA_ALIGN-aligned) and its pointer
  *     assignment to mt_stack_init(). mt_stack_size() and mt_stack_init() both
  *     use mt_layout_calc(), so the size accounting stays authoritative.
  *  2. Timers: implement `uint32_t mt_<mod>_deadline(const mt_stack*, uint32_t now)`
@@ -18,10 +19,13 @@
  *     `void mt_<mod>_timers(mt_stack*, uint32_t now)`. Then add ONE line each to
  *     mt_next_deadline() (`d = mt_dl_min(d, mt_<mod>_deadline(s, now));`) and
  *     mt_tick() in mt_stack.c. Plain calls, no registration table.
- *  3. Delete the matching stub from mt_stubs.c.
+ *  3. If the module started life as a stub in core/mt_stubs.c, delete the stub.
  */
 
 #define MT_ALIGN4(x) (((x) + 3u) & ~3u)
+/* Arena base and every section start are aligned to this: 8 where pointers are 64-bit (host
+ * tests), 4 otherwise (68k). */
+#define MT_ARENA_ALIGN ((uint32_t)(sizeof(void *) > 4 ? 8u : 4u))
 #define MT_ETH_HDR 14u
 #define MT_TXBUF_SIZE 1514u
 #define MT_ETH_BCAST_IP 0xFFFFFFFFu
@@ -90,6 +94,42 @@ struct mt_udp {
     uint16_t n;          /* queued datagrams */
 };
 
+/* ---- TCP (mt_tcp.c lifecycle + input, mt_tcp_out.c segment output) ----
+ * TCBs live in an arena array (lim.max_tcp; used == 0 is a free slot). Sequence variables follow
+ * RFC 793. The send ring holds bytes from snd_una on (unacked first, then unsent); the FIN, once
+ * sent, occupies the last sequence number but no ring byte. Fields are ordered hot first. */
+enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] slots / tmask bits */
+#define MT_TF_ACKNOW   0x01u   /* an ACK is owed: mt_tcp_output sends one if nothing carries it */
+#define MT_TF_FINQ     0x02u   /* app closed: send FIN after the queued data */
+#define MT_TF_FINSENT  0x04u   /* FIN transmitted (occupies seq snd_nxt-1) */
+#define MT_TF_PASSIVE  0x08u   /* SYN_RCVD reached from LISTEN: RST/timeout re-listens */
+#define MT_TF_EST      0x10u   /* counted in stats.tcp_conns_open */
+#define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
+#define MT_TH_FIN 0x01u
+#define MT_TH_SYN 0x02u
+#define MT_TH_RST 0x04u
+#define MT_TH_PSH 0x08u
+#define MT_TH_ACK 0x10u
+#define MT_TCP_RTO_INIT 1000u
+#define MT_TCP_RTO_MAX  60000u
+struct mt_tcp {
+    mt_stack *st;
+    uint32_t snd_una, snd_nxt, snd_wnd, rcv_nxt;
+    mt_ring sndq, rcvq;
+    uint32_t snd_wl1, snd_wl2, iss, irs;
+    uint32_t tmr[MT_TT_N];    /* absolute ms deadlines, valid where the tmask bit is set */
+    uint32_t rto, srtt;       /* ms; srtt 0 until measured (Task 9) */
+    uint32_t ulp_start;       /* when the oldest unacked data last made progress */
+    uint32_t tnow;            /* last clock value seen (for APIs without a `now` argument) */
+    mt_ip4 rip, frip;         /* peer; listen filter */
+    mt_tcp_cb cb;
+    void *user;
+    uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
+    uint16_t mss, ulp_s;
+    uint8_t state, flags, tmask, used;
+};
+
+
 struct mt_stack {
     mt_ifconfig cfg;
     mt_link link;
@@ -101,6 +141,11 @@ struct mt_stack {
     mt_pending *pend;
     mt_reasm *reasm;
     mt_udp *udp;             /* lim.max_udp endpoints */
+    mt_tcp *tcp;             /* lim.max_tcp TCBs */
+    uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
+    /* The TCP segment (if any) that mt_arp_insert just released from the held slot; consulted
+     * and cleared by mt_tcp_arp_resolved so it does not retransmit that same segment. */
+    struct { mt_ip4 dst; uint32_t seq; uint16_t sport, dport; uint8_t live; } arp_rel;
     uint16_t udp_eph;        /* next ephemeral port candidate */
     uint16_t ip_id;          /* next IPv4 identification */
     mt_echo_cb echo_cb;
@@ -161,7 +206,7 @@ static inline mt_ip4 mt_ip_src_for(const mt_stack *s) { return s->cfg.addr; }
 void mt_ip_timers(mt_stack *s, uint32_t now);
 uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now);
 
-/* Protocol handlers (TCP stub in mt_stubs.c until Task 7). */
+/* Protocol handlers. */
 void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
 void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
@@ -170,7 +215,7 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
 /* Called for ICMP dest-unreachable (3), source-quench (4), time-exceeded (11) and
  * parameter-problem (12) about a datagram WE sent. dst/lport/rport come from the
  * embedded original header (dst = original destination, lport = original source port,
- * rport = original destination port). Stubs in mt_stubs.c until Tasks 6-7. */
+ * rport = original destination port). */
 void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
                        uint8_t code);
 void mt_udp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
@@ -183,7 +228,28 @@ void mt_udp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, 
 void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, const uint8_t *pl,
                           uint16_t len, uint8_t code, uint32_t now);
 
-/* ---- Stubs (mt_stubs.c): delete each when its owning task implements it ---- */
-void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now);                 /* Task 7 */
+/* ---- TCP internals ---- */
+void mt_tcp_timers(mt_stack *s, uint32_t now);
+uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now);
+/* An ARP entry for `ip` just resolved: every connection whose next hop is `ip` and that has
+ * unacked data retransmits its first unacked segment, except the one mt_arp_insert released
+ * from the held slot a moment ago (recorded in s->arp_rel via mt_tcp_note_released). */
+void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now);
+void mt_tcp_note_released(mt_stack *s, const uint8_t *iphdr);   /* held frame about to be sent */
+/* Transmit whatever the state permits: SYN / SYN-ACK, queued data within the peer window,
+ * FIN, or a pending ACK. Single decision point; every sender goes through it. */
+void mt_tcp_output(mt_tcp *t, uint32_t now);
+/* Build and send one segment of t: seq, flags (ACK is added/ack filled from rcv_nxt when the
+ * MT_TH_ACK bit is set), n payload bytes copied from the send ring at offset off. */
+void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);
+/* Retransmit the first unacked segment (SYN, SYN-ACK, data from the ring, or FIN). */
+void mt_tcp_rexmit(mt_tcp *t, uint32_t now);
+/* Segment without a TCB (reset replies) or with explicit fields. */
+void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
+                     uint32_t ack, uint8_t flags, uint32_t now);
+uint16_t mt_tcp_local_mss(const mt_stack *s);
+static inline uint32_t mt_tcp_pseudo(mt_ip4 src, mt_ip4 dst, uint16_t len) {
+    return (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + 6u + len;
+}
 
 #endif

@@ -45,4 +45,36 @@ typedef struct {
 int view_arp(const uint8_t *f, uint16_t len, arpv *out);
 int view_ip(const uint8_t *f, uint16_t len, ipv *out);
 
+
+/* ---- TCP helpers ---- */
+#define TF_FIN 1
+#define TF_SYN 2
+#define TF_RST 4
+#define TF_PSH 8
+#define TF_ACK 16
+#define TF_URG 32
+/* Eth+IPv4+TCP with a valid checksum; opt/optlen (multiple of 4) go after the 20-byte header. */
+uint16_t mk_tcp(uint8_t *f, mt_ip4 src, uint16_t sport, mt_ip4 dst, uint16_t dport, uint32_t seq,
+                uint32_t ack, uint8_t flags, uint16_t win, const uint8_t *opt, uint8_t optlen,
+                const uint8_t *data, uint16_t dlen);
+typedef struct {
+    mt_ip4 src, dst; uint16_t sport, dport;
+    uint32_t seq, ack; uint8_t flags; uint16_t win;
+    uint16_t mss;                   /* MSS option value, 0 if absent */
+    const uint8_t *data; uint16_t dlen;
+    int checksum_ok;
+} tcpv;
+/* 1 if f is a well-formed Ethernet+IPv4+TCP frame (checksum_ok says whether it verifies). */
+int view_tcp(const uint8_t *f, uint16_t len, tcpv *v);
+
+/* Records TCP events: (ev, arg) pairs in order. */
+typedef struct { int n; struct { int ev; uint32_t arg; } e[32]; } rec;
+void rec_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user);
+/* Scripted active open at now=0 to T_PEER:23 (ARP for T_PEER pre-resolved; peer MSS 1460,
+ * window 8192, peer ISN 5000). Returns the ESTABLISHED TCB (8192-byte buffer from a pool
+ * of 8); *peer_seq = next peer seq (5001), *my_seq = our next seq. Leaves fl empty and rec
+ * holding the ESTABLISHED event. */
+mt_tcp *tconn_established(mt_stack *s, fake_link *fl, rec *events, uint32_t *peer_seq,
+                          uint32_t *my_seq);
+
 #endif

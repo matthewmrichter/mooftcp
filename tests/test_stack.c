@@ -3,7 +3,7 @@
 #include "mt_int.h"
 
 static void test_stack_size_budget(void) {
-    static uint32_t mem[16384 / 4 + 16];
+    static uint64_t mem[16384 / 8 + 8];
     mt_limits l;
     mt_link link = {0, 0};
     uint32_t sz;

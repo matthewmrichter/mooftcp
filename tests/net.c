@@ -1,6 +1,7 @@
 #include <string.h>
 #include "net.h"
 #include "mt_util.h"
+#include "mt_int.h"
 
 const uint8_t T_ME_MAC[6]   = {0x02, 0, 0, 0, 0, 0x01};
 const uint8_t T_PEER_MAC[6] = {0x02, 0, 0, 0, 0, 0x0A};
@@ -27,13 +28,13 @@ void fake_clear(fake_link *fl) {
 }
 
 mt_stack *tstack_new(fake_link *fl, mt_ip4 addr) {
-    static uint32_t pool[4][16384 / 4];
+    static uint64_t pool[4][16384 / 8];   /* 8-aligned: MT_ARENA_ALIGN */
     static int next;
     mt_limits lim;
     mt_link link;
     mt_ifconfig c;
     mt_stack *s;
-    uint32_t *mem = pool[next++ & 3];
+    uint64_t *mem = pool[next++ & 3];
     mt_limits_default(&lim);
     fake_init(fl, &link);
     s = mt_stack_init(mem, sizeof pool[0], &lim, &link, 1);
@@ -119,4 +120,84 @@ int view_ip(const uint8_t *f, uint16_t len, ipv *o) {
     o->payload = ip + ihl;
     o->len = (uint16_t)(tot - ihl);
     return 1;
+}
+
+uint16_t mk_tcp(uint8_t *f, mt_ip4 src, uint16_t sport, mt_ip4 dst, uint16_t dport, uint32_t seq,
+                uint32_t ack, uint8_t flags, uint16_t win, const uint8_t *opt, uint8_t optlen,
+                const uint8_t *data, uint16_t dlen) {
+    uint8_t seg[1500];
+    uint16_t hl = (uint16_t)(20 + optlen), tl = (uint16_t)(hl + dlen);
+    uint32_t sum;
+    mt_wr16(seg, sport);
+    mt_wr16(seg + 2, dport);
+    mt_wr32(seg + 4, seq);
+    mt_wr32(seg + 8, ack);
+    seg[12] = (uint8_t)(hl << 2);
+    seg[13] = flags;
+    mt_wr16(seg + 14, win);
+    mt_wr16(seg + 16, 0);
+    mt_wr16(seg + 18, 0);
+    if (optlen) memcpy(seg + 20, opt, optlen);
+    if (dlen) memcpy(seg + hl, data, dlen);
+    sum = (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + 6u + tl;
+    mt_wr16(seg + 16, mt_cksum_fold(mt_cksum_add(sum, seg, tl)));
+    return mk_ip(f, src, dst, 6, 77, 0, seg, tl);
+}
+
+int view_tcp(const uint8_t *f, uint16_t len, tcpv *v) {
+    ipv ip;
+    const uint8_t *t;
+    uint16_t hl, i;
+    uint32_t sum;
+    if (!view_ip(f, len, &ip) || ip.proto != 6 || ip.len < 20) return 0;
+    t = ip.payload;
+    hl = (uint16_t)((t[12] >> 4) << 2);
+    if (hl < 20 || hl > ip.len) return 0;
+    v->src = ip.src; v->dst = ip.dst;
+    v->sport = mt_rd16(t); v->dport = mt_rd16(t + 2);
+    v->seq = mt_rd32(t + 4); v->ack = mt_rd32(t + 8);
+    v->flags = (uint8_t)(t[13] & 0x3F);
+    v->win = mt_rd16(t + 14);
+    v->data = t + hl;
+    v->dlen = (uint16_t)(ip.len - hl);
+    v->mss = 0;
+    for (i = 20; i + 4 <= hl; ) {
+        if (t[i] == 0) break;
+        if (t[i] == 1) { i++; continue; }
+        if (t[i + 1] < 2) break;
+        if (t[i] == 2 && t[i + 1] == 4) v->mss = mt_rd16(t + i + 2);
+        i = (uint16_t)(i + t[i + 1]);
+    }
+    sum = (ip.src >> 16) + (ip.src & 0xFFFFu) + (ip.dst >> 16) + (ip.dst & 0xFFFFu) + 6u + ip.len;
+    v->checksum_ok = mt_cksum_fold(mt_cksum_add(sum, t, ip.len)) == 0;
+    return 1;
+}
+
+void rec_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
+    rec *r = (rec *)user;
+    (void)t;
+    if (r->n < 32) { r->e[r->n].ev = (int)ev; r->e[r->n].arg = arg; }
+    r->n++;
+}
+
+mt_tcp *tconn_established(mt_stack *s, fake_link *fl, rec *events, uint32_t *peer_seq,
+                          uint32_t *my_seq) {
+    static uint8_t bufs[8][8192];
+    static int next;
+    static const uint8_t mss_opt[4] = {2, 4, 0x05, 0xB4};
+    uint8_t f[200];
+    tcpv v;
+    mt_tcp *t = mt_tcp_create(s, bufs[next++ & 7], 8192, rec_cb, events);
+    uint16_t n;
+    if (!t) return NULL;
+    mt_arp_insert(s, T_PEER, T_PEER_MAC, 0);
+    if (mt_tcp_open(t, T_PEER, 23, 0, 0) != MT_OK || fl->n != 1 || !view_tcp(fl->f[0], fl->len[0], &v))
+        return NULL;
+    n = mk_tcp(f, T_PEER, 23, T_ME, v.sport, 5000, v.seq + 1, TF_SYN | TF_ACK, 8192, mss_opt, 4,
+               NULL, 0);
+    mt_input(s, f, n, 0);
+    *peer_seq = 5001;
+    *my_seq = v.seq + 1;
+    fake_clear(fl);
+    return t;
 }
