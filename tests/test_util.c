@@ -71,8 +71,9 @@ static uint32_t m_fold(uint32_t x) {                   /* fold16 as in the asm: 
     x = (x & 0xFFFFu) + (x >> 16);
     return (x & 0xFFFFu) + (x >> 16);
 }
-static uint32_t m_sum_even(const uint8_t *p, uint32_t len) {   /* p even: returns fold16 */
-    uint32_t acc = 0, x = 0, n, t = 0;
+/* p even; acc = initial accumulator (0, or the leading word); returns fold16 */
+static uint32_t m_sum_even(uint32_t acc, const uint8_t *p, uint32_t len) {
+    uint32_t x = 0, n, t = 0;
     for (n = len >> 2; n; n--, p += 4) {               /* move.l (a0)+,d6 ; addx.l d6,d0 */
         uint64_t v = (uint64_t)acc + mt_rd32(p) + x;
         acc = (uint32_t)v;
@@ -91,14 +92,14 @@ static uint32_t model_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len) {
     uint32_t head = 0;
     int swap = 0;
     if (len && ((uintptr_t)p & 1u)) { head = (uint32_t)p[0] << 8; p++; len--; swap = 1; }
-    return m_finish(sum, m_sum_even(p, len), head, swap);
+    return m_finish(sum, m_sum_even(0, p, len), head, swap);
 }
 static uint32_t model_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len) {
     uint32_t head = 0, lead = 0, i, part;
     int swap = 0;
     if (((uintptr_t)src ^ (uintptr_t)dst) & 1u) {      /* mixed parity: bytes, then sum one side */
         for (i = 0; i < len; i++) dst[i] = src[i];
-        return m_finish(sum, m_sum_even(((uintptr_t)src & 1u) ? dst : src, len), 0, 0);
+        return m_finish(sum, m_sum_even(0, ((uintptr_t)src & 1u) ? dst : src, len), 0, 0);
     }
     if (len && ((uintptr_t)src & 1u)) {                 /* both odd: one leading byte */
         head = (uint32_t)src[0] << 8; *dst++ = *src++; len--; swap = 1;
@@ -108,7 +109,7 @@ static uint32_t model_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src,
         src += 2; dst += 2; len -= 2;
     }
     for (i = 0; i < len; i++) dst[i] = src[i];
-    part = m_fold(m_sum_even(src, len) + lead);
+    part = m_sum_even(lead, src, len);
     return m_finish(sum, part, head, swap);
 }
 
