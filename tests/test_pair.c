@@ -155,18 +155,27 @@ static void run_free(run *r) {
     ep_free(&r->a); ep_free(&r->b); pair_free(r->p);
 }
 
-static void check_run(run *r, const scen *s, const char *what, uint32_t seed) {
-    if (!r->done) {
-        fprintf(stderr, "%s seed %u: STALLED after %u virtual ms: A got %u/%u B got %u/%u "
-                "(A term %d B term %d)\n", what, (unsigned)seed, (unsigned)r->elapsed,
-                (unsigned)r->a.got, (unsigned)s->b_send, (unsigned)r->b.got,
-                (unsigned)s->a_send, r->a.term, r->b.term);
-        t_failed = 1;
-    }
+/* Checks a finished run: completed, streams intact, no stuck deadline and (if nonzero) the
+ * expected termination reasons. The "what seed N" line is printed first, so every failure line
+ * below it belongs to this run. */
+static void check_run(run *r, const scen *s, const char *what, uint32_t seed, int a_reason,
+                      int b_reason) {
+    int ok = r->done && ep_rx_ok(&r->a, s->b_send) && ep_rx_ok(&r->b, s->a_send) &&
+             pair_stuck(r->p) == 0 && (!a_reason || r->a.reason == a_reason) &&
+             (!b_reason || r->b.reason == b_reason);
+    if (ok) return;
+    fprintf(stderr, "%s seed %u failed:\n", what, (unsigned)seed);
+    if (!r->done)
+        fprintf(stderr, "  STALLED after %u virtual ms: A got %u/%u B got %u/%u "
+                "(A term %d B term %d)\n", (unsigned)r->elapsed, (unsigned)r->a.got,
+                (unsigned)s->b_send, (unsigned)r->b.got, (unsigned)s->a_send, r->a.term,
+                r->b.term);
+    t_failed = 1;
     T_CHECK(ep_rx_ok(&r->a, s->b_send));
     T_CHECK(ep_rx_ok(&r->b, s->a_send));
     T_EQ(pair_stuck(r->p), 0);
-    if (t_failed) fprintf(stderr, "  (%s seed %u)\n", what, (unsigned)seed);
+    if (a_reason) T_EQ(r->a.reason, a_reason);
+    if (b_reason) T_EQ(r->b.reason, b_reason);
 }
 
 static void lossy(pair_faults *f, uint32_t seed) {
@@ -197,9 +206,7 @@ static void test_pair_bulk_clean(void) {
     s.b_close_after = 1; s.a_close_on_fin = 1;
     run_start(&r, &s);
     run_until_done(&r, &s);
-    check_run(&r, &s, "bulk_clean", 1);
-    T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
-    T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
+    check_run(&r, &s, "bulk_clean", 1, MT_TERM_ULP_CLOSE, MT_TERM_ULP_CLOSE);
     run_free(&r);
 }
 
@@ -214,13 +221,7 @@ static void test_pair_bulk_lossy(void) {
         s.b_close_after = 1; s.a_close_on_fin = 1;
         run_start(&r, &s);
         run_until_done(&r, &s);
-        check_run(&r, &s, "bulk_lossy", seed);
-        if (r.a.reason != MT_TERM_ULP_CLOSE || r.b.reason != MT_TERM_ULP_CLOSE)
-            fprintf(stderr, "bulk_lossy seed %u: term reasons A %d B %d\n", (unsigned)seed,
-                    r.a.reason, r.b.reason);
-        T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
-        T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
-        if (!getenv("PAIR_MULT")) T_CHECK(pair_dropped(r.p) > 0);   /* the faults happened */
+        check_run(&r, &s, "bulk_lossy", seed, MT_TERM_ULP_CLOSE, MT_TERM_ULP_CLOSE);
         ndrop += pair_dropped(r.p); ncorrupt += pair_corrupted(r.p);
         /* every corrupted frame was rejected by an IP or TCP checksum (none slipped through) */
         T_CHECK(mt_get_stats(pair_a(r.p))->ip_in_drops + mt_get_stats(pair_a(r.p))->tcp_in_drops +
@@ -231,7 +232,8 @@ static void test_pair_bulk_lossy(void) {
                     (unsigned)r.elapsed, (unsigned)pair_sent(r.p), (unsigned)pair_dropped(r.p));
         run_free(&r);
     }
-    if (!getenv("PAIR_MULT")) { T_CHECK(ndrop > 100); T_CHECK(ncorrupt > 20); }
+    /* The faults happened: totals over all seeds (a single seed may legitimately see none). */
+    if (!getenv("PAIR_MULT")) { T_CHECK(ndrop > 5u * n_seeds); T_CHECK(ncorrupt > n_seeds); }
 }
 
 /* ---- interactive echo ---- */
@@ -307,9 +309,7 @@ static void test_pair_bidirectional_close(void) {
         s.a_close_after = s.b_close_after = 1;
         run_start(&r, &s);
         run_until_done(&r, &s);
-        check_run(&r, &s, "bidirectional_close", seed);
-        T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
-        T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
+        check_run(&r, &s, "bidirectional_close", seed, MT_TERM_ULP_CLOSE, MT_TERM_ULP_CLOSE);
         run_free(&r);
     }
 }
@@ -326,10 +326,8 @@ static void test_pair_wrap(void) {
         s.a_slow_bytes = 512; s.a_slow_ms = 100;         /* ~13 s: the clock wraps mid-transfer */
         run_start(&r, &s);
         run_until_done(&r, &s);
-        check_run(&r, &s, "wrap", seed);
+        check_run(&r, &s, "wrap", seed, MT_TERM_ULP_CLOSE, MT_TERM_ULP_CLOSE);
         T_CHECK(pair_now(r.p) < 0x80000000u);            /* the clock really wrapped */
-        T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
-        T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
         run_free(&r);
     }
 }
@@ -342,7 +340,7 @@ static void test_pair_slow_reader(void) {
     s.a_slow_bytes = 512; s.a_slow_ms = 200;             /* neither side closes */
     run_start(&r, &s);
     run_until_done(&r, &s);
-    check_run(&r, &s, "slow_reader", 3);
+    check_run(&r, &s, "slow_reader", 3, 0, 0);
     T_EQ(r.a.term, 0);
     T_EQ(r.b.term, 0);
     /* an idle, healthy connection must survive well past the 120 s ULP timeout */
@@ -403,9 +401,7 @@ static void targeted(int kind, uint32_t delay, uint32_t total, const char *what,
     s.fault = kind;
     run_start(&r, &s);
     run_until_done(&r, &s);
-    check_run(&r, &s, what, (uint32_t)kind);
-    T_EQ(r.a.reason, MT_TERM_ULP_CLOSE);
-    T_EQ(r.b.reason, MT_TERM_ULP_CLOSE);
+    check_run(&r, &s, what, (uint32_t)kind, MT_TERM_ULP_CLOSE, MT_TERM_ULP_CLOSE);
     if (kind == TL_FINAL_ACK3) T_EQ(tl.hits, 3);
     else if (kind) T_EQ(tl.hits, 1);                 /* kind 0: no directed fault (tl not reset) */
     if (elapsed) *elapsed = r.elapsed;

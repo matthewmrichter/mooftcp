@@ -335,8 +335,8 @@ static void test_stats_all_counters_live(void) {
             else if (lr[n].code == MT_LOG_ARP_FAIL) seen[6] = 1;
             else if (lr[n].code == MT_LOG_DNS_FAIL && lr[n].a == MT_DNS_TIMEOUT) seen[7] = 1;
         }
-        for (n = 1; n < 8; n++)                                    /* drops on ETH..TCP, ARP and DNS failures */
-            if (n != MT_LOGL_UDP + 0 || 1) T_CHECK(seen[n]);
+        for (n = 1; n < 8; n++)                                    /* seen[1..5] drops on ETH..TCP, [6] ARP fail, [7] DNS fail */
+            T_CHECK(seen[n]);
     }
     /* Exact values, per stack: catches counters bumped on the wrong stack or twice. */
     T_EQ(sa.arp_out, 1); T_EQ(sa.arp_in, 1); T_EQ(sb.arp_out, 1); T_EQ(sb.arp_in, 1);
