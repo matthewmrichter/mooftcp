@@ -1,6 +1,7 @@
 /* mt_enet.c - .ENET0 (DaynaPORT) open / attach / async write / close. See mt_enet.h. */
 #include <Devices.h>
 #include <stddef.h>
+#include <string.h>
 #include "mt_enet.h"
 
 enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
@@ -105,19 +106,21 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
     uint16_t n;
     int16_t r;
 
-    if (!e->opened || !mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
+    if (!e->opened) { e->tx_drop_closed++; return 1; }
+    if (!mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
     for (i = 0; i < MT_ENET_TXSLOTS; i++) {
         MtEnetTx *c = &e->tx[(e->tx_next + i) % MT_ENET_TXSLOTS];
-        if (c->pb.ioResult <= 0) { s = c; e->tx_next = (uint8_t)((e->tx_next + i + 1u) % MT_ENET_TXSLOTS); break; }
+        if (c->pb.ioResult <= 0) {
+            if (c->started && c->pb.ioResult < 0) { e->tx_err++; e->last_err = c->pb.ioResult; }
+            c->started = 0;
+            s = c;
+            e->tx_next = (uint8_t)((e->tx_next + i + 1u) % MT_ENET_TXSLOTS);
+            break;
+        }
     }
     if (!s) { e->tx_drop_busy++; return 1; }
 
-    {
-        const uint8_t *src = frame;
-        uint8_t *dst = s->frame;
-        uint16_t k = len;
-        while (k--) *dst++ = *src++;
-    }
+    memcpy(s->frame, frame, len);
     n = mt_enet_pad(s->frame, len);
     if (n != len) e->tx_pad++;
     zero(&s->pb, sizeof s->pb);
@@ -130,11 +133,12 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
     s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
     r = (int16_t)PBControlAsync((ParmBlkPtr)&s->pb);
     if (r < 0) {
-        s->pb.ioResult = r;      /* the slot is free again */
+        s->pb.ioResult = r;      /* refused at once: the slot is free again, counted here */
         e->last_err = r;
         e->tx_err++;
         return 1;
     }
+    s->started = 1;
     e->tx_ok++;
     return 0;
 }

@@ -2,6 +2,7 @@
  * frame padding, tick-to-ms conversion. */
 #include "t.h"
 #include "mt_enet_logic.h"
+#include "mt_timer.h"
 
 static void pad_lengths(void)
 {
@@ -50,4 +51,20 @@ static void ms_from_ticks(void)
     T_EQ(mt_ms_from_ticks(8u * 1000000u) , 133000000u);
 }
 
-T_MAIN(pad_lengths, ms_from_ticks)
+static void timer_deadline_helper(void)
+{
+    T_EQ(mt_timer_deadline_ms(MT_TIMER_NONE), MT_TIMER_MAX_MS);   /* never cancel */
+    T_EQ(mt_timer_deadline_ms(0x80000000u), MT_TIMER_MAX_MS);
+    T_EQ(mt_timer_deadline_ms(MT_TIMER_MAX_MS), MT_TIMER_MAX_MS);
+    T_EQ(mt_timer_deadline_ms(MT_TIMER_MAX_MS - 1), MT_TIMER_MAX_MS - 1);
+    T_EQ(mt_timer_deadline_ms(0), 17);                             /* due now: one clock step */
+    T_EQ(mt_timer_deadline_ms(1), 17);
+    T_EQ(mt_timer_deadline_ms(16), 17);
+    T_EQ(mt_timer_deadline_ms(17), 17);
+    T_EQ(mt_timer_deadline_ms(18), 18);
+    T_EQ(mt_timer_deadline_ms(1000), 1000);
+    /* the clock step is 16 or 17 ms, so 17 always lets the tick count advance */
+    T_CHECK(MT_TIMER_STEP_MS >= 17);
+}
+
+T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper)

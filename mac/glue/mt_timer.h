@@ -50,8 +50,25 @@ typedef struct MtTimer {
 } MtTimer;
 #pragma pack(pop)
 
+/* The coarse clock (mt_os_ms: 16/17 ms steps, lagging real time by 0..16.6 ms) and the exact-ms
+ * PrimeTime disagree: a core deadline d ms away, armed from a clock that has not stepped yet,
+ * fires 1 ms apart until the tick count advances (up to ~16 interrupt-time passes per expiry,
+ * obs Task 9 review). So a deadline below one tick step is armed one step (17 ms) away, which
+ * is also what the clock can resolve; MT_NO_DEADLINE becomes the longest shot (never cancel:
+ * the core must be ticked at least every 2^31 ms). Pure arithmetic, host-tested. */
+#define MT_TIMER_STEP_MS 17u
+#define MT_TIMER_MAX_MS  0x3FFFFFFFu     /* about 12.4 days */
+static inline uint32_t mt_timer_deadline_ms(uint32_t d)
+{
+    if (d == MT_TIMER_NONE || d > MT_TIMER_MAX_MS) return MT_TIMER_MAX_MS;
+    return d < MT_TIMER_STEP_MS ? MT_TIMER_STEP_MS : d;
+}
+
 int  mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx);   /* 0 or a Toolbox error */
 void mt_timer_arm(MtTimer *t, uint32_t ms);
+/* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed): the helper every
+ * caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). */
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d);
 void mt_timer_cancel(MtTimer *t);
 void mt_timer_close(MtTimer *t);
 

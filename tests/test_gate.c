@@ -157,6 +157,45 @@ static void frame_arriving_in_the_release_window_is_not_lost(void)
     T_EQ(c.g.depth, 0);
 }
 
+/* H arrives in the window after the owner stored depth = 0 and before its re-check */
+static void window_poke(void *ctx)
+{
+    Ctx *c = ctx;
+    c->g.test_window = 0;
+    arrive(c, 11);                     /* the whole stub: commit + poke; depth is 0, so it runs now */
+}
+static void window_commit_only(void *ctx)
+{
+    Ctx *c = ctx;
+    MtRxSlot *s;
+    c->g.test_window = 0;
+    s = mt_gate_slot(&c->g);           /* committed, poke not yet reached */
+    s->buf[0] = 12;
+    mt_gate_commit(&c->g, 14);
+}
+
+static void frame_arriving_after_depth_zero_before_the_check(void)
+{
+    static Ctx c;
+    setup(&c);
+    c.g.test_window = window_poke;
+    MT_GATE_ENTER(&c.g);
+    MT_GATE_LEAVE(&c.g);
+    T_EQ(c.nlog, 1);                   /* run exactly once, by the handler itself */
+    T_EQ(c.log[0], 11);
+    T_EQ(c.irq_at_rx[0], 1);
+    T_EQ(c.g.depth, 0);
+    T_EQ(c.g.head, c.g.tail);
+    setup(&c);
+    c.g.test_window = window_commit_only;
+    MT_GATE_ENTER(&c.g);
+    MT_GATE_LEAVE(&c.g);
+    T_EQ(c.nlog, 1);                   /* the owner's re-check found it and took the core again */
+    T_EQ(c.log[0], 12);
+    T_EQ(c.irq_at_rx[0], 0);
+    T_EQ(c.g.depth, 0);
+}
+
 static void ticks(void)
 {
     static Ctx c;
@@ -192,4 +231,4 @@ static void closed_gate_swallows_input(void)
 T_MAIN(idle_frame_runs_at_once, frames_during_m_wait_for_leave, nested_enter_only_outermost_drains,
        empty_leave_still_requeries_deadline, ring_full_drops_and_counts,
        frame_arriving_inside_rx_is_not_nested, frame_arriving_in_the_release_window_is_not_lost,
-       ticks, closed_gate_swallows_input)
+       frame_arriving_after_depth_zero_before_the_check, ticks, closed_gate_swallows_input)

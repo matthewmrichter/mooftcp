@@ -31,10 +31,11 @@
  * before M resumes. depth is only ever written 0 -> 1 -> 0 by H/T (while M is suspended) and
  * +-1 by M with H/T observing a nonzero value; a byte store is one instruction. head is written
  * only by the producer (the stub), tail only by the consumer, both uint16 (one instruction).
- * Plain `volatile` plus the compiler barrier in mt_gate_barrier is therefore enough.
+ * Plain `volatile` plus the compiler barriers in mt_gate.c are therefore enough.
  *
- * Callbacks `rx`, `tick`, `after` run with depth != 0 and must not call MT_GATE_ENTER (the core
- * entry points they use are not gated: they ARE the owner). They run at interrupt time when H or
+ * Callbacks `rx`, `tick`, `after` run with depth != 0 (they ARE the owner). They may reach code that
+ * calls MT_GATE_ENTER (Task 10's mt_pb_input / mt_pb_tick use mt_os_irq_save inside), which only
+ * nests; the raw core entry points they use need no gate. They run at interrupt time when H or
  * T owned the core (mt_gate_in_irq() != 0), else at task time.
  *
  * Layout for mt_enet_ph.s: head@0, tail@2, drops@4, slot[0]@8; slot = len@0, pad@2, buf@4.
@@ -49,7 +50,8 @@ extern "C" {
 #endif
 
 #define MT_GATE_FRAME 1520u      /* header + data + the 4 trailing driver bytes (obs: FCS) */
-#define MT_GATE_SLOTS 8u         /* frames that can wait while the core is owned (obs: the driver can
+#define MT_GATE_SLOTS 8u         /* ring slots, 7 usable (one is the producer's); frames that can wait
+                                    while the core is owned (obs: the driver can
                                     deliver a flurry of replies from inside one EWrite; 4 slots lost 2
                                     of a 60-frame echo burst, 8 do not) */
 
@@ -76,6 +78,9 @@ typedef struct MtGate {
     /* statistics */
     uint32_t n_rx, n_deferred, n_tick, n_tick_deferred, n_after;
     uint32_t max_depth, max_ring;
+#ifdef MT_TEST_HOOKS
+    void (*test_window)(void *ctx);   /* host tests: runs between `depth = 0` and the re-check */
+#endif
 } MtGate;
 
 void mt_gate_init(MtGate *g, void *ctx, void (*rx)(void *, const uint8_t *, uint16_t),

@@ -23,7 +23,10 @@
 extern "C" {
 #endif
 
-#define MT_ENET_TXSLOTS 4u
+/* Transmit slots (each about 1.6 KB). A pass at interrupt level (handler, mask 6; timer, mask 1)
+ * frees no slot (async EWrite completes after the mask drops), so one ACK that opens the window
+ * for N segments needs N slots; the core ignores link.tx failures (Task 13 measures exhaustion). */
+#define MT_ENET_TXSLOTS 8u
 
 /* Errors (negative, Mac OSErr style); other values are the Device Manager's own. */
 #define MT_ENET_E_NODRIVER (-43)   /* fnfErr from OpenDriver: no .ENET0 */
@@ -54,6 +57,8 @@ typedef struct MtEnetWDS { uint16_t len; uint32_t ptr; } MtEnetWDS;   /* 6 bytes
 
 typedef struct MtEnetTx {
     MtEnetPB  pb;
+    uint8_t   started;           /* pb was handed to the driver and its result not yet checked */
+    uint8_t   pad;
     MtEnetWDS wds[2];
     uint8_t   frame[MT_ENET_MAXFRAME + 2];
 } MtEnetTx;
@@ -66,17 +71,22 @@ typedef struct MtEnet {
     uint8_t   opened;
     uint8_t   tx_next;           /* round-robin search start */
     int16_t   last_err;          /* last nonzero Device Manager result */
-    uint32_t  tx_ok, tx_pad, tx_drop_busy, tx_drop_len, tx_err;
+    uint32_t  tx_ok, tx_pad, tx_drop_busy, tx_drop_len, tx_drop_closed, tx_err;
     MtEnetTx  tx[MT_ENET_TXSLOTS];
 } MtEnet;
 
-/* Open the driver, read the MAC, attach both handlers (rx frames go to `gate`). 0 or an error
+/* Open the driver, read the MAC, attach both handlers (rx frames go to `gate`). Frames can reach
+ * the gate's rx callback as soon as the handlers are attached: the stack the callback feeds must
+ * be initialised BEFORE this call (Task 10: mt_pb_init first, then mt_enet_open). 0 or an error
  * above / a Device Manager error. On failure everything is undone. */
 int  mt_enet_open(MtEnet *e, MtGate *gate);
 
 /* The core's link.tx (void *ctx = the MtEnet): copies the frame into a free transmit slot
  * (padded to 60 bytes) and starts an async EWrite. Returns 0 when started, 1 when the frame was
- * dropped (all slots busy: tx_drop_busy; bad length: tx_drop_len; driver refused: tx_err). Never
+ * dropped (all slots busy: tx_drop_busy; bad length: tx_drop_len; closed: tx_drop_closed; driver
+ * refused or later reported an error in ioResult: tx_err). A slot whose ioResult stays 1 is the
+ * driver's (it owns the PB, WDS and buffer): it is never reclaimed here, only counted busy; a
+ * watchdog (KillIO, or detach/close/reopen) is Plan 3's. Never
  * waits, never blocks, callable from any context including the protocol handler. */
 int  mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len);
 

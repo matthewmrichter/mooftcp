@@ -52,7 +52,7 @@ static void P(const char *fmt, ...)
     if (outref >= 0) FSWrite(outref, &n, b);
 }
 
-#pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory Ticks at 0x16A */
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory Ticks at 0x16A, CurrentA5 at 0x904 */
 static unsigned long now_ticks(void) { return *(volatile unsigned long *)0x16A; }
 
 /* ---- the application: everything the callbacks reach through one pointer ---- */
@@ -66,6 +66,7 @@ typedef struct App {
     volatile uint32_t pat_len;
     volatile uint32_t min_stack_irq, min_stack_task;
     volatile uint32_t after_calls, tick_calls;
+    volatile uint32_t a5_irq_n, a5_irq_bad, a5_task_n, a5_task_bad;   /* A5 seen by echo_cb vs CurrentA5 */
 } App;
 
 #define PAT(i) ((uint8_t)((i) * 7u + 3u))
@@ -94,7 +95,7 @@ static void after_cb(void *ctx)
     App *a = (App *)ctx;
     uint32_t d = mt_next_deadline(a->s, mt_os_ms());
     a->after_calls++;
-    mt_timer_arm(&a->tm, d == MT_NO_DEADLINE ? MT_TIMER_NONE : d);
+    mt_timer_arm_deadline(&a->tm, d);
 }
 static void tm_cb(void *ctx) { mt_gate_tick(((App *)ctx)->g); }
 
@@ -103,6 +104,10 @@ static void echo_cb(void *user, mt_ip4 from, uint16_t id, uint16_t seq, const ui
 {
     App *a = (App *)user;
     uint16_t i;
+    uint32_t a5, cur = *(volatile uint32_t *)0x904;      /* CurrentA5: the application's A5 */
+    __asm__ volatile("move.l %%a5,%0" : "=d"(a5));
+    if (mt_gate_in_irq(a->g)) { a->a5_irq_n++; if (a5 != cur) a->a5_irq_bad++; }
+    else { a->a5_task_n++; if (a5 != cur) a->a5_task_bad++; }
     (void)now;
     if (from != 0x0A000001u || id != 0x4D54) { a->bad_from++; return; }
     if (len != a->pat_len) { a->bad_payload++; return; }
@@ -198,14 +203,8 @@ int main(void)
     memset(&app, 0, sizeof app);
     app.g = g; app.e = e;
     app.min_stack_irq = app.min_stack_task = 0xFFFFFFFFu;
-    mt_gate_init(g, &app, rx_cb, tick_cb, after_cb);
-    mt_os_mac_set_gate(g);
-
-    r = mt_enet_open(e, g);
-    P("mt_enet_open = %d refnum=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\r", r, e->refnum, e->mac[0],
-      e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
-    if (r) { P("RESULT FAIL\r"); fails++; goto fin; }
-
+    /* order matters: the stack exists before the gate can run it (the handler attaches inside
+     * mt_enet_open), the address is set once the MAC is known */
     link.ctx = e; link.tx = mt_enet_write;
     app.s = mt_stack_init(arena, arena_len, &lim, &link, (uint32_t)now_ticks());
     if (!app.s) {
@@ -213,12 +212,22 @@ int main(void)
         fails++;
         goto fin;
     }
+    mt_gate_init(g, &app, rx_cb, tick_cb, after_cb);
+    mt_os_mac_set_gate(g);
+    mt_set_echo_cb(app.s, echo_cb, &app);
+    mt_timer_init(&app.tm, tm_cb, &app);
+
+    r = mt_enet_open(e, g);
+    P("mt_enet_open = %d refnum=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\r", r, e->refnum, e->mac[0],
+      e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
+    if (r) { P("RESULT FAIL\r"); fails++; goto fin; }
+
     memset(&cfg, 0, sizeof cfg);
     cfg.addr = 0x0A00004Du; cfg.mask = 0xFF000000u; cfg.gateway = 0x0A000001u; cfg.mtu = 1500;
     memcpy(cfg.mac, e->mac, 6);
+    MT_GATE_ENTER(g);
     mt_set_config(app.s, &cfg);
-    mt_set_echo_cb(app.s, echo_cb, &app);
-    mt_timer_init(&app.tm, tm_cb, &app);
+    MT_GATE_LEAVE(g);
 
     /* A: ARP + the first echo */
     {
@@ -357,6 +366,13 @@ int main(void)
         P("F: stack space left (min): at interrupt time %lu, at task time %lu; ticks run %lu, after calls %lu\r",
           (unsigned long)app.min_stack_irq, (unsigned long)app.min_stack_task,
           (unsigned long)app.tick_calls, (unsigned long)app.after_calls);
+        P("F: A5 in the echo callback vs CurrentA5: interrupt time %lu checks, %lu wrong; task time %lu checks, %lu wrong\r",
+          (unsigned long)app.a5_irq_n, (unsigned long)app.a5_irq_bad, (unsigned long)app.a5_task_n,
+          (unsigned long)app.a5_task_bad);
+        P("F: enet: tx slots %u, sizeof MtEnet %lu, closed-drops %lu\r", (unsigned)MT_ENET_TXSLOTS,
+          (unsigned long)sizeof(MtEnet), (unsigned long)e->tx_drop_closed);
+        check(app.a5_irq_n > 0 && app.a5_irq_bad == 0 && app.a5_task_bad == 0, "F A5 intact in callbacks");
+        check(e->tx_err == 0, "F no tx errors");
         check(g->drops == 0, "F no ring drops");
     }
 

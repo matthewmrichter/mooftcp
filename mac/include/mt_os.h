@@ -73,8 +73,9 @@ void mt_os_complete(MtAnyPb *pb, int16_t err);
  * the call (0 for events without one). The ASR may call the driver again. */
 void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 icmp);
 
-/* Mask the interrupts that can enter the stack (the network input path); returns the previous
- * state for mt_os_irq_restore. Nests. */
+/* Take / release ownership of the core against the network input path and the timer (the Mac
+ * build maps these to MT_GATE_ENTER / MT_GATE_LEAVE, mac/glue/mt_gate.h: no interrupt mask is
+ * touched; frames and ticks that arrive meanwhile run at the outermost restore). Nests. */
 int  mt_os_irq_save(void);
 void mt_os_irq_restore(int saved);
 

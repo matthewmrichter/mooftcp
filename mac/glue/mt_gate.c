@@ -50,6 +50,9 @@ static void own_and_run(MtGate *g, uint8_t irq)
         barrier();
         g->depth = 0;
         barrier();
+#ifdef MT_TEST_HOOKS
+        if (g->test_window) g->test_window(g->ctx);
+#endif
         if (g->head == g->tail && !g->tick_pending) return;
         g->depth = 1;
     }
