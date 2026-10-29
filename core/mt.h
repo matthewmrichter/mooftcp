@@ -103,7 +103,9 @@ void     mt_udp_release(mt_udp *u);
 #define MT_DNS_MAXADDR 4          /* matches MacTCP hostInfo addr[4] */
 #define MT_DNS_NAMELEN 255
 typedef enum { MT_DNS_OK = 0, MT_DNS_NOT_FOUND, MT_DNS_NO_ANSWER, MT_DNS_TIMEOUT,
-               MT_DNS_NO_SERVER, MT_DNS_BUSY, MT_DNS_BAD_NAME } mt_dns_status;
+               MT_DNS_NO_SERVER, MT_DNS_BUSY, MT_DNS_BAD_NAME,
+               MT_DNS_PENDING   /* out->status while a query is in progress */
+} mt_dns_status;
 typedef enum { MT_DNS_Q_A = 1, MT_DNS_Q_PTR = 12, MT_DNS_Q_HINFO = 13, MT_DNS_Q_MX = 15 } mt_dns_qtype;
 typedef struct { mt_dns_status status; char cname[MT_DNS_NAMELEN + 1];
   mt_ip4 addr[MT_DNS_MAXADDR]; uint8_t naddr;                 /* A */

@@ -197,23 +197,36 @@ static int dns_send(mt_stack *s, mt_dns_q *q, uint32_t now) {
 
 /* ---- cache ---- */
 
-static int key_make(const char *name, size_t n, char *key) {   /* lower-cased, 63 chars max */
+/* Cache key = the FQDN that was (or would be) asked: name, or name.domain when dl != 0;
+ * lower-cased, no trailing dot, 63 chars max (else 0 = not cacheable). */
+static int key_make(const char *name, size_t n, const char *dom, size_t dl, char *key) {
     size_t i;
-    if (n >= MT_DNS_CNAME) return 0;
+    if (n + (dl ? 1u + dl : 0u) >= MT_DNS_CNAME) return 0;
     for (i = 0; i < n; i++) key[i] = lc(name[i]);
+    if (dl) {
+        key[n] = '.';
+        for (i = 0; i < dl; i++) key[n + 1u + i] = lc(dom[i]);
+        n += 1u + dl;
+    }
     key[n] = 0;
     return 1;
 }
 
-static int cent_live(const mt_dns_cent *c, uint32_t now) {
-    return c->naddr != 0 && mt_time_before(now, c->exp);
+/* Live = in use and not yet expired. The bound on exp - now keeps an entry that expired
+ * long ago from looking live again when the 32-bit ms clock wraps (after 2^31 ms); an entry
+ * found expired is freed on the spot. */
+static int cent_live(mt_dns_cent *c, uint32_t now) {
+    if (c->naddr == 0) return 0;
+    if (mt_time_before(now, c->exp) && c->exp - now <= DNS_TTL_MAX * 1000u) return 1;
+    c->naddr = 0;
+    return 0;
 }
 
-static int cache_lookup(mt_stack *s, const char *name, size_t n, mt_dns_result *out,
+static int cache_lookup(mt_stack *s, const char *name, size_t n, size_t dl, mt_dns_result *out,
                         uint32_t now) {
     char key[MT_DNS_CNAME];
     uint16_t i;
-    if (!key_make(name, n, key)) return 0;
+    if (!key_make(name, n, s->cfg.domain, dl, key)) return 0;
     for (i = 0; i < s->lim.dns_cache; i++) {
         mt_dns_cent *c = &s->dcache[i];
         if (cent_live(c, now) && strcmp(c->name, key) == 0) {
@@ -229,15 +242,16 @@ static int cache_lookup(mt_stack *s, const char *name, size_t n, mt_dns_result *
     return 0;
 }
 
-/* Remember an A result under the name as queried. Not cached when name or canonical name is
- * longer than 63 characters. TTL is clamped to 60 s..24 h. */
-static void cache_store(mt_stack *s, const char *name, const mt_dns_result *r, uint32_t ttl,
+/* Remember an A result under the FQDN that answered (q->name plus the search domain if one
+ * was used). Not cached when that name or the canonical name is longer than 63 characters.
+ * TTL is clamped to 60 s..24 h. */
+static void cache_store(mt_stack *s, const mt_dns_q *q, const mt_dns_result *r, uint32_t ttl,
                         uint32_t now) {
     char key[MT_DNS_CNAME];
     mt_dns_cent *v = NULL;
     uint16_t i;
     if (s->lim.dns_cache == 0 || r->naddr == 0 || strlen(r->cname) >= MT_DNS_CNAME ||
-        !key_make(name, strlen(name), key))
+        !key_make(q->name, strlen(q->name), s->cfg.domain, q_dom(s, q), key))
         return;
     if (ttl < DNS_TTL_MIN) ttl = DNS_TTL_MIN;
     if (ttl > DNS_TTL_MAX) ttl = DNS_TTL_MAX;
@@ -261,7 +275,7 @@ static void cache_store(mt_stack *s, const char *name, const mt_dns_result *r, u
 void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now) {
     uint16_t i;
     for (i = 0; i < s->lim.dns_cache; i++) {
-        const mt_dns_cent *c = &s->dcache[i];
+        mt_dns_cent *c = &s->dcache[i];
         if (cent_live(c, now))
             cb(user, c->name, c->addr, c->naddr, (c->exp - now + 999u) / 1000u);
     }
@@ -271,7 +285,7 @@ void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now)
 
 /* Validate and digest response p (len bytes) against query q. Returns 0 to ignore it, else 1
  * with *st the outcome and q->out filled (A/PTR/HINFO/MX fields). *ttl = smallest A TTL. */
-static int dns_parse(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
+static int dns_parse_raw(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
                      mt_dns_status *st, uint32_t *ttl) {
     mt_dns_result *o = q->out;
     uint32_t off, an, i, found = 0, hops = 0, mxbest = 0, tmin = 0xFFFFFFFFu;
@@ -358,6 +372,17 @@ done:
     return 1;
 }
 
+/* dns_parse_raw works directly in the caller's result (to save stack). A rejected response
+ * must not be visible there: restore the pending state (all zero, status PENDING) that
+ * mt_dns_query left, so polling the result mid-query never shows spoofed or partial data. */
+static int dns_parse(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
+                     mt_dns_status *st, uint32_t *ttl) {
+    if (dns_parse_raw(s, q, p, len, st, ttl)) return 1;
+    memset(q->out, 0, sizeof *q->out);
+    q->out->status = MT_DNS_PENDING;
+    return 0;
+}
+
 /* ---- completion ---- */
 
 typedef struct { mt_dns_cb cb; void *user; mt_dns_result *out; } dns_done;
@@ -384,7 +409,7 @@ static int dns_rx(mt_stack *s, const mt_udp_dgram *g, dns_done *d) {
     for (i = 0; i < MT_DNS_SLOTS; i++)
         if (dn->q[i].used && dn->q[i].id == mt_rd16(g->data)) { q = &dn->q[i]; break; }
     if (!q || !dns_parse(s, q, g->data, g->len, &st, &ttl)) return 0;
-    if (st == MT_DNS_OK && q->qtype == MT_DNS_Q_A) cache_store(s, q->name, q->out, ttl, s->now);
+    if (st == MT_DNS_OK && q->qtype == MT_DNS_Q_A) cache_store(s, q, q->out, ttl, s->now);
     if (st != MT_DNS_OK && q->dom && q_dom(s, q)) {            /* negative: try the bare name */
         q->dom = 0;
         q->id = dns_next_id(dn);
@@ -413,6 +438,7 @@ static void dns_udp_cb(mt_udp *u, mt_udp_event ev, uint32_t arg, void *user) {
 
 void mt_dns_timers(mt_stack *s, uint32_t now) {
     uint32_t i;
+    for (i = 0; i < s->lim.dns_cache; i++) (void)cent_live(&s->dcache[i], now);   /* free expired */
     for (i = 0; i < MT_DNS_SLOTS; i++) {
         mt_dns_q *q = &s->dns->q[i];
         uint32_t el;
@@ -464,7 +490,7 @@ int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *
                  mt_dns_cb cb, void *user, uint32_t now) {
     mt_dns *dn = s->dns;
     mt_dns_q *q = NULL;
-    size_t n = 0;
+    size_t n = 0, dl;
     mt_ip4 ip;
     int absolute = 0, r;
     uint32_t i;
@@ -486,7 +512,13 @@ int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *
         return 0;
     }
     if (!name_ok(name, n)) return -MT_DNS_BAD_NAME;
-    if (qt == MT_DNS_Q_A && cache_lookup(s, name, n, out, now)) return 0;
+    for (i = 0; i < n && !absolute; i++)                   /* a dot (or trailing dot): absolute */
+        if (name[i] == '.') absolute = 1;
+    dl = absolute ? 0u : dom_len(s);
+    if (dl && n + 1u + dl > DNS_MAXTEXT) dl = 0;
+    /* Cache: exactly the FQDN the network query would ask first (name.domain for a dotless
+     * name with a domain set, else the bare/absolute name). */
+    if (qt == MT_DNS_Q_A && cache_lookup(s, name, n, dl, out, now)) return 0;
     if (s->cfg.dns == 0) return -MT_DNS_NO_SERVER;
     for (i = 0; i < MT_DNS_SLOTS; i++)
         if (!dn->q[i].used) { q = &dn->q[i]; break; }
@@ -497,15 +529,15 @@ int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *
     }
     memset(q, 0, sizeof *q);
     memcpy(q->name, name, n);
-    for (i = 0; i < n && !absolute; i++)
-        if (name[i] == '.') absolute = 1;
+    memset(out, 0, sizeof *out);
+    out->status = MT_DNS_PENDING;
     q->out = out;
     q->cb = cb;
     q->user = user;
     q->qtype = (uint8_t)qt;
     q->t0 = now;
     q->id = dns_next_id(dn);
-    q->dom = (uint8_t)(!absolute && dom_len(s) != 0 && n + 1u + dom_len(s) <= DNS_MAXTEXT);
+    q->dom = (uint8_t)(dl != 0);
     q->used = 1;
     if (dns_send(s, q, now) != MT_OK) { q->used = 0; return -MT_DNS_NO_SERVER; }
     return MT_DNS_IN_PROGRESS;
