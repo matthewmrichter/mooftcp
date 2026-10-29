@@ -372,14 +372,19 @@ done:
     return 1;
 }
 
+/* The state of a result while its query is outstanding: all zero, status PENDING. */
+static void dns_pending(mt_dns_result *o) {
+    memset(o, 0, sizeof *o);
+    o->status = MT_DNS_PENDING;
+}
+
 /* dns_parse_raw works directly in the caller's result (to save stack). A rejected response
  * must not be visible there: restore the pending state (all zero, status PENDING) that
  * mt_dns_query left, so polling the result mid-query never shows spoofed or partial data. */
 static int dns_parse(mt_stack *s, mt_dns_q *q, const uint8_t *p, uint16_t len,
                      mt_dns_status *st, uint32_t *ttl) {
     if (dns_parse_raw(s, q, p, len, st, ttl)) return 1;
-    memset(q->out, 0, sizeof *q->out);
-    q->out->status = MT_DNS_PENDING;
+    dns_pending(q->out);
     return 0;
 }
 
@@ -411,6 +416,7 @@ static int dns_rx(mt_stack *s, const mt_udp_dgram *g, dns_done *d) {
     if (!q || !dns_parse(s, q, g->data, g->len, &st, &ttl)) return 0;
     if (st == MT_DNS_OK && q->qtype == MT_DNS_Q_A) cache_store(s, q, q->out, ttl, s->now);
     if (st != MT_DNS_OK && q->dom && q_dom(s, q)) {            /* negative: try the bare name */
+        dns_pending(q->out);                /* parse left the negative answer in `out` */
         q->dom = 0;
         q->id = dns_next_id(dn);
         q->tries = 0;
@@ -529,8 +535,7 @@ int mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype qt, mt_dns_result *
     }
     memset(q, 0, sizeof *q);
     memcpy(q->name, name, n);
-    memset(out, 0, sizeof *out);
-    out->status = MT_DNS_PENDING;
+    dns_pending(out);
     q->out = out;
     q->cb = cb;
     q->user = user;
