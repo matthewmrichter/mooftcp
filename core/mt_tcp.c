@@ -198,6 +198,7 @@ static void back_to_listen(mt_tcp *t) {
     t->tmask = 0;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
+    t->rto = MT_TCP_RTO_INIT;                              /* not the backed-off value of the dead half-open */
     mt_tcp_set_state(t, MT_TCP_LISTEN);
     t->rip = 0;
     t->rport = 0;
@@ -573,6 +574,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->snd_wl1 = g->seq;
     t->snd_wl2 = t->iss;
     t->flags |= MT_TF_PASSIVE;
+    t->rto = MT_TCP_RTO_INIT;
     mt_tcp_set_state(t, MT_TCP_SYN_RCVD);
     s->stats.tcp_passive_opens++;
     mt_tcp_output(t, now);                 /* SYN-ACK */

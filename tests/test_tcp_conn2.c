@@ -279,8 +279,46 @@ static void test_fast_retransmit_of_lone_fin(void) {
     T_EQ(mt_get_stats(s)->tcp_rexmt, 1);
 }
 
+/* A half-open connection backs its RTO off while SYN-ACKs go unanswered; once the ULP timeout
+ * returns the listener to LISTEN, the next SYN's SYN-ACK is armed with the initial RTO again. */
+static void test_listener_rto_reset_after_half_open(void) {
+    fake_link fl; rec r; tcpv v; mt_tcp_info in;
+    mt_stack *s = setup(&fl);
+    static uint8_t b[8192];
+    mt_tcp *t = mt_tcp_create(s, b, sizeof b, rec_cb, &r);
+    uint32_t now = 0;
+    memset(&r, 0, sizeof r);
+    T_EQ(mt_tcp_listen(t, 0, 0, 21), MT_OK);
+    inject(s, 1025, 21, 7000, 0, TF_SYN, NULL, 0, now);
+    T_EQ(fl.n, 1);
+    while (now < 200000) {                              /* nobody ACKs: rexmts back off, ULP fires */
+        uint32_t d = mt_next_deadline(s, now);
+        if (d == MT_NO_DEADLINE) break;
+        now += d;
+        mt_tick(s, now);
+        mt_tcp_get_info(t, &in);
+        if (in.state == MT_TCP_LISTEN) break;
+    }
+    mt_tcp_get_info(t, &in);
+    T_EQ(in.state, MT_TCP_LISTEN);
+    T_CHECK(now >= 100000);                             /* the 120 s ULP timeout, not an early exit */
+    T_CHECK(fl.n >= 5);                                 /* 1 s, 2 s, 4 s ... retransmits happened */
+    fake_clear(&fl);
+    now += 10;
+    inject(s, 1026, 21, 9000, 0, TF_SYN, NULL, 0, now);
+    T_EQ(fl.n, 1);
+    T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_SYN | TF_ACK);
+    T_EQ(mt_next_deadline(s, now), MT_TCP_RTO_INIT);
+    mt_tick(s, now + MT_TCP_RTO_INIT - 1);
+    T_EQ(fl.n, 1);                                      /* not a millisecond early */
+    mt_tick(s, now + MT_TCP_RTO_INIT);
+    T_EQ(fl.n, 2);                                      /* SYN-ACK resent at about RTO_INIT */
+    T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_SYN | TF_ACK); T_EQ(v.dport, 1026);
+}
+
 T_MAIN(test_simultaneous_open_scripted, test_simultaneous_open_two_stacks,
        test_abort_inside_data_callback, test_relisten_in_terminate_callback,
        test_release_create_in_callback, test_zero_window_still_processes_ack,
        test_tiny_mtu_clamped, test_rst_in_last_ack_is_clean_close,
-       test_rst_with_unsent_fin_is_abort, test_fast_retransmit_of_lone_fin)
+       test_rst_with_unsent_fin_is_abort, test_fast_retransmit_of_lone_fin,
+       test_listener_rto_reset_after_half_open)
