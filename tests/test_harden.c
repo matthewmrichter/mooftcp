@@ -335,6 +335,74 @@ static void test_unreach_rate_limited(void) {
     T_EQ(fl.n, 5);
 }
 
+/* The limiter must work whatever the clock starts at (zero-initialised state, upper half, wrap). */
+static void unreach_from(uint32_t t0, int *two_apart, int *close_pair) {
+    fake_link fl;
+    mt_stack *s = setup(&fl);
+    mt_arp_insert(s, T_PEER, T_PEER_MAC, t0);
+    inject_udp(s, T_PEER, 5000, 9, t0);
+    inject_udp(s, T_PEER, 5001, 9, t0 + 2000u);
+    *two_apart = fl.n;
+    fake_clear(&fl);
+    mt_arp_insert(s, T_PEER, T_PEER_MAC, t0 + 10000u);
+    inject_udp(s, T_PEER, 5002, 9, t0 + 10000u);
+    inject_udp(s, T_PEER, 5003, 9, t0 + 10010u);
+    *close_pair = fl.n;
+}
+
+static void test_unreach_limiter_any_clock_start(void) {
+    static const uint32_t starts[] = {0u, 5u, 0x7FFFFFF0u, 0x80000000u, 0x90000000u, 0xFFFFFF00u,
+                                      0xFFFFFFFFu};
+    size_t i;
+    for (i = 0; i < sizeof starts / sizeof starts[0]; i++) {
+        int a, b;
+        unreach_from(starts[i], &a, &b);
+        T_EQ(a, 2);          /* 2 s apart: both answered (also across the 2^32 wrap) */
+        T_EQ(b, 1);          /* 10 ms apart: one */
+    }
+}
+
+static void test_rst_out_of_window_silent(void) {
+    fake_link fl; rec r; mt_tcp_info in; uint32_t ps, ms;
+    mt_stack *s = setup(&fl);
+    mt_tcp *t;
+    memset(&r, 0, sizeof r);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    mt_tcp_get_info(t, &in);
+    inject(s, 23, in.lport, ps + 100000u, 0, TF_RST, NULL, 0, 10);
+    inject(s, 23, in.lport, ps - 5, 0, TF_RST, NULL, 0, 11);
+    T_EQ(fl.n, 0);
+    T_EQ(r.n, 1);
+    mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_ESTABLISHED);
+}
+
+static void test_arp_merge_keeps_lru_stamp(void) {
+    fake_link fl; uint8_t f[64], mac[6];
+    mt_stack *s = setup(&fl);
+    mt_arp_entry *e = NULL;
+    uint16_t i, n;
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 100), 1);                   /* t_used = 100 */
+    n = mk_arp(f, 1, MAC2, T_PEER, ZERO, T_GW);
+    mt_input(s, f, n, 5000);
+    for (i = 0; i < s->lim.arp_entries; i++)
+        if (s->arp[i].state != MT_ARP_FREE && s->arp[i].ip == T_PEER) e = &s->arp[i];
+    T_CHECK(e != NULL);
+    if (!e) return;
+    T_MEMEQ(e->mac, MAC2, 6);
+    T_EQ(e->t_stamp, 5000);
+    T_EQ(e->t_used, 100);
+}
+
+static void test_nonsyn_from_port_0_no_rst(void) {
+    fake_link fl;
+    mt_stack *s = setup(&fl);
+    uint32_t d0 = mt_get_stats(s)->tcp_in_drops;
+    inject(s, 0, 99, 100, 0, TF_ACK, NULL, 0, 1);                   /* closed port, source port 0 */
+    inject(s, 0, 99, 100, 0, TF_FIN | TF_ACK, NULL, 0, 2);
+    T_EQ(fl.n, 0);
+    T_EQ(mt_get_stats(s)->tcp_in_drops, d0 + 2);
+}
+
 /* ---- delayed-ACK full-size test follows the largest received segment ---- */
 
 static void test_rcv_mss_tracks_largest_segment(void) {
@@ -374,4 +442,6 @@ T_MAIN(test_arp_merge_updates_existing_from_any_arp,
        test_tcp_syn_from_multicast_no_rst, test_rst_exact_match_only,
        test_synrcvd_gives_up_after_4_tries_and_relistens, test_syn_sent_keeps_connect_timeout,
        test_segment_to_port_0_dropped, test_icmp_out_not_counted_on_send_failure,
-       test_unreach_rate_limited, test_rcv_mss_tracks_largest_segment)
+       test_unreach_rate_limited, test_rcv_mss_tracks_largest_segment,
+       test_unreach_limiter_any_clock_start, test_rst_out_of_window_silent,
+       test_arp_merge_keeps_lru_stamp, test_nonsyn_from_port_0_no_rst)

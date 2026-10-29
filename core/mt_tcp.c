@@ -851,10 +851,10 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                                                             * the peer already finished (its
                                                             * TIME_WAIT expired): a clean close */
             else tcp_term(t, MT_TERM_REMOTE_ABORT);
-        } else {
-            t->flags |= MT_TF_ACKNOW;                      /* in window but not exact (or outside): challenge ACK */
+        } else if (inwin) {
+            t->flags |= MT_TF_ACKNOW;                      /* in window, not exact: challenge ACK */
             mt_tcp_output(t, now);
-        }
+        }                                                  /* outside the window: silently dropped */
         return;
     }
     if (g->fl & MT_TH_SYN) {
@@ -1095,6 +1095,7 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     t = lookup(s, src, sport, dport);
     g.acc_off = g.acc_n = 0;
     g.acc_fin = 0;
+    if (!t && sport == 0) MT_DROP_GOTO(why);               /* never reply to port 0 */
     if (t) plan(t, &g);
     sum = mt_cksum_add(mt_tcp_pseudo(src, dst, len), pl, hl);
     sum += data_sum(t, &g);

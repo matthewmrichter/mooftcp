@@ -139,8 +139,10 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
     uint32_t err0;
     if (s->cfg.addr == 0 || dst != s->cfg.addr || !unicast_src(s, src) || proto == 1) return;
     /* Error messages we originate: at most one per ICMP_ERR_GAP_MS per stack (RFC 1812 4.3.2.8). */
-    if (mt_time_before(now, s->icmp_err_next)) return;
+    /* Suppress only while 0 < next - now <= GAP: 0 (none yet) or an ancient `next` never blocks. */
+    if (s->icmp_err_next && (uint32_t)(s->icmp_err_next - now - 1u) < ICMP_ERR_GAP_MS) return;
     s->icmp_err_next = now + ICMP_ERR_GAP_MS;
+    if (s->icmp_err_next == 0) s->icmp_err_next = 1;                 /* 0 means "none yet" */
     memset(m, 0, ICMP_HDR);
     m[0] = ICMP_UNREACH; m[1] = code;
     /* Synthesised original header (see mt_int.h). */

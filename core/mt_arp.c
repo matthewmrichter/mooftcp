@@ -154,7 +154,11 @@ void mt_arp_input(mt_stack *s, const uint8_t *arp, uint16_t len, uint32_t now) {
      * any well-formed ARP, whoever it is addressed to, so a changed gateway MAC is followed. A new
      * entry is only learned from a packet addressed to us. */
     known = spa != 0 && spa < 0xE0000000u && spa != s->cfg.addr && arp_find(s, spa) != NULL;
-    if (known) mt_arp_insert(s, spa, arp + 8, now);
+    if (known) {                       /* refresh MAC and lifetime only; t_used (LRU) is not touched */
+        uint32_t used = arp_find(s, spa)->t_used;
+        mt_arp_insert(s, spa, arp + 8, now);
+        arp_find(s, spa)->t_used = used;
+    }
     if (mt_rd32(arp + 24) != s->cfg.addr) return;
     if (!known && spa != 0 && spa < 0xE0000000u && spa != s->cfg.addr)
         mt_arp_insert(s, spa, arp + 8, now);

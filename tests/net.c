@@ -28,7 +28,9 @@ void fake_clear(fake_link *fl) {
 }
 
 mt_stack *tstack_new(fake_link *fl, mt_ip4 addr) {
-    static uint64_t pool[4][20480 / 8];   /* 8-aligned: MT_ARENA_ALIGN */
+    /* 8-aligned (MT_ARENA_ALIGN); 20480 B per stack, not the 16384 budget: host sizes (64-bit
+     * pointers, test hooks) leave only ~230 B headroom; test_stack_size_budget is the real limit. */
+    static uint64_t pool[4][20480 / 8];
     static int next;
     mt_limits lim;
     mt_link link;

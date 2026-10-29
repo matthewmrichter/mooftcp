@@ -230,18 +230,18 @@ static void test_remote_reset(void) {
     mt_tcp_get_info(t, &in);
     inject(s, 23, in.lport, ps + 100000u, 0, TF_RST, NULL, 0, 10);   /* out of window */
     T_EQ(r.n, 1);
-    T_EQ(fl.n, 1);
-    T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_ACK); T_EQ(v.seq, ms); T_EQ(v.ack, ps);
+    T_EQ(fl.n, 0);                                  /* Task 5 (RFC 5961): out-of-window RST is dropped silently */
     mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_ESTABLISHED);
     inject(s, 23, in.lport, ps - 5, 0, TF_RST, NULL, 0, 11);         /* old */
-    T_EQ(fl.n, 2); T_EQ(r.n, 1);
+    T_EQ(fl.n, 0); T_EQ(r.n, 1);
     /* Task 5 (RFC 5961): an in-window RST that is not exactly rcv_nxt is only challenged. */
     inject(s, 23, in.lport, ps + 10, 0, TF_RST, NULL, 0, 12);        /* in window, not exact */
-    T_EQ(r.n, 1); T_EQ(fl.n, 3);
+    T_EQ(r.n, 1); T_EQ(fl.n, 1);
+    T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_ACK); T_EQ(v.seq, ms); T_EQ(v.ack, ps);
     mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_ESTABLISHED);
     inject(s, 23, in.lport, ps, 0, TF_RST, NULL, 0, 13);             /* exact: resets */
     T_EQ(r.n, 2); T_EQ(r.e[1].ev, MT_TCP_EV_TERMINATE); T_EQ(r.e[1].arg, MT_TERM_REMOTE_ABORT);
-    T_EQ(fl.n, 3);
+    T_EQ(fl.n, 1);
     mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_CLOSED);
     T_EQ(mt_get_stats(s)->tcp_resets_in, 1);
 }

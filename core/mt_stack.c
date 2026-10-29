@@ -236,8 +236,6 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
 
 void mt_tick(mt_stack *s, uint32_t now) {
     s->now = now;
-    /* Keep the ICMP error limiter within half the clock range of `now` (wrap-safe compare). */
-    if (!mt_time_before(now, s->icmp_err_next)) s->icmp_err_next = now;
     mt_arp_tick(s, now);
     mt_ip_timers(s, now);
     mt_tcp_timers(s, now);
