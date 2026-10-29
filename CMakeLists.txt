@@ -27,6 +27,18 @@ if(MT_HELPER_SRC)
   set(MT_TEST_LIBS mthelp)
 endif()
 
+# The MacTCP PB dispatcher (mac/glue/mt_pb*.c), host-built against the fake OS layer
+# tests/pbfake.c (mt_os.h). Packed PB structs: taking a member's address is an error.
+file(GLOB MT_GLUE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/mac/glue/mt_pb*.c)
+if(MT_GLUE_SRC)
+  add_library(mtglue STATIC ${MT_GLUE_SRC} ${CMAKE_SOURCE_DIR}/tests/pbfake.c)
+  target_include_directories(mtglue PUBLIC ${CMAKE_SOURCE_DIR}/mac/glue
+                             ${CMAKE_SOURCE_DIR}/mac/include ${CMAKE_SOURCE_DIR}/tests)
+  target_compile_options(mtglue PRIVATE -Werror=address-of-packed-member)
+  target_link_libraries(mtglue PUBLIC ${MT_TEST_LIBS})
+  set(MT_TEST_LIBS mtglue)
+endif()
+
 enable_testing()
 file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
 foreach(src ${MT_TEST_SRC})
