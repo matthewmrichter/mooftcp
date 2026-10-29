@@ -25,7 +25,13 @@
  *    NOT, so a frame can be shorter than the 60-byte Ethernet minimum (a pure TCP ACK is 54
  *    bytes). The glue must pad to 60 in its ENET write path; the core does not. The pointer may
  *    point into the core's tx scratch buffer, the ARP scratch buffer or the pending-frame slot,
- *    and is valid only until tx returns. */
+ *    and is valid only until tx returns.
+ *  - TCP send buffers stay in caller memory (no copy): the mt_seg array given to
+ *    mt_tcp_send_segs and every byte it points to must stay valid and unmodified until that
+ *    request's `done` fires (retransmissions re-read them). The core never writes to them. `done`
+ *    fires from inside mt_input (the ACK that completes it), mt_tick (a timeout that terminates the
+ *    connection) or mt_tcp_abort / mt_tcp_close (termination), never from mt_tcp_send_segs, and
+ *    never after mt_tcp_release (which drops queued requests silently: the caller completes them). */
 
 typedef uint32_t mt_ip4;                         /* host byte order */
 #define MT_NO_DEADLINE 0xFFFFFFFFu
@@ -33,7 +39,8 @@ typedef uint32_t mt_ip4;                         /* host byte order */
 typedef struct mt_stack mt_stack;
 
 enum { MT_OK = 0, MT_ERR_NOROUTE = -1, MT_ERR_NOMEM = -2, MT_ERR_INVAL = -3,
-       MT_ERR_STATE = -4, MT_ERR_INUSE = -5, MT_ERR_UNCONFIGURED = -6 };
+       MT_ERR_STATE = -4, MT_ERR_INUSE = -5, MT_ERR_UNCONFIGURED = -6, MT_ERR_BUSY = -7,
+       MT_ERR_ABORTED = -8 };
 
 /* tx must finish with `frame` before returning (see the embedder contract); nonzero = dropped */
 typedef struct { void *ctx; int (*tx)(void *ctx, const uint8_t *frame, uint16_t len); } mt_link;
@@ -182,7 +189,7 @@ void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now)
 typedef struct mt_tcp mt_tcp;
 typedef enum {
   MT_TCP_EV_ESTABLISHED = 1, MT_TCP_EV_DATA, MT_TCP_EV_URGENT, MT_TCP_EV_CLOSING,
-  MT_TCP_EV_ULP_TIMEOUT, MT_TCP_EV_TERMINATE, MT_TCP_EV_ICMP, MT_TCP_EV_SEND_SPACE
+  MT_TCP_EV_ULP_TIMEOUT, MT_TCP_EV_TERMINATE, MT_TCP_EV_ICMP
 } mt_tcp_event;
 typedef enum {   /* mirrors MacTCP TCPTermReason; Plan 2 maps to numeric values */
   MT_TERM_REMOTE_ABORT = 1, MT_TERM_NETWORK_FAILURE, MT_TERM_SEC_PREC_MISMATCH,
@@ -195,8 +202,10 @@ typedef enum { MT_TCP_CLOSED, MT_TCP_LISTEN, MT_TCP_SYN_RCVD, MT_TCP_SYN_SENT, M
 /* Callbacks run synchronously inside mt_input / mt_tick / the API call that caused them.
  * The ICMP arg is (type<<8)|code; DATA's arg is the number of bytes just queued. */
 typedef void (*mt_tcp_cb)(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user);
-/* buf is caller-owned (any alignment, valid until release): send ring = buflen/4, receive ring
- * = the rest. NULL if no free TCB or buflen < 4096. The TCB starts CLOSED. */
+/* buf is caller-owned (any alignment, valid until release) and is entirely the receive ring
+ * (the advertised window is its free space, at most 65535). NULL if no free TCB or
+ * buflen < 512 (MacTCP's TCPCreate minimum of 4096 is the glue's to enforce). Send data is not
+ * buffered here: see mt_tcp_send_segs. The TCB starts CLOSED. */
 mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, void *user);
 /* Active open: sends the SYN before returning. lport 0 = ephemeral. MT_ERR_STATE unless CLOSED,
  * MT_ERR_INUSE if the 4-tuple is taken, MT_ERR_NOROUTE / MT_ERR_UNCONFIGURED / MT_ERR_INVAL. */
@@ -211,21 +220,30 @@ typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
   uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms; } mt_tcp_info;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
 
-/* Data transfer. Send/receive rings are the two halves of the buffer given to mt_tcp_create.
- * Latency rules: a send with nothing unacked leaves before mt_tcp_send returns; in-order data
- * is readable (and DATA fired) before the mt_input that delivered it returns. */
-/* Copies into the send ring and transmits what the policy allows before returning. Returns
- * the bytes accepted (< len when the ring is full; SEND_SPACE then fires once ACKs free
- * room), or MT_ERR_STATE unless ESTABLISHED / CLOSE_WAIT. `push` also disables Nagle's hold
- * for this data; `urgent` marks everything up to the end of this data as urgent. */
-int32_t  mt_tcp_send(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
-                     uint32_t now);
+/* Data transfer. Latency rules: a send with nothing unacked leaves before mt_tcp_send_segs
+ * returns; in-order data is readable (and DATA fired) before the mt_input that delivered it
+ * returns. */
+#define MT_SEGS_MAX 8     /* segments per send request (MacTCP WDS entries) */
+#define MT_SENDQ_MAX 2    /* send requests queued per connection (FIFO) */
+typedef struct { const uint8_t *p; uint16_t len; } mt_seg;   /* any alignment; len 0 = skipped */
+/* status: MT_OK once every byte of the request is acknowledged by the peer, MT_ERR_ABORTED if
+ * the connection terminated first (the TERMINATE event follows the done callbacks). */
+typedef void (*mt_send_done_cb)(void *ud, int status);
+/* Queue a send request: the bytes of segs[0..nsegs) in order, sent from caller memory (see the
+ * embedder contract). Requests continue one byte stream in FIFO order and complete in order;
+ * `done` (may be NULL) fires once per request. `push` lets a sub-MSS segment that reaches the
+ * end of this request go out while data is in flight (Nagle otherwise holds it); `urgent` marks
+ * everything up to the end of this request as urgent. Transmits what the policy allows before
+ * returning. MT_OK, MT_ERR_INVAL (segs NULL, nsegs 0 or > MT_SEGS_MAX, a non-empty segment with a
+ * NULL pointer, or 0 bytes in total), MT_ERR_STATE unless ESTABLISHED / CLOSE_WAIT, MT_ERR_BUSY
+ * when MT_SENDQ_MAX requests are already queued. */
+int      mt_tcp_send_segs(mt_tcp *t, const mt_seg *segs, uint8_t nsegs, int push, int urgent,
+                          mt_send_done_cb done, void *ud, uint32_t now);
 uint32_t mt_tcp_recv(mt_tcp *t, uint8_t *dst, uint32_t max, uint32_t now);   /* copy out + consume */
 /* Contiguous run of received data starting `off` bytes in (0 if none); *p points into the ring. */
 uint32_t mt_tcp_peek(mt_tcp *t, uint32_t off, const uint8_t **p);
 /* Drop n received bytes; sends a window update when the window reopens meaningfully. */
 void     mt_tcp_consume(mt_tcp *t, uint32_t n, uint32_t now);
-uint32_t mt_tcp_send_free(const mt_tcp *t);
 /* 1 if unread data precedes the urgent mark; *bytes_to_mark = bytes still to read up to it. */
 int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
 

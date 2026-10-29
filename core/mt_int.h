@@ -96,8 +96,20 @@ struct mt_udp {
 
 /* ---- TCP (mt_tcp.c lifecycle + input, mt_tcp_out.c segment output) ----
  * TCBs live in an arena array (lim.max_tcp; used == 0 is a free slot). Sequence variables follow
- * RFC 793. The send ring holds bytes from snd_una on (unacked first, then unsent); the FIN, once
- * sent, occupies the last sequence number but no ring byte. Fields are ordered hot first. */
+ * RFC 793. Fields are ordered hot first.
+ * Send queue: up to MT_SENDQ_MAX caller requests (mt_tcp_send_segs), FIFO, holding the bytes from
+ * snd_una on (unacked first, then unsent) in caller memory; nothing is copied until a segment is
+ * built. `left` counts a request's bytes not yet acknowledged; a request with left == 0 is
+ * complete and waits at the head only until its done callback is fired (same call). The cursor
+ * (sq_idx, sq_off) is the position of snd_una inside the first request with left > 0 (0, 0 if
+ * none). The FIN, once sent, occupies the last sequence number but no queued byte. */
+typedef struct {
+    const mt_seg *segs;       /* the caller's segment array (read-only) */
+    mt_send_done_cb done;
+    void *ud;
+    uint32_t left;            /* bytes not yet acknowledged */
+    uint8_t nsegs, push;
+} mt_sendreq;
 enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] slots / tmask bits */
 #define MT_TF_ACKNOW   0x01u   /* an ACK is owed: mt_tcp_output sends one if nothing carries it */
 #define MT_TF_FINQ     0x02u   /* app closed: send FIN after the queued data */
@@ -107,8 +119,7 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
 /* flags2 */
 #define MT_T2_ACKHALF  0x01u   /* one full-size segment received and not yet ACKed (ack every 2nd) */
-#define MT_T2_PUSHQ    0x02u   /* app pushed: queued data goes out regardless of Nagle */
-#define MT_T2_SNDWANT  0x04u   /* a send was short: fire SEND_SPACE when ACKs free ring space */
+/* 0x02, 0x04: free */
 #define MT_T2_SNDURG   0x08u   /* snd_up is live: segments before it carry URG */
 #define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
 #define MT_T2_RTTING   0x20u   /* rtt_seq/rtt_t0 hold a timed (never retransmitted) segment */
@@ -132,7 +143,7 @@ struct mt_tcp {
     uint32_t snd_una, snd_nxt, snd_wnd, rcv_nxt;
     uint32_t snd_max;         /* highest sequence ever sent (snd_nxt is pulled back to snd_una by
                                * go-back-N recovery; ACKs are valid up to snd_max) */
-    mt_ring sndq, rcvq;
+    mt_ring rcvq;             /* the whole mt_tcp_create buffer */
     uint32_t snd_wl1, snd_wl2, iss, irs;
     uint32_t ooo_hi;          /* end of the highest out-of-order segment seen (valid while MT_T2_GAP) */
     uint32_t rcv_adv;         /* right edge of the window last advertised (receiver SWS) */
@@ -149,6 +160,9 @@ struct mt_tcp {
     mt_ip4 rip, frip;         /* peer; listen filter */
     mt_tcp_cb cb;
     void *user;
+    mt_sendreq sq[MT_SENDQ_MAX];   /* send queue, FIFO (see above) */
+    uint16_t sq_off;               /* cursor: byte offset of snd_una in segs[sq_idx] */
+    uint8_t sq_idx, sq_n;          /* cursor segment index; requests queued (incl. completed ones) */
     uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
     uint16_t mss;
     uint8_t state, flags, flags2, tmask, used, dupacks;
@@ -341,9 +355,10 @@ void mt_tcp_output(mt_tcp *t, uint32_t now);
  * `commit` the advertised edge is recorded. Never shrinks an advertised window. */
 uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit);
 /* Build and send one segment of t: seq, flags (ACK is added/ack filled from rcv_nxt when the
- * MT_TH_ACK bit is set), n payload bytes copied from the send ring at offset off. */
+ * MT_TH_ACK bit is set), n payload bytes copied (and checksummed in the same pass) from the send
+ * queue, starting off bytes past snd_una. */
 void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);
-/* Retransmit the first unacked segment (SYN, SYN-ACK, data from the ring, or FIN). */
+/* Retransmit the first unacked segment (SYN, SYN-ACK, data from the send queue, or FIN). */
 void mt_tcp_rexmit(mt_tcp *t, uint32_t now);
 /* Zero-window probe: one byte of the first unsent data (does not advance snd_nxt). */
 void mt_tcp_probe(mt_tcp *t, uint32_t now);
@@ -358,6 +373,10 @@ static inline uint32_t mt_tcp_rto_base(const mt_tcp *t) {
 void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
                      uint32_t ack, uint8_t flags, uint32_t now);
 uint16_t mt_tcp_local_mss(const mt_stack *s);
+/* Bytes queued from snd_una on (unacked + unsent data; completed requests hold 0). */
+static inline uint32_t mt_tcp_sq_total(const mt_tcp *t) {
+    return t->sq_n == 0 ? 0u : t->sq_n == 1 ? t->sq[0].left : t->sq[0].left + t->sq[1].left;
+}
 static inline uint32_t mt_tcp_pseudo(mt_ip4 src, mt_ip4 dst, uint16_t len) {
     return (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + 6u + len;
 }

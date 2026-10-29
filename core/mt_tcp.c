@@ -9,17 +9,18 @@
  * processed segment and the peer is answered first. TERMINATE paths fire inline and return. */
 
 #define TCP_HDR 20u
-#define TCP_MIN_BUF 4096u
+#define TCP_MIN_BUF 512u           /* MacTCP's TCPCreate minimum (4096) is enforced by the glue */
 #define TCP_EPH_BASE 49152u
 #define TCP_TW_MS 2000u            /* TIME_WAIT: short, keeps TCBs available on a 16-slot machine */
 #define TCP_ULP_DEFAULT_S 120u
 #define TCP_MSS_DEFAULT 536u
 #define TCP_MSS_MIN 64u
 
-/* 16 TCBs must fit the 16 KB stack budget: ~180 bytes with 32-bit pointers. */
+/* 16 TCBs must fit the 16 KB stack budget: ~210 bytes with 32-bit pointers. */
 typedef char mt_tcp_size_ok[sizeof(struct mt_tcp) <= 300u ? 1 : -1];
+typedef char mt_sendq_two[MT_SENDQ_MAX == 2 ? 1 : -1];   /* mt_tcp_sq_total, push_end assume 2 */
 
-enum { EV_EST = 1, EV_DATA = 2, EV_CLOSING = 4, EV_SPACE = 8, EV_URG = 16 };
+enum { EV_EST = 1, EV_DATA = 2, EV_CLOSING = 4, EV_URG = 16 };
 
 typedef struct {
     const uint8_t *data;
@@ -47,21 +48,68 @@ static int is_sync(unsigned st) {      /* a SYN-ACK has been sent or received: R
            st == MT_TCP_LAST_ACK;
 }
 
+/* Fire done for the send requests at the head of the queue, in order: completed ones (left == 0)
+ * with MT_OK, and with `all` the rest too, with MT_ERR_ABORTED. Each entry is popped before its
+ * callback runs; a callback may queue (appended behind), abort (which empties the queue) or
+ * release (which clears it silently), so the loop re-reads the queue every time. */
+static void sq_complete(mt_tcp *t, int all) {
+    while (t->sq_n && (all || t->sq[0].left == 0)) {
+        mt_send_done_cb done = t->sq[0].done;
+        void *ud = t->sq[0].ud;
+        int st = t->sq[0].left == 0 ? MT_OK : MT_ERR_ABORTED;
+        t->sq[0] = t->sq[1];
+        t->sq_n--;
+        if (st != MT_OK) {                                 /* an aborted head held the cursor */
+            t->sq_idx = 0;
+            t->sq_off = 0;
+        }
+        if (done) done(ud, st);
+    }
+}
+
+/* n data bytes were acknowledged (n never exceeds mt_tcp_sq_total): advance the cursor across
+ * segments (zero-length ones are skipped), marking requests complete (left = 0) in order. Bounded
+ * by MT_SENDQ_MAX * MT_SEGS_MAX steps. */
+static void sq_ack(mt_tcp *t, uint32_t n) {
+    uint8_t r;
+    for (r = 0; n && r < t->sq_n; r++) {
+        mt_sendreq *q = &t->sq[r];
+        if (q->left == 0) continue;
+        if (n < q->left) {
+            uint32_t off = (uint32_t)t->sq_off + n;
+            uint8_t i = t->sq_idx;
+            q->left -= n;
+            while (i < q->nsegs && off >= q->segs[i].len) { off -= q->segs[i].len; i++; }
+            t->sq_idx = i;
+            t->sq_off = (uint16_t)off;
+            return;
+        }
+        n -= q->left;
+        q->left = 0;
+        t->sq_idx = 0;
+        t->sq_off = 0;
+    }
+}
+
 static void tcp_term(mt_tcp *t, mt_term_reason r) {
+    uint8_t g;
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
     t->tmask = 0;
     mt_tcp_set_state(t, MT_TCP_CLOSED);
     mt_log(t->st, MT_LOG_TCP_TERM, (uint8_t)r, t->lport);
-    t->gen++;
-    fire(t, MT_TCP_EV_TERMINATE, r);
+    g = ++t->gen;
+    sq_complete(t, 1);                 /* pending sends complete first (MacTCP order), then the ASR */
+    if (t->gen == g) fire(t, MT_TCP_EV_TERMINATE, r);
 }
 
 /* Reset connection variables and rings for a new open/listen. */
 static void conn_reset(mt_tcp *t) {
-    mt_ring_init(&t->sndq, t->sndq.base, t->sndq.size);
     mt_ring_init(&t->rcvq, t->rcvq.base, t->rcvq.size);
+    t->sq_n = 0;                     /* already empty: every way to CLOSED completes the queue */
+    t->sq_idx = 0;
+    t->sq_off = 0;
     t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
     t->snd_wl1 = t->snd_wl2 = t->iss = t->irs = 0;
     t->tmask = 0;
@@ -92,7 +140,6 @@ static mt_ip4 nexthop(const mt_stack *s, mt_ip4 rip) {
 mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, void *user) {
     mt_tcp *t = NULL;
     uint16_t i;
-    uint32_t sq;
     uint8_t gen;
     if (!buf || buflen < TCP_MIN_BUF) return NULL;
     for (i = 0; i < s->lim.max_tcp; i++)
@@ -101,9 +148,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     gen = (uint8_t)(t->gen + 1u);
     memset(t, 0, sizeof *t);
     t->gen = gen;
-    sq = buflen / 4u;
-    mt_ring_init(&t->sndq, buf, sq);
-    mt_ring_init(&t->rcvq, buf + sq, buflen - sq);
+    mt_ring_init(&t->rcvq, buf, buflen);
     t->st = s;
     t->cb = cb;
     t->user = user;
@@ -254,7 +299,7 @@ void mt_tcp_release(mt_tcp *t) {
 }
 
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
-    uint32_t sent = 0;
+    uint32_t sent = 0, q = mt_tcp_sq_total(t);
     memset(i, 0, sizeof *i);
     i->state = (mt_tcp_state)t->state;
     i->lip = t->st->cfg.addr;
@@ -264,7 +309,7 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     if (t->state >= MT_TCP_ESTABLISHED && t->state != MT_TCP_TIME_WAIT) {
         sent = t->snd_max - t->snd_una - ((t->flags & MT_TF_FINSENT) ? 1u : 0u);
         i->unacked = sent;
-        i->send_queued = t->sndq.used > sent ? t->sndq.used - sent : 0u;
+        i->send_queued = q > sent ? q - sent : 0u;
     }
     i->rcv_avail = t->rcvq.used;
     i->snd_wnd = t->snd_wnd;
@@ -275,20 +320,37 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
 
 /* ---- Data transfer API ---- */
 
-int32_t mt_tcp_send(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
-                    uint32_t now) {
-    uint32_t n;
+int mt_tcp_send_segs(mt_tcp *t, const mt_seg *segs, uint8_t nsegs, int push, int urgent,
+                     mt_send_done_cb done, void *ud, uint32_t now) {
+    mt_sendreq *q;
+    uint32_t len = 0;
+    uint8_t i;
+    if (!segs || nsegs == 0 || nsegs > MT_SEGS_MAX) return MT_ERR_INVAL;
+    for (i = 0; i < nsegs; i++) {
+        if (segs[i].len && !segs[i].p) return MT_ERR_INVAL;
+        len += segs[i].len;
+    }
+    if (len == 0) return MT_ERR_INVAL;
     if (t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_CLOSE_WAIT) return MT_ERR_STATE;
+    if (t->sq_n >= MT_SENDQ_MAX) return MT_ERR_BUSY;
     t->tnow = now;
-    n = mt_ring_write(&t->sndq, p, len);
-    if (n < len) t->flags2 |= MT_T2_SNDWANT;               /* SEND_SPACE owed once ACKs free room */
-    if (push) t->flags2 |= MT_T2_PUSHQ;                    /* disables the Nagle hold */
-    if (urgent && n) {
-        t->snd_up = t->snd_una + t->sndq.used;             /* just past the last queued byte */
+    if (mt_tcp_sq_total(t) == 0) {                         /* this request holds snd_una */
+        t->sq_idx = 0;
+        t->sq_off = 0;
+    }
+    q = &t->sq[t->sq_n++];
+    q->segs = segs;
+    q->nsegs = nsegs;
+    q->push = (uint8_t)(push != 0);
+    q->done = done;
+    q->ud = ud;
+    q->left = len;
+    if (urgent) {
+        t->snd_up = t->snd_una + mt_tcp_sq_total(t);       /* just past the last queued byte */
         t->flags2 |= MT_T2_SNDURG;
     }
     mt_tcp_output(t, now);                                 /* leaves before we return if allowed */
-    return (int32_t)n;
+    return MT_OK;
 }
 
 /* Receive buffer space was freed by the app: tell the peer if the window reopens meaningfully
@@ -325,8 +387,6 @@ uint32_t mt_tcp_recv(mt_tcp *t, uint8_t *dst, uint32_t max, uint32_t now) {
 uint32_t mt_tcp_peek(mt_tcp *t, uint32_t off, const uint8_t **p) {
     return mt_ring_peek(&t->rcvq, off, p);
 }
-
-uint32_t mt_tcp_send_free(const mt_tcp *t) { return mt_ring_free(&t->sndq); }
 
 int mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark) {
     uint32_t rd = t->rcv_nxt - t->rcvq.used;
@@ -815,11 +875,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         uint32_t acked = g->ack - t->snd_una, n = acked;
         int fa = (t->flags & MT_TF_FINSENT) && g->ack == t->snd_max;
         n -= (uint32_t)fa;
-        mt_ring_consume(&t->sndq, n);
-        if (n && (t->flags2 & MT_T2_SNDWANT)) {            /* a short send is waiting for room */
-            t->flags2 &= (uint8_t)~MT_T2_SNDWANT;
-            ev |= EV_SPACE;
-        }
+        sq_ack(t, n);                                      /* done callbacks fire below (out:) */
         t->snd_una = g->ack;
         if (mt_seq_lt(t->snd_nxt, g->ack)) t->snd_nxt = g->ack;   /* go-back-N: peer had more */
         if ((t->flags2 & MT_T2_SNDURG) && mt_seq_ge(g->ack, t->snd_up))
@@ -832,7 +888,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             } else if (t->state == MT_TCP_CLOSING) {
                 enter_time_wait(t, now);
             } else if (t->state == MT_TCP_LAST_ACK) {
-                tcp_term(t, MT_TERM_ULP_CLOSE);
+                tcp_term(t, MT_TERM_ULP_CLOSE);            /* fires the completed sends' done first */
                 return;
             }
         }
@@ -896,15 +952,19 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
     }
 out:
     /* Data events run before the ACK goes out so a reply from the callback carries it. Other
-     * work (ACK, window, queued data) is sent first. A callback may abort/release/re-listen:
-     * gen changes and the rest of the batch is stale. */
+     * work (ACK, window, queued data) is sent first. Completed sends are reported first, in order
+     * (sq_complete copes with callbacks that queue, abort or release). A callback may
+     * abort/release/re-listen: gen changes and the rest of the batch is stale. */
     if (!(ev & EV_DATA)) mt_tcp_output(t, now);
+    if (t->sq_n && t->sq[0].left == 0) {
+        sq_complete(t, 0);
+        if (t->gen != g0) return;
+    }
     if (ev & EV_EST) fire(t, MT_TCP_EV_ESTABLISHED, 0);
     if ((ev & EV_URG) && t->gen == g0)
         fire(t, MT_TCP_EV_URGENT, t->rcv_up - (t->rcv_nxt - t->rcvq.used));
     if ((ev & EV_DATA) && t->gen == g0) fire(t, MT_TCP_EV_DATA, dacc);
     if ((ev & EV_CLOSING) && t->gen == g0) fire(t, MT_TCP_EV_CLOSING, 0);
-    if ((ev & EV_SPACE) && t->gen == g0) fire(t, MT_TCP_EV_SEND_SPACE, mt_ring_free(&t->sndq));
     if ((ev & EV_DATA) && t->gen == g0) mt_tcp_output(t, now);
 }
 

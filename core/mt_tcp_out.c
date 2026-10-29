@@ -2,9 +2,9 @@
 #include "mt_int.h"
 
 /* TCP segment output. Every segment is built in place at mt_ip_payload(s) and sent before
- * the caller returns; payload bytes are copied out of the send ring and checksummed in one
- * pass (mt_cksum_copy). All wire fields go through mt_rd/mt_wr (txbuf has no alignment
- * guarantee for the 16/32-bit fields). */
+ * the caller returns; payload bytes are copied straight out of the caller's send segments and
+ * checksummed in one pass (mt_cksum_copy); caller memory is only ever read. All wire fields go
+ * through mt_rd/mt_wr (txbuf has no alignment guarantee for the 16/32-bit fields). */
 
 #define TCP_HDR 20u
 #define TCP_HDR_SYN 24u            /* header + MSS option */
@@ -58,20 +58,47 @@ void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, ui
     finish(s, rip, hl, 0, 0, now);
 }
 
-/* Ones-complement sum of the two ring runs holding n bytes at offset off, copied to dst.
- * The second run starts at an odd stream offset when the first run is odd, so its sum is
- * byte-swapped before being added (mt_cksum_add's chaining rule). */
-static uint32_t copy_ring(const mt_ring *r, uint32_t off, uint8_t *dst, uint32_t n) {
-    const uint8_t *p;
-    uint32_t c1 = mt_ring_peek(r, off, &p), sum, s2;
-    if (c1 > n) c1 = n;
-    sum = mt_cksum_copy(0, dst, p, c1);
-    if (n > c1) {
-        mt_ring_peek(r, off + c1, &p);
-        s2 = mt_cksum_copy(0, dst + c1, p, n - c1);
-        sum += (c1 & 1u) ? mt_cksum_odd(s2) : s2;
+/* Copy n queued bytes starting off bytes past snd_una to dst and return their ones-complement
+ * sum. The walk starts at the cursor (first request with bytes left), skips off bytes, then copies
+ * run by run across segment and request boundaries; a run that lands at an odd offset of the
+ * payload has its sum byte-swapped (mt_cksum_add's chaining rule). Zero-length segments are
+ * skipped. Bounded by MT_SENDQ_MAX * MT_SEGS_MAX steps; never reads past the queue. */
+static uint32_t copy_segs(const mt_tcp *t, uint32_t off, uint8_t *dst, uint32_t n) {
+    uint8_t r = (t->sq_n && t->sq[0].left == 0) ? 1u : 0u, i = t->sq_idx;
+    const mt_sendreq *q = &t->sq[r];
+    uint32_t pos = (uint32_t)t->sq_off + off, sum = 0, done = 0;
+    if (r >= t->sq_n) return 0;
+    while (n) {
+        uint32_t l, c, part;
+        if (i >= q->nsegs) {                               /* next request continues the stream */
+            if (++r >= t->sq_n) break;
+            q = &t->sq[r];
+            i = 0;
+            continue;
+        }
+        l = q->segs[i].len;
+        if (pos >= l) {
+            pos -= l;
+            i++;
+            continue;
+        }
+        c = l - pos;
+        if (c > n) c = n;
+        part = mt_cksum_copy(0, dst + done, q->segs[i].p + pos, c);
+        sum += (done & 1u) ? mt_cksum_odd(part) : part;
+        done += c;
+        n -= c;
+        pos = 0;
+        i++;
     }
     return sum;
+}
+
+/* Offset from snd_una just past the last pushed request (0 if none is queued). */
+static uint32_t push_end(const mt_tcp *t) {
+    if (t->sq_n == 2 && t->sq[1].push) return t->sq[0].left + t->sq[1].left;
+    if (t->sq_n && t->sq[0].push) return t->sq[0].left;
+    return 0;
 }
 
 uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit) {
@@ -98,7 +125,7 @@ void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t 
     }
     hl = build_hdr(s, t->lport, t->rport, seq, t->rcv_nxt, flags,
                    (uint16_t)mt_tcp_rcv_window(t, 1), up);
-    if (n) psum = copy_ring(&t->sndq, off, mt_ip_payload(s) + hl, n);
+    if (n) psum = copy_segs(t, off, mt_ip_payload(s) + hl, n);
     if (flags & MT_TH_ACK) {
         t->flags &= (uint8_t)~MT_TF_ACKNOW;
         t->flags2 &= (uint8_t)~MT_T2_ACKHALF;
@@ -129,17 +156,17 @@ static void arm_persist(mt_tcp *t, uint32_t now) {
  * stays "unsent"); snd_max covers it so an ACK that accepts the byte is valid. */
 void mt_tcp_probe(mt_tcp *t, uint32_t now) {
     uint32_t sent = t->snd_nxt - t->snd_una;
-    if (sent >= t->sndq.used) return;
+    if (sent >= mt_tcp_sq_total(t)) return;
     mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, sent, 1, now);
     if (mt_seq_le(t->snd_max, t->snd_nxt)) t->snd_max = t->snd_nxt + 1u;
 }
 
 /* Recovery model (go-back-N): after an RTO or an ARP resolution the caller pulls snd_nxt back
- * to snd_una; the loop below then resends from the send ring, bounded by min(snd_wnd, cwnd),
- * so a burst of lost segments is refilled ack-clocked instead of one hole per RTO. Anything
+ * to snd_una; the loop below then resends from the send queue (the caller's memory), bounded by
+ * min(snd_wnd, cwnd), so a burst of lost segments is refilled ack-clocked instead of one hole per RTO. Anything
  * with seq < snd_max is a retransmission: it bypasses Nagle and is never timed (Karn). */
 void mt_tcp_output(mt_tcp *t, uint32_t now) {
-    uint32_t sent, unsent, inflight, wnd, n, lim;
+    uint32_t sent, unsent, inflight, wnd, n, lim, total, pe;
     int any = 0, idle;
     t->tnow = now;
     switch (t->state) {
@@ -165,26 +192,27 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
     }
     inflight = t->snd_nxt - t->snd_una;
     idle = t->snd_max == t->snd_una;                      /* nothing unacked at all (Nagle) */
-    sent = inflight > t->sndq.used ? t->sndq.used : inflight;   /* data bytes; a FIN is not in the ring */
-    unsent = t->sndq.used - sent;
+    total = mt_tcp_sq_total(t);
+    sent = inflight > total ? total : inflight;           /* data bytes; a FIN is not queued data */
+    unsent = total - sent;
+    pe = push_end(t);
     lim = t->snd_wnd < t->cwnd ? t->snd_wnd : t->cwnd;
     wnd = lim > inflight ? lim - inflight : 0u;
     while (unsent && wnd) {
         uint8_t fl = MT_TH_ACK;
-        int ok, retx = mt_seq_lt(t->snd_nxt, t->snd_max);
+        int ok, pushed, retx = mt_seq_lt(t->snd_nxt, t->snd_max);
         n = unsent < wnd ? unsent : wnd;
         if (n > t->mss) n = t->mss;
         if (n == 0) break;
-        /* Nagle / sender SWS: a sub-MSS segment goes out when nothing was unacked, or when it
-         * ends the queue and the app pushed (or closed). Otherwise (data in flight, no push) it
-         * waits for the ACK; `idle` is sampled once, so a bulk write from idle goes out whole. */
-        ok = idle || retx || n >= t->mss ||
-             (n == unsent && ((t->flags2 & MT_T2_PUSHQ) || (t->flags & MT_TF_FINQ)));
+        /* Nagle / sender SWS: a sub-MSS segment goes out when nothing was unacked, when it
+         * reaches the end of a pushed request (pe), or when it ends the queue after a close.
+         * Otherwise (data in flight, no push) it waits for the ACK; `idle` is sampled once, so a
+         * bulk write from idle goes out whole. */
+        pushed = pe > sent && pe - sent <= n;
+        ok = idle || retx || n >= t->mss || pushed || (n == unsent && (t->flags & MT_TF_FINQ));
         if (!ok) break;
-        if (n == unsent) {
-            fl |= MT_TH_PSH;
-            if (t->flags & MT_TF_FINQ) fl |= MT_TH_FIN;
-        }
+        if (n == unsent || pushed) fl |= MT_TH_PSH;
+        if (n == unsent && (t->flags & MT_TF_FINQ)) fl |= MT_TH_FIN;
         mt_tcp_xmit(t, t->snd_nxt, fl, sent, n, now);
         if (retx) {
             t->st->stats.tcp_rexmt++;
@@ -207,8 +235,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         any = 1;
         arm_rto(t, now);
     }
-    if (!unsent) t->flags2 &= (uint8_t)~MT_T2_PUSHQ;
-    if (!unsent && (t->flags & MT_TF_FINQ) && t->snd_nxt - t->snd_una <= t->sndq.used &&
+    if (!unsent && (t->flags & MT_TF_FINQ) && t->snd_nxt - t->snd_una <= total &&
         !((t->flags & MT_TF_FINSENT) && t->snd_una == t->snd_max)) {
         int retx = mt_seq_lt(t->snd_nxt, t->snd_max);     /* FIN not in snd_nxt nor acked: (re)send it */
         mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK | MT_TH_FIN, 0, 0, now);
@@ -234,7 +261,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
     if (!any && (t->flags & MT_TF_ACKNOW)) mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, 0, 0, now);
 }
 
-/* Retransmit the first unacked segment (SYN, SYN-ACK, data from the ring, or FIN). */
+/* Retransmit the first unacked segment (SYN, SYN-ACK, data from the send queue, or FIN). */
 void mt_tcp_rexmit(mt_tcp *t, uint32_t now) {
     uint32_t out, data;
     t->tnow = now;
