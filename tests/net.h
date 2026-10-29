@@ -67,6 +67,15 @@ typedef struct {
 /* 1 if f is a well-formed Ethernet+IPv4+TCP frame (checksum_ok says whether it verifies). */
 int view_tcp(const uint8_t *f, uint16_t len, tcpv *v);
 
+/* Send helper over mt_tcp_send_segs: p[0..len) as one request (split into 65535-byte segments,
+ * at most MT_SEGS_MAX), done = NULL. The mt_seg array lives in a per-TCB pool here so it outlives
+ * the call; p must stay valid until the peer ACKs it. Returns len on success, else the
+ * mt_tcp_send_segs error (MT_ERR_INVAL for len 0 or len > 8 * 65535). */
+int32_t tsend(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent, uint32_t now);
+/* Same with a done callback. */
+int32_t tsend_cb(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
+                 mt_send_done_cb done, void *ud, uint32_t now);
+
 /* Records TCP events: (ev, arg) pairs in order. */
 typedef struct { int n; struct { int ev; uint32_t arg; } e[32]; } rec;
 void rec_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user);

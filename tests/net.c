@@ -173,6 +173,51 @@ int view_tcp(const uint8_t *f, uint16_t len, tcpv *v) {
     return 1;
 }
 
+/* Segment arrays for tsend: three per TCB (at most MT_SENDQ_MAX are referenced by queued
+ * requests at any time, so one is always free), keyed by the TCB address. */
+static struct { const mt_tcp *t; mt_seg s[MT_SENDQ_MAX + 1][MT_SEGS_MAX]; } g_segpool[64];
+static unsigned g_segnext;
+
+static mt_seg *seg_slot(const mt_tcp *t) {
+    unsigned i, k, r;
+    for (i = 0; i < 64; i++)
+        if (g_segpool[i].t == t) break;
+    if (i == 64) {
+        i = g_segnext++ & 63u;
+        g_segpool[i].t = t;
+    }
+    for (k = 0; k <= MT_SENDQ_MAX; k++) {
+        int used = 0;
+        for (r = 0; r < t->sq_n; r++) used |= t->sq[r].segs == g_segpool[i].s[k];
+        if (!used) return g_segpool[i].s[k];
+    }
+    return NULL;
+}
+
+int32_t tsend_cb(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
+                 mt_send_done_cb done, void *ud, uint32_t now) {
+    mt_seg *sg = seg_slot(t);
+    uint8_t n = 0;
+    uint32_t off = 0;
+    int r;
+    if (!sg) return MT_ERR_BUSY;
+    while (off < len && n < MT_SEGS_MAX) {
+        uint32_t c = len - off > 65535u ? 65535u : len - off;
+        sg[n].p = p + off;
+        sg[n].len = (uint16_t)c;
+        off += c;
+        n++;
+    }
+    if (off < len) return MT_ERR_INVAL;
+    if (n == 0) { sg[0].p = p; sg[0].len = 0; n = 1; }
+    r = mt_tcp_send_segs(t, sg, n, push, urgent, done, ud, now);
+    return r == MT_OK ? (int32_t)len : r;
+}
+
+int32_t tsend(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent, uint32_t now) {
+    return tsend_cb(t, p, len, push, urgent, NULL, NULL, now);
+}
+
 void rec_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     rec *r = (rec *)user;
     (void)t;

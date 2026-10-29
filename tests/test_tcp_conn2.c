@@ -166,15 +166,14 @@ static void test_zero_window_still_processes_ack(void) {
     memset(&r, 0, sizeof r);
     t = tconn_established(s, &fl, &r, &ps, &ms);
     mt_tcp_get_info(t, &in);
-    T_EQ(mt_ring_write(&t->sndq, (const uint8_t *)"AAAA", 4), 4);
-    mt_tcp_output(t, 5);
+    T_EQ(tsend(t, (const uint8_t *)"AAAA", 4, 0, 0, 5), 4);
     T_EQ(fl.n, 1);
     T_EQ(mt_ring_write(&t->rcvq, junk, mt_ring_free(&t->rcvq)), in.rcv_wnd);
     mt_tcp_get_info(t, &in); T_EQ(in.rcv_wnd, 0); T_EQ(in.unacked, 4);
     inject(s, 23, in.lport, ps, ms + 4, TF_ACK, (const uint8_t *)"xx", 2, 6);
     mt_tcp_get_info(t, &in);
     T_EQ(in.unacked, 0);                            /* the ACK counted */
-    T_EQ(in.rcv_avail, 6144);                       /* the data did not */
+    T_EQ(in.rcv_avail, 8192);                       /* the data did not (whole buffer is the ring) */
     T_EQ(r.n, 1);                                   /* no DATA event */
     T_EQ(fl.n, 2);
     T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_ACK); T_EQ(v.win, 0); T_EQ(v.ack, ps);
@@ -183,7 +182,7 @@ static void test_zero_window_still_processes_ack(void) {
 /* ---- degenerate MTU ---- */
 
 static void mtu_case(uint16_t mtu) {
-    fake_link fl; rec r; tcpv v; mt_tcp_info in; mt_ifconfig c; uint8_t d[1000];
+    fake_link fl; rec r; tcpv v; mt_tcp_info in; mt_ifconfig c; static uint8_t d[1000];
     static uint8_t b[8192];
     mt_stack *s = setup(&fl);
     mt_tcp *t;
@@ -197,8 +196,7 @@ static void mtu_case(uint16_t mtu) {
     inject(s, 23, v.sport, 5000, v.seq + 1, TF_SYN | TF_ACK, NULL, 0, 1);
     T_EQ(t->mss, 64);
     fake_clear(&fl);
-    T_EQ(mt_ring_write(&t->sndq, d, sizeof d), sizeof d);
-    mt_tcp_output(t, 2);                            /* must return */
+    T_EQ(tsend(t, d, sizeof d, 0, 0, 2), sizeof d);   /* must return */
     T_CHECK(fl.n > 0 && fl.n <= 40);
     mt_tcp_get_info(t, &in); T_EQ(in.unacked + in.send_queued, 1000);
 }
@@ -218,7 +216,7 @@ static void rst_in_last_ack(int unacked_data, int expect_reason) {
     T_CHECK(t != NULL);
     mt_tcp_get_info(t, &in);
     inject(s, 23, in.lport, ps, ms, TF_ACK | TF_FIN, NULL, 0, 10);
-    if (unacked_data) T_EQ(mt_tcp_send(t, (const uint8_t *)"abc", 3, 1, 0, 20), 3);
+    if (unacked_data) T_EQ(tsend(t, (const uint8_t *)"abc", 3, 1, 0, 20), 3);
     T_EQ(mt_tcp_close(t, 30), MT_OK);
     mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_LAST_ACK);
     T_EQ(in.unacked, unacked_data ? 3u : 0u);
@@ -246,7 +244,7 @@ static void test_rst_with_unsent_fin_is_abort(void) {
     inject(s, 23, in.lport, ps, ms, TF_ACK | TF_FIN, NULL, 0, 10);       /* peer FIN: CLOSE_WAIT */
     n = mk_tcp(f, T_PEER, 23, T_ME, in.lport, ps + 1, ms, TF_ACK, 0, NULL, 0, NULL, 0);
     mt_input(s, f, n, 11);                                               /* window closes */
-    T_EQ(mt_tcp_send(t, (const uint8_t *)"abc", 3, 1, 0, 12), 3);
+    T_EQ(tsend(t, (const uint8_t *)"abc", 3, 1, 0, 12), 3);
     mt_tick(s, 20000);                                                   /* persist probe: 1 byte */
     mt_tcp_get_info(t, &in);
     T_EQ(in.unacked, 1);

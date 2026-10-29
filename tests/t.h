@@ -24,8 +24,8 @@ static int t_failed;
                 __FILE__, __LINE__, #a, #b, (int)(n)); \
         t_failed = 1; } } while (0)
 
-/* T_MAIN supports at most 16 tests per file. A compile error mentioning
- * T_Ltest_... (or T_L17) means T_LIST/T_N below must be extended.
+/* T_MAIN supports at most 24 tests per file. A compile error mentioning
+ * T_Ltest_... (or T_L25) means T_LIST/T_N below must be extended.
  * t_failed is reset per test; the exit code is nonzero if any test failed or
  * if an argv[1] filter matched no test. */
 #define T_MAIN(...) \
@@ -49,12 +49,12 @@ static int t_failed;
         return t_any ? 1 : 0; \
     }
 
-/* Expand test names to {"name", name} initializers (up to 16 tests per file). */
+/* Expand test names to {"name", name} initializers (up to 24 tests per file). */
 #define T_CAT_(a, b) a##b
 #define T_CAT(a, b) T_CAT_(a, b)
 #define T_ENT(n) {#n, n},
-#define T_N(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,_13,_14,_15,_16,N,...) N
-#define T_LIST(...) T_CAT(T_L, T_N(__VA_ARGS__,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1))(__VA_ARGS__)
+#define T_N(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,_13,_14,_15,_16,_17,_18,_19,_20,_21,_22,_23,_24,N,...) N
+#define T_LIST(...) T_CAT(T_L, T_N(__VA_ARGS__,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1))(__VA_ARGS__)
 #define T_L1(a) T_ENT(a)
 #define T_L2(a,...) T_ENT(a) T_L1(__VA_ARGS__)
 #define T_L3(a,...) T_ENT(a) T_L2(__VA_ARGS__)
@@ -71,5 +71,13 @@ static int t_failed;
 #define T_L14(a,...) T_ENT(a) T_L13(__VA_ARGS__)
 #define T_L15(a,...) T_ENT(a) T_L14(__VA_ARGS__)
 #define T_L16(a,...) T_ENT(a) T_L15(__VA_ARGS__)
+#define T_L17(a,...) T_ENT(a) T_L16(__VA_ARGS__)
+#define T_L18(a,...) T_ENT(a) T_L17(__VA_ARGS__)
+#define T_L19(a,...) T_ENT(a) T_L18(__VA_ARGS__)
+#define T_L20(a,...) T_ENT(a) T_L19(__VA_ARGS__)
+#define T_L21(a,...) T_ENT(a) T_L20(__VA_ARGS__)
+#define T_L22(a,...) T_ENT(a) T_L21(__VA_ARGS__)
+#define T_L23(a,...) T_ENT(a) T_L22(__VA_ARGS__)
+#define T_L24(a,...) T_ENT(a) T_L23(__VA_ARGS__)
 
 #endif

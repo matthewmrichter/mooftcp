@@ -282,7 +282,7 @@ static void test_stats_all_counters_live(void) {
         T_EQ(mt_tcp_listen(tb, 0, 0, 7000), MT_OK);
         T_EQ(mt_tcp_open(ta, PAIR_B_IP, 7000, 0, pair_now(p)), MT_OK);
         for (step = 0; step < 4000 && sent < sizeof big; step++) {
-            int32_t r = mt_tcp_send(ta, big + sent, sizeof big - sent, 0, 0, pair_now(p));
+            int32_t r = tsend(ta, big + sent, sizeof big - sent, 0, 0, pair_now(p));
             if (r > 0) sent += (uint32_t)r;
             pair_run(p, 5);
         }

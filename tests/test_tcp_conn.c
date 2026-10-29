@@ -53,7 +53,7 @@ static void test_active_open(void) {
     T_EQ(v.flags, TF_ACK); T_EQ(v.seq, iss + 1); T_EQ(v.ack, 9001); T_CHECK(v.checksum_ok);
     T_EQ(r.n, 1); T_EQ(r.e[0].ev, MT_TCP_EV_ESTABLISHED);
     mt_tcp_get_info(t, &in);
-    T_EQ(in.state, MT_TCP_ESTABLISHED); T_EQ(in.snd_wnd, 8192); T_EQ(in.rcv_wnd, 6144);
+    T_EQ(in.state, MT_TCP_ESTABLISHED); T_EQ(in.snd_wnd, 8192); T_EQ(in.rcv_wnd, 8192);   /* whole buffer */
     T_EQ(in.rip, T_PEER); T_EQ(in.lip, T_ME);
     T_EQ(mt_get_stats(s)->tcp_active_opens, 1); T_EQ(mt_get_stats(s)->tcp_conns_open, 1);
     mt_tick(s, 100000);
@@ -284,7 +284,7 @@ static void test_tcb_exhaustion(void) {
     memset(&r, 0, sizeof r);
     for (i = 0; i < 16; i++) { t[i] = mt_tcp_create(s, bufs[i], 4096, rec_cb, &r); T_CHECK(t[i] != NULL); }
     T_CHECK(mt_tcp_create(s, bufs[16], 4096, rec_cb, &r) == NULL);
-    T_CHECK(mt_tcp_create(s, bufs[16], 4095, rec_cb, &r) == NULL);   /* too small anyway */
+    T_CHECK(mt_tcp_create(s, bufs[16], 511, rec_cb, &r) == NULL);    /* too small anyway */
     mt_tcp_release(t[5]);
     t[16] = mt_tcp_create(s, bufs[16], 4096, rec_cb, &r);
     T_CHECK(t[16] != NULL);
@@ -389,8 +389,7 @@ static void test_arp_hazard_no_duplicate(void) {
         t2 = tconn_established(s2, &fl2, &r2, &ps, &ms);
         mt_tcp_get_info(t2, &in);
         mt_tick(s2, 700000);                        /* the ARP entry has aged out */
-        T_EQ(mt_ring_write(&t2->sndq, (const uint8_t *)"AAAA", 4), 4);
-        mt_tcp_output(t2, 700000);
+        T_EQ(tsend(t2, (const uint8_t *)"AAAA", 4, 0, 0, 700000), 4);
         T_EQ(fl2.n, 1);                             /* ARP request; segment held */
         T_CHECK(view_arp(fl2.f[0], fl2.len[0], &a));
         n = mk_arp(f, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
@@ -403,11 +402,8 @@ static void test_arp_hazard_no_duplicate(void) {
         inject(s2, 23, in.lport, ps, ms + 4, TF_ACK, NULL, 0, 700010);
         fake_clear(&fl2);
         mt_tick(s2, 1400000);
-        T_EQ(mt_ring_write(&t2->sndq, (const uint8_t *)"BBBB", 4), 4);
-        mt_tcp_output(t2, 1400000);
-        T_EQ(mt_ring_write(&t2->sndq, (const uint8_t *)"CCCC", 4), 4);
-        t2->flags2 |= MT_T2_PUSHQ;                  /* as mt_tcp_send(push=1): Nagle would hold C */
-        mt_tcp_output(t2, 1400000);
+        T_EQ(tsend(t2, (const uint8_t *)"BBBB", 4, 0, 0, 1400000), 4);
+        T_EQ(tsend(t2, (const uint8_t *)"CCCC", 4, 1, 0, 1400000), 4);   /* push: else Nagle holds C */
         T_EQ(fl2.n, 1);                             /* just the ARP request */
         n = mk_arp(f, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
         mt_input(s2, f, n, 1400002);
@@ -418,20 +414,24 @@ static void test_arp_hazard_no_duplicate(void) {
     }
 }
 
-static void test_data_segment_ring_wrap(void) {
-    static const uint32_t heads[4] = {2043, 2042, 2043, 2042};   /* first run 5 or 6 bytes */
+/* One segment built from two caller segments: the first run is 5 or 6 bytes (odd or even
+ * boundary inside the payload), the source address odd or even, total odd or even. */
+static void test_data_segment_split_sources(void) {
+    static const uint16_t first[4] = {5, 6, 5, 6};
     static const uint16_t lens[4] = {1000, 1000, 999, 999};
     int k;
     for (k = 0; k < 4; k++) {
-        fake_link fl; rec r; tcpv v; uint32_t ps, ms; uint8_t d[1000]; uint16_t i;
+        fake_link fl; rec r; tcpv v; uint32_t ps, ms; static uint8_t mem[1002]; uint16_t i;
         mt_stack *s = tstack_new(&fl, T_ME);
         mt_tcp *t;
+        uint8_t *d = mem + (k & 1);                 /* odd source address on alternate cases */
+        static mt_seg sg[2];
         memset(&r, 0, sizeof r);
         t = tconn_established(s, &fl, &r, &ps, &ms);
         for (i = 0; i < 1000; i++) d[i] = (uint8_t)(i * 5 + 1);
-        t->sndq.head = heads[k];                    /* sndq.size is 2048: the data wraps */
-        T_EQ(mt_ring_write(&t->sndq, d, lens[k]), lens[k]);
-        mt_tcp_output(t, 10);
+        sg[0].p = d; sg[0].len = first[k];
+        sg[1].p = d + first[k]; sg[1].len = (uint16_t)(lens[k] - first[k]);
+        T_EQ(mt_tcp_send_segs(t, sg, 2, 0, 0, NULL, NULL, 10), MT_OK);
         T_EQ(fl.n, 1);
         T_CHECK(last_tcp(&fl, &v));
         T_CHECK(v.checksum_ok); T_EQ(v.dlen, lens[k]); T_EQ(v.seq, ms);
@@ -444,4 +444,4 @@ T_MAIN(test_active_open, test_open_refused, test_open_syn_retry_then_fail, test_
        test_listen_filter, test_graceful_close_active, test_fin_with_unread_data,
        test_remote_reset, test_abort_sends_rst, test_release_no_callbacks, test_tcb_exhaustion,
        test_tcp_bad_options, test_tcp_bad_checksum_dropped, test_icmp_unreach_event,
-       test_arp_hazard_no_duplicate, test_data_segment_ring_wrap)
+       test_arp_hazard_no_duplicate, test_data_segment_split_sources)

@@ -13,10 +13,18 @@
  *  - each frame handed to link.tx is valid: Ethernet source = us, IPv4 and TCP/UDP/ICMP
  *    checksums verify, source address = ours, length <= MTU, no port 0, no multicast/zero
  *    destination, ARP frames exactly 60 bytes;
+ *  - every TCP payload byte we transmit equals the pattern byte for its sequence number and port
+ *    (send requests are filled with that pattern), so go-back-N, probes and fast retransmits that
+ *    re-read caller segments across odd segment boundaries are checked byte by byte;
+ *  - send requests (1..8 segments, odd lengths and addresses, zero-length entries, up to two
+ *    queued, invalid ones too) complete exactly once each, in submission order, MT_ERR_ABORTED only
+ *    on a closed TCB; their segments, the canary bytes between them and the mt_seg array are never
+ *    written; refusals (MT_ERR_INVAL / MT_ERR_BUSY / MT_ERR_STATE) match the request and state;
  *  - no callback fires on a freed TCB;
- *  - TCB invariants: rings within bounds, snd_una <= snd_nxt <= snd_max, unacked data never
- *    exceeds the send ring (+1 for the FIN), RTO and PERSIST never both armed, unacked data
- *    always has a timer;
+ *  - TCB invariants: receive ring within bounds, snd_una <= snd_nxt <= snd_max, unacked data
+ *    never exceeds the queued bytes (+1 for the FIN), the send cursor points at the byte at snd_una
+ *    and the bytes left per request add up, no completed request is left un-notified between calls,
+ *    RTO and PERSIST never both armed, unacked data always has a timer;
  *  - a tick that mt_next_deadline said was not due transmits nothing, and a tick that was due
  *    leaves no expired deadline behind. */
 
@@ -43,11 +51,28 @@ typedef struct {
     uint16_t lastlen[8];
     int lastn;
     long ev[9];               /* TCP events seen, by mt_tcp_event */
+    long done_ok, done_abort, busy, two_queued, inval;
 } fz;
+
+/* Send request records: three per fuzzer TCB slot (at most MT_SENDQ_MAX are queued, so one is
+ * always free). Segments are laid out in buf at odd and even offsets with canary bytes between
+ * them; serial orders the requests of a slot so done order can be checked. */
+#define RQ_PER 3
+#define RQ_BUF 2400
+#define CANARY 0xC3u
+typedef struct {
+    int busy, slot;
+    long serial;
+    uint8_t nsegs;
+    mt_seg segs[MT_SEGS_MAX + 1], segs_copy[MT_SEGS_MAX + 1];
+    uint8_t buf[RQ_BUF], copy[RQ_BUF];
+} sreq;
+static sreq g_rq[16][RQ_PER];
+static long g_serial[16], g_next_done[16];
 
 static fz g;
 static uint64_t g_arena[16384 / 8];
-static uint8_t g_tbuf[NT][8192];
+static uint8_t g_tbuf[NT][8192 + 1];
 static uint8_t g_ubuf[NU][2048];
 
 static uint32_t rnd(void) {
@@ -63,6 +88,11 @@ static void bad(const char *what) {
     if (g.bad <= 10) fprintf(stderr, "fuzz seed %u step %ld: %s\n", (unsigned)g.seed, g.step, what);
 }
 
+/* Payload byte for sequence number seq of a connection whose local port is lport. */
+static uint8_t spat(uint32_t seq, uint16_t lport) {
+    return (uint8_t)(((seq * 2654435761u) >> 13) ^ lport ^ (lport >> 8));
+}
+
 /* ---- output verification ---- */
 
 static void verify_l4(const uint8_t *ip, uint16_t tot, mt_ip4 src, mt_ip4 dst) {
@@ -70,8 +100,13 @@ static void verify_l4(const uint8_t *ip, uint16_t tot, mt_ip4 src, mt_ip4 dst) {
     uint16_t pl = (uint16_t)(tot - 20);
     uint32_t ps = (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + pl;
     if (ip[9] == 6) {
+        uint16_t hl = (uint16_t)((p[12] >> 4) << 2), k;
+        uint32_t seq = mt_rd32(p + 4);
         if (mt_cksum_fold(mt_cksum_add(ps + 6, p, pl)) != 0) bad("tcp checksum");
         if (mt_rd16(p) == 0 || mt_rd16(p + 2) == 0) bad("tcp port 0");
+        if (hl < 20 || hl > pl) { bad("tcp header length"); return; }
+        for (k = 0; k < pl - hl; k++)
+            if (p[hl + k] != spat(seq + k, mt_rd16(p))) { bad("tcp payload differs from the caller's bytes"); break; }
     } else if (ip[9] == 17) {
         if (mt_rd16(p + 4) != pl) bad("udp length");
         if (mt_rd16(p + 6) && mt_cksum_fold(mt_cksum_add(ps + 17, p, pl)) != 0) bad("udp checksum");
@@ -140,22 +175,112 @@ static int tslot(const mt_tcp *t) {
     return -1;
 }
 
+/* The request's segments, canaries and segment array must be exactly as submitted. */
+static void rq_verify(const sreq *r) {
+    if (memcmp(r->buf, r->copy, RQ_BUF) != 0) bad("send request memory was written");
+    if (memcmp(r->segs, r->segs_copy, sizeof r->segs) != 0) bad("mt_seg array was written");
+}
+
+static void rq_release(sreq *r) {
+    rq_verify(r);
+    r->busy = 0;
+}
+
+static void tcp_action(mt_tcp *t);
+
+static void send_done(void *ud, int st) {
+    sreq *r = (sreq *)ud;
+    mt_tcp *t;
+    if (!r->busy) { bad("done for a request that is not pending"); return; }
+    if (r->serial != g_next_done[r->slot]) bad("send done out of submission order");
+    g_next_done[r->slot] = r->serial + 1;
+    t = g.t[r->slot];
+    if (st == MT_OK) g.done_ok++;
+    else if (st == MT_ERR_ABORTED) {
+        g.done_abort++;
+        if (t && t->state != MT_TCP_CLOSED) bad("send aborted on a live connection");
+    } else bad("send done with an unknown status");
+    rq_release(r);
+    if (t && t->used && g.cb_depth <= 3 && rn(3) == 0) {   /* re-enter from the done callback */
+        g.cb_depth++;
+        tcp_action(t);
+        g.cb_depth--;
+    }
+}
+
+/* A random send request: 1..8 segments (sometimes 0 or 9 to be refused), lengths from 0 to 1460
+ * (odd ones, empty ones), at odd/even offsets with canaries between them, filled with the payload
+ * pattern for the sequence numbers they will occupy. */
+static void fuzz_send(mt_tcp *t) {
+    int slot = tslot(t), k, r;
+    sreq *q = NULL;
+    uint32_t pos, total = 0, seq0;
+    uint8_t ns, i;
+    int valid_state = t->state == MT_TCP_ESTABLISHED || t->state == MT_TCP_CLOSE_WAIT;
+    if (slot < 0) return;
+    for (k = 0; k < RQ_PER; k++) if (!g_rq[slot][k].busy) { q = &g_rq[slot][k]; break; }
+    if (!q) { bad("no free send record (more than MT_SENDQ_MAX pending)"); return; }
+    ns = (uint8_t)(rn(12) == 0 ? (rn(2) ? 0 : MT_SEGS_MAX + 1) : 1 + rn(MT_SEGS_MAX));
+    memset(q->buf, CANARY, RQ_BUF);
+    memset(q->segs, 0, sizeof q->segs);
+    seq0 = t->snd_una + mt_tcp_sq_total(t);
+    pos = rn(2);
+    for (i = 0; i < ns; i++) {
+        uint32_t len = rn(4) == 0 ? 0 : rn(8) == 0 ? 1460 : rn(300), j;
+        pos += rn(3);                                       /* canary gap (0..2 bytes) */
+        if (pos + len > RQ_BUF) len = pos < RQ_BUF ? RQ_BUF - pos : 0;
+        q->segs[i].p = len || rn(2) ? q->buf + pos : NULL;  /* empty entries may be NULL */
+        q->segs[i].len = (uint16_t)len;
+        for (j = 0; j < len; j++) q->buf[pos + j] = spat(seq0 + total + j, t->lport);
+        pos += len;
+        total += len;
+    }
+    memcpy(q->copy, q->buf, RQ_BUF);
+    memcpy(q->segs_copy, q->segs, sizeof q->segs);
+    q->busy = 1;                                            /* before the call: done may not fire */
+    q->slot = slot;
+    q->nsegs = ns;
+    q->serial = g_serial[slot];
+    k = t->sq_n;
+    r = mt_tcp_send_segs(t, q->segs, ns, (int)rn(2), rn(10) == 0, send_done, q, g.now);
+    if (ns == 0 || ns > MT_SEGS_MAX || total == 0) {
+        if (r != MT_ERR_INVAL) bad("invalid send request not refused with MT_ERR_INVAL");
+        g.inval++;
+    } else if (!valid_state) {
+        if (r != MT_ERR_STATE) bad("send in a non-sending state not refused with MT_ERR_STATE");
+    } else if (k >= MT_SENDQ_MAX) {
+        if (r != MT_ERR_BUSY) bad("third send request not refused with MT_ERR_BUSY");
+        g.busy++;
+    } else if (r != MT_OK) {
+        bad("valid send request refused");
+    }
+    if (r != MT_OK) {
+        rq_release(q);
+        return;
+    }
+    g_serial[slot]++;
+    if (t->used && t->sq_n == MT_SENDQ_MAX) g.two_queued++;
+}
+
 static void drop_tcb(mt_tcp *t) {
-    int i = tslot(t);
-    mt_tcp_release(t);
-    if (i >= 0) g.t[i] = NULL;
+    int i = tslot(t), k;
+    mt_tcp_release(t);                                      /* queued requests: dropped silently */
+    if (i >= 0) {
+        g.t[i] = NULL;
+        for (k = 0; k < RQ_PER; k++)
+            if (g_rq[i][k].busy) rq_release(&g_rq[i][k]);
+        g_next_done[i] = g_serial[i];
+    }
 }
 
 /* One random API call on a live TCB (also used from inside callbacks). */
 static void tcp_action(mt_tcp *t) {
     uint8_t b[600];
+    memset(b, 'u', sizeof b);
     switch (rn(20)) {
-    case 0: case 1: case 2: {
-        uint32_t n = rn(sizeof b);
-        memset(b, 'x', n);
-        mt_tcp_send(t, b, n, (int)rn(2), rn(10) == 0, g.now);
+    case 0: case 1: case 2: case 14:
+        fuzz_send(t);
         break;
-    }
     case 3: case 4: case 5: mt_tcp_recv(t, b, rn(sizeof b), g.now); break;
     case 6: {
         const uint8_t *p;
@@ -227,7 +352,8 @@ static void ensure_objects(void) {
     int i;
     for (i = 0; i < NT; i++) {
         mt_tcp *t = g.t[i];
-        if (!t && rn(4) == 0) t = g.t[i] = mt_tcp_create(g.s, g_tbuf[i], 4096 + rn(4096), tcp_cb, NULL);
+        if (!t && rn(4) == 0)                               /* any size >= 512, odd address */
+            t = g.t[i] = mt_tcp_create(g.s, g_tbuf[i] + rn(2), 512 + rn(8192 - 512), tcp_cb, NULL);
         if (t && t->state == MT_TCP_CLOSED && rn(8) == 0) {
             if (rn(2)) mt_tcp_listen(t, rn(4) ? 0 : PEER, 0, (uint16_t)(rn(2) ? 23 : 21));
             else mt_tcp_open(t, rn(8) ? PEER : T_FAR, (uint16_t)(80 + rn(3)),
@@ -242,17 +368,50 @@ static void ensure_objects(void) {
 
 /* ---- invariants ---- */
 
+static void check_sendq(const mt_tcp *t) {
+    uint32_t q = mt_tcp_sq_total(t), left = 0;
+    uint8_t r, k;
+    if (t->sq_n > MT_SENDQ_MAX) { bad("send queue overflow"); return; }
+    for (r = 0; r < t->sq_n; r++) {
+        if (t->sq[r].left == 0) bad("completed send request left un-notified");
+        left += t->sq[r].left;
+    }
+    if (left != q) bad("send queue byte count");
+    if (t->sq_n) {             /* cursor = the byte at snd_una (possibly after empty entries) */
+        const mt_sendreq *h = &t->sq[0];
+        uint32_t rest = 0;
+        uint8_t ci = t->sq_idx;
+        if (t->sq_off == 0)
+            while (ci < h->nsegs && h->segs[ci].len == 0) ci++;
+        if (ci >= h->nsegs || t->sq_off >= h->segs[ci].len) {
+            bad("send cursor not on a byte");
+            return;
+        }
+        for (k = ci; k < h->nsegs; k++) rest += h->segs[k].len;
+        if (rest - t->sq_off != h->left) bad("send cursor and bytes left disagree");
+        if (h->segs[ci].p[t->sq_off] != spat(t->snd_una, t->lport))
+            bad("send cursor does not point at the byte at snd_una");
+    }
+    if (t->sq_n == 0 && (t->sq_idx || t->sq_off)) bad("send cursor not reset");
+}
+
 static void check_invariants(void) {
     const uint8_t rp = (1u << MT_TT_RTO) | (1u << MT_TT_PERSIST);
     uint16_t i;
     for (i = 0; i < g.s->lim.max_tcp; i++) {
         const mt_tcp *t = &g.s->tcp[i];
         if (!t->used) continue;
-        if (t->sndq.used > t->sndq.size || t->rcvq.used > t->rcvq.size) bad("ring overflow");
+        if (t->rcvq.used > t->rcvq.size) bad("ring overflow");
+        check_sendq(t);
+        if (t->sq_n && t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_CLOSE_WAIT &&
+            t->state != MT_TCP_FIN_WAIT_1 && t->state != MT_TCP_CLOSING &&
+            t->state != MT_TCP_LAST_ACK)
+            bad("send requests queued in a state that cannot send them");
         if (t->state >= MT_TCP_ESTABLISHED) {
             if (mt_seq_gt(t->snd_una, t->snd_nxt) || mt_seq_gt(t->snd_nxt, t->snd_max))
                 bad("snd_una <= snd_nxt <= snd_max violated");
-            if (t->snd_max - t->snd_una > t->sndq.used + 1u) bad("more unacked than the send ring holds");
+            if (t->snd_max - t->snd_una > mt_tcp_sq_total(t) + 1u)
+                bad("more unacked than the send queue holds");
         }
         if ((t->tmask & rp) == rp) bad("RTO and PERSIST both armed");
         if (t->state >= MT_TCP_ESTABLISHED && t->state != MT_TCP_TIME_WAIT &&
@@ -480,6 +639,9 @@ static void fuzz_setup(uint32_t seed) {
     mt_link link;
     mt_ifconfig c;
     memset(&g, 0, sizeof g);
+    memset(g_rq, 0, sizeof g_rq);
+    memset(g_serial, 0, sizeof g_serial);
+    memset(g_next_done, 0, sizeof g_next_done);
     g.seed = seed;
     g.rng = seed * 2654435761u + 1u;
     link.ctx = NULL;
@@ -559,17 +721,28 @@ static void fuzz_seed(uint32_t seed) {
 
 static void test_fuzz_seeds(void) {
     uint32_t seed;
-    long est = 0, data = 0, term = 0, tx = 0;
+    long est = 0, data = 0, term = 0, tx = 0, dok = 0, dab = 0, busy = 0, two = 0, inval = 0;
     for (seed = 1; seed <= NSEEDS; seed++) {
         fuzz_seed(seed);
         est += g.ev[MT_TCP_EV_ESTABLISHED]; data += g.ev[MT_TCP_EV_DATA];
         term += g.ev[MT_TCP_EV_TERMINATE]; tx += g.ntx;
+        dok += g.done_ok; dab += g.done_abort; busy += g.busy; two += g.two_queued;
+        inval += g.inval;
     }
-    /* The fuzzer must actually exercise the stack: connections come up, carry data and die. */
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "est %ld data %ld term %ld tx %ld done ok %ld abort %ld busy %ld two %ld inval %ld\n",
+                est, data, term, tx, dok, dab, busy, two, inval);
+    /* The fuzzer must actually exercise the stack: connections come up, carry data and die;
+     * sends complete and abort, the queue fills to two and refuses a third. */
     T_CHECK(est > 0);
     T_CHECK(data > 0);
     T_CHECK(term > 0);
     T_CHECK(tx > 1000);
+    T_CHECK(dok > 0);
+    T_CHECK(dab > 0);
+    T_CHECK(two > 0);
+    T_CHECK(busy > 0);
+    T_CHECK(inval > 0);
 }
 
 /* A long run whose clock starts just below the 32-bit wrap (the seed picks near-wrap starts for

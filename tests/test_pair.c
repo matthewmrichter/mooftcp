@@ -28,13 +28,19 @@ typedef struct {
 
 static uint8_t pat(uint32_t i, uint8_t salt) { return (uint8_t)(((i * 2654435761u) >> 24) ^ salt); }
 
+static void ep_done(void *ud, int st);
+
+/* Keep the core's send queue full: requests straight from sbuf (zero copy), of varying odd and
+ * even sizes (4096..8191 bytes, so the two queued requests always cover at least the 8 KB the old
+ * send ring held), refilled from the done callback as each one is acknowledged. */
 static void ep_pump(ep *e) {
     while (e->t && e->sent < e->stotal && e->estab) {
-        uint32_t n = e->stotal - e->sent;
+        uint32_t n = e->stotal - e->sent, want = 4096u + (e->sent * 7u) % 4096u;
         int32_t r;
-        if (n > 4096) n = 4096;
-        r = mt_tcp_send(e->t, e->sbuf + e->sent, n, e->sent + n == e->stotal, 0, pair_now(e->p));
-        if (r <= 0) break;
+        if (n > want) n = want;
+        r = tsend_cb(e->t, e->sbuf + e->sent, n, e->sent + n == e->stotal, 0, ep_done, e,
+                     pair_now(e->p));
+        if (r <= 0) break;                         /* MT_ERR_BUSY: both slots in use */
         e->sent += (uint32_t)r;
     }
     if (e->t && e->close_after && !e->closed && e->sent == e->stotal && e->estab) {
@@ -55,6 +61,11 @@ static void ep_drain(ep *e, uint32_t max) {
     }
 }
 
+static void ep_done(void *ud, int st) {
+    ep *e = (ep *)ud;
+    if (st == MT_OK) ep_pump(e);
+}
+
 static void ep_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     ep *e = (ep *)user;
     switch (ev) {
@@ -65,7 +76,6 @@ static void ep_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
         if (e->drain) ep_drain(e, 0);
         if (e->close_on_fin && !e->closed) { e->closed = 1; T_EQ(mt_tcp_close(t, pair_now(e->p)), MT_OK); }
         break;
-    case MT_TCP_EV_SEND_SPACE: ep_pump(e); break;
     case MT_TCP_EV_TERMINATE: e->term = 1; e->reason = (int)arg; break;
     default: break;
     }
@@ -237,23 +247,24 @@ static void test_pair_bulk_lossy(void) {
 }
 
 /* ---- interactive echo ---- */
-typedef struct { pair *p; mt_tcp *t; int echo; uint32_t got, arrive; uint8_t last; } ie;
+typedef struct { pair *p; mt_tcp *t; int echo; uint32_t got, arrive; uint8_t last;
+                 uint8_t eb[3][16]; unsigned ebi; } ie;   /* echo data lives until ACKed */
 
 static void ie_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     ie *e = (ie *)user;
     (void)arg;
     if (ev == MT_TCP_EV_DATA) {
-        uint8_t b[16];
-        uint32_t n = mt_tcp_recv(t, b, sizeof b, pair_now(e->p));
+        uint8_t *b = e->eb[e->ebi++ % 3u];        /* at most 2 queued: the third is free */
+        uint32_t n = mt_tcp_recv(t, b, sizeof e->eb[0], pair_now(e->p));
         e->got += n;
         e->arrive = pair_now(e->p);
         if (n) e->last = b[0];
-        if (e->echo && n) T_EQ(mt_tcp_send(t, b, n, 1, 0, pair_now(e->p)), (long long)n);
+        if (e->echo && n) T_EQ(tsend(t, b, n, 1, 0, pair_now(e->p)), (long long)n);
     }
 }
 
 static void interactive(uint32_t delay) {
-    pair_faults f; pair *p; ie a, b; static uint8_t ba[8192], bb[8192];
+    pair_faults f; pair *p; static ie a, b; static uint8_t ba[8192], bb[8192], bytes[200];
     mt_tcp_info ia;
     int i;
     memset(&f, 0, sizeof f);
@@ -272,7 +283,8 @@ static void interactive(uint32_t delay) {
     for (i = 0; i < 200; i++) {
         uint8_t byte = (uint8_t)(i * 13 + 1);
         uint32_t t0 = pair_now(p), g0 = a.got;
-        T_EQ(mt_tcp_send(a.t, &byte, 1, 1, 0, t0), 1);
+        bytes[i] = byte;                                 /* caller memory until acked */
+        T_EQ(tsend(a.t, &bytes[i], 1, 1, 0, t0), 1);
         if (delay == 0) {
             pair_run(p, 0);
             T_EQ(a.got, g0 + 1);                         /* echoed within this very step */

@@ -5,7 +5,7 @@
 
 /* TCP reliability: RTO, RTT estimation (Karn), congestion control, fast retransmit, go-back-N
  * recovery, persist, ULP timeout, FIN_WAIT_2 timeout, ARP kick, mt_next_deadline. Each test
- * establishes its own connection at now=0 (peer MSS 1460, our rings buflen/4 : rest). */
+ * establishes its own connection at now=0 (peer MSS 1460; the buffer is the receive ring). */
 
 static const uint8_t MSS1460[4] = {2, 4, 0x05, 0xB4};
 static uint16_t g_pwin = 8192;
@@ -80,7 +80,7 @@ static void test_rto_retransmit(void) {
     pat(d, 100);
     {
         SETUP(8192, 8192, NULL, NULL);
-        T_EQ(mt_tcp_send(c.t, d, 100, 1, 0, 10), 100);
+        T_EQ(tsend(c.t, d, 100, 1, 0, 10), 100);
         T_EQ(fl.n, 1);
         T_CHECK(tcp_at(&fl, 0, &v0));
         T_EQ(mt_next_deadline(c.s, 10), 1000);
@@ -104,12 +104,12 @@ static void test_rtt_estimate(void) {
     mt_tcp_info in;
     {
         SETUP(8192, 8192, NULL, NULL);
-        mt_tcp_send(c.t, d, 100, 1, 0, 100);
+        tsend(c.t, d, 100, 1, 0, 100);
         ack_to(&c, c.ms + 100, 150);
         mt_tcp_get_info(c.t, &in);
         T_EQ(in.srtt_ms, 50);
         T_EQ(in.rto_ms, 200);                                    /* srtt + 4*rttvar = 150, clamped */
-        mt_tcp_send(c.t, d, 100, 1, 0, 1000);                    /* second sample: 150 ms */
+        tsend(c.t, d, 100, 1, 0, 1000);                    /* second sample: 150 ms */
         ack_to(&c, c.ms + 200, 1150);
         mt_tcp_get_info(c.t, &in);
         T_EQ(in.srtt_ms, 62);                                    /* 50 + (150 - 50)/8 = 62.5 */
@@ -122,9 +122,9 @@ static void test_karn(void) {
     mt_tcp_info in;
     {
         SETUP(8192, 8192, NULL, NULL);
-        mt_tcp_send(c.t, d, 100, 1, 0, 100);
+        tsend(c.t, d, 100, 1, 0, 100);
         ack_to(&c, c.ms + 100, 150);                             /* srtt 50 */
-        mt_tcp_send(c.t, d, 100, 1, 0, 1000);
+        tsend(c.t, d, 100, 1, 0, 1000);
         mt_tick(c.s, 1200);                                      /* RTO 200: retransmitted */
         T_EQ(fl.n, 3);
         ack_to(&c, c.ms + 200, 1210);                            /* ambiguous: no sample */
@@ -142,7 +142,7 @@ static void test_fast_retransmit(void) {
     {
         SETUP(40000, 20000, NULL, NULL);
         c.t->cwnd = 20000;
-        T_EQ(mt_tcp_send(c.t, d, sizeof d, 1, 0, 10), (int)sizeof d);
+        T_EQ(tsend(c.t, d, sizeof d, 1, 0, 10), (int)sizeof d);
         T_EQ(fl.n, 6);
         fake_clear(&fl);
         ack_to(&c, c.ms + MSS, 20);                              /* segment 1 arrived, 2 lost */
@@ -170,7 +170,7 @@ static void test_cwnd_initial_and_growth(void) {
     tcpv v;
     {
         SETUP(80000, 65535, NULL, NULL);
-        T_EQ(mt_tcp_send(c.t, d, sizeof d, 0, 0, 10), 20000);
+        T_EQ(tsend(c.t, d, sizeof d, 0, 0, 10), 20000);
         T_EQ(fl.n, 3);                                           /* min(4*MSS, max(2*MSS, 4380)) */
         T_CHECK(tcp_at(&fl, 2, &v)); T_EQ(v.dlen, MSS);
         T_EQ(c.t->cwnd, 4380);
@@ -202,7 +202,7 @@ static void test_tcp_persist(void) {
     pat(d, 500);
     {
         SETUP(8192, 0, rec_cb, &r);
-        T_EQ(mt_tcp_send(c.t, d, 500, 1, 0, now), 500);
+        T_EQ(tsend(c.t, d, 500, 1, 0, now), 500);
         T_EQ(fl.n, 0);                                           /* closed window: nothing sent */
         want = 1000;                                             /* persist armed, nothing in flight */
         for (i = 0; i < 9; i++) {
@@ -235,7 +235,7 @@ static void test_persist_ulp(void) {
     {
         SETUP(8192, 0, rec_cb, &r);                              /* a peer that keeps answering */
         mt_tcp_set_ulp_timeout(c.t, 30, 1);
-        mt_tcp_send(c.t, d, 500, 1, 0, now);
+        tsend(c.t, d, 500, 1, 0, now);
         while (now < 200000) {
             now = step(&c, now);
             ack_to(&c, c.ms, now);
@@ -248,7 +248,7 @@ static void test_persist_ulp(void) {
         SETUP(8192, 0, rec_cb, &r);                              /* a peer that went away */
         r.n = 0;
         mt_tcp_set_ulp_timeout(c.t, 30, 1);
-        mt_tcp_send(c.t, d, 500, 1, 0, 0);
+        tsend(c.t, d, 500, 1, 0, 0);
         now = 0;
         while (r.n == 0 && now < 100000) now = step(&c, now);
         T_EQ(now, 30000);
@@ -264,7 +264,7 @@ static void test_ulp_timeout_abort(void) {
         SETUP(8192, 8192, rec_cb, &r);
         r.n = 0;
         mt_tcp_set_ulp_timeout(c.t, 30, 1);
-        mt_tcp_send(c.t, d, 100, 1, 0, 0);
+        tsend(c.t, d, 100, 1, 0, 0);
         while (r.n == 0 && now < 100000) now = step(&c, now);
         T_EQ(now, 30000);
         T_EQ(r.n, 2);
@@ -282,7 +282,7 @@ static void test_ulp_timeout_report_only(void) {
         SETUP(8192, 8192, rec_cb, &r);
         r.n = 0;
         mt_tcp_set_ulp_timeout(c.t, 30, 0);
-        mt_tcp_send(c.t, d, 100, 1, 0, 0);
+        tsend(c.t, d, 100, 1, 0, 0);
         while (now < 30000) now = step(&c, now);
         T_EQ(now, 30000);
         T_EQ(count_ev(&r, MT_TCP_EV_ULP_TIMEOUT), 1);
@@ -303,7 +303,7 @@ static void test_arp_resolved_kicks_retransmit(void) {
     {
         SETUP(8192, 8192, NULL, NULL);
         forget_arp(c.s);
-        mt_tcp_send(c.t, d, 600, 1, 0, 10);                      /* too big to be held for ARP */
+        tsend(c.t, d, 600, 1, 0, 10);                      /* too big to be held for ARP */
         T_EQ(data_frames(&fl, seqs, 16), 0);
         fake_clear(&fl);
         n = mk_arp(rep, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
@@ -315,7 +315,7 @@ static void test_arp_resolved_kicks_retransmit(void) {
     {
         SETUP(8192, 8192, NULL, NULL);
         forget_arp(c.s);
-        mt_tcp_send(c.t, d, 100, 1, 0, 10);                      /* small: held, released by the reply */
+        tsend(c.t, d, 100, 1, 0, 10);                      /* small: held, released by the reply */
         fake_clear(&fl);
         n = mk_arp(rep, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
         mt_input(c.s, rep, n, 50);
@@ -333,7 +333,7 @@ static void test_arp_burst_recovers_fast(void) {
         SETUP(40000, 20000, NULL, NULL);
         c.t->cwnd = 6 * MSS;
         forget_arp(c.s);
-        mt_tcp_send(c.t, d, sizeof d, 1, 0, 10);                 /* 6 big segments, all lost to ARP */
+        tsend(c.t, d, sizeof d, 1, 0, 10);                 /* 6 big segments, all lost to ARP */
         fake_clear(&fl);
         n = mk_arp(rep, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
         mt_input(c.s, rep, n, 100);
@@ -348,8 +348,8 @@ static void test_arp_burst_recovers_fast(void) {
         SETUP(40000, 20000, NULL, NULL);                         /* small first segment is held */
         c.t->cwnd = 6 * MSS;
         forget_arp(c.s);
-        mt_tcp_send(c.t, d, 100, 1, 0, 10);
-        mt_tcp_send(c.t, d, 5 * MSS, 1, 0, 11);
+        tsend(c.t, d, 100, 1, 0, 10);
+        tsend(c.t, d, 5 * MSS, 1, 0, 11);
         fake_clear(&fl);
         n = mk_arp(rep, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);
         mt_input(c.s, rep, n, 100);
@@ -368,7 +368,7 @@ static void test_rto_gobackn_recovers_burst(void) {
     {
         SETUP(40000, 20000, NULL, NULL);
         c.t->cwnd = 6 * MSS;
-        mt_tcp_send(c.t, d, sizeof d, 1, 0, now);
+        tsend(c.t, d, sizeof d, 1, 0, now);
         T_EQ(fl.n, 6);
         fake_clear(&fl);                                         /* the whole burst is lost */
         now = 1010;
@@ -455,7 +455,7 @@ static void test_deadline_reflects_timers(void) {
     mt_tcp_get_info(t1, &i1); mt_tcp_get_info(t2, &i2);
     mt_tcp_get_info(t3, &i3); mt_tcp_get_info(t4, &i4);
     T_CHECK(mt_next_deadline(s, 0) > 100000);                    /* nothing but ARP aging */
-    mt_tcp_send(t1, d, 10, 1, 0, 100);                           /* t1: RTO at 1100 */
+    tsend(t1, d, 10, 1, 0, 100);                           /* t1: RTO at 1100 */
     T_EQ(mt_next_deadline(s, 100), 1000);
     mt_tcp_close(t4, 100);                                       /* t4: -> TIME_WAIT at 2120 */
     n = mk_tcp(f, T_PEER, 23, T_ME, i4.lport, p4, m4 + 1, TF_ACK, 8192, NULL, 0, NULL, 0);
@@ -471,7 +471,7 @@ static void test_deadline_reflects_timers(void) {
     T_EQ(mt_next_deadline(s, 300), 800);
     n = mk_tcp(f, T_PEER, 23, T_ME, i3.lport, p3, m3, TF_ACK, 0, NULL, 0, NULL, 0);
     mt_input(s, f, n, 400);                                      /* t3: zero window, persist at 1400 */
-    mt_tcp_send(t3, d, 50, 1, 0, 400);
+    tsend(t3, d, 50, 1, 0, 400);
     T_EQ(mt_next_deadline(s, 400), 700);                         /* still t1's RTO at 1100 */
     n = mk_tcp(f, T_PEER, 23, T_ME, i1.lport, p1, m1 + 10, TF_ACK, 8192, NULL, 0, NULL, 0);
     mt_input(s, f, n, 450);                                      /* t1 acked: RTO off */
