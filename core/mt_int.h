@@ -123,7 +123,9 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
 #define MT_TCP_RTO_MIN  200u
-#define MT_TCP_FW2_MS   60000u   /* FIN_WAIT_2 idle limit (refreshed by received data) */
+/* FIN_WAIT_2 backstop: 600 s of silence from the peer (any acceptable segment refreshes it).
+ * At expiry it acts like the ULP timeout: ULP_TIMEOUT event, abort only if the abort flag is set. */
+#define MT_TCP_FW2_MS   600000u
 struct mt_tcp {
     mt_stack *st;
     uint32_t snd_una, snd_nxt, snd_wnd, rcv_nxt;

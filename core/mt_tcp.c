@@ -406,8 +406,19 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
         if (!t->used || !t->tmask) continue;
         t->tnow = now;
         if ((t->tmask & (1u << MT_TT_TW)) && !mt_time_before(now, t->tmr[MT_TT_TW])) {
-            /* TIME_WAIT over, or FIN_WAIT_2 idle limit (the peer never sent its FIN) */
-            tcp_term(t, t->state == MT_TCP_FIN_WAIT_2 ? MT_TERM_ULP_TIMEOUT : MT_TERM_ULP_CLOSE);
+            if (t->state == MT_TCP_FIN_WAIT_2) {
+                /* Backstop against TCB exhaustion (MacTCP has no FIN_WAIT_2 timeout): behaves
+                 * like the ULP timeout. */
+                uint8_t g0 = t->gen;
+                tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);
+                fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
+                if (t->gen == g0 && (t->flags & MT_TF_ULPABORT)) {
+                    send_rst(t, now);
+                    tcp_term(t, MT_TERM_ULP_TIMEOUT);
+                }
+                continue;
+            }
+            tcp_term(t, MT_TERM_ULP_CLOSE);                 /* TIME_WAIT over */
             continue;
         }
         if ((t->tmask & (1u << MT_TT_DELACK)) && !mt_time_before(now, t->tmr[MT_TT_DELACK])) {
@@ -747,6 +758,8 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             return;
         }
     }
+    if (t->state == MT_TCP_FIN_WAIT_2 && (t->tmask & (1u << MT_TT_TW)))
+        tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);         /* any acceptable segment: peer is alive */
     if (!(g->fl & MT_TH_ACK)) return;
 
     if (t->state == MT_TCP_SYN_RCVD) {
@@ -785,7 +798,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 mt_tcp_rexmit(t, now);
             }
         }
-    } else {                                               /* new data acknowledged */
+    } else if (mt_seq_gt(g->ack, t->snd_una)) {            /* new data acknowledged (older ACKs: ignored) */
         uint32_t acked = g->ack - t->snd_una, n = acked;
         int fa = (t->flags & MT_TF_FINSENT) && g->ack == t->snd_max;
         n -= (uint32_t)fa;
@@ -831,7 +844,6 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         }
         if (g->acc_n || g->acc_fin) {
             if (g->acc_n) {                                /* commit what mt_tcp_input copied */
-                if (t->state == MT_TCP_FIN_WAIT_2) tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);
                 t->rcvq.used += g->acc_n;
                 t->rcv_nxt += g->acc_n;
                 ev |= EV_DATA;

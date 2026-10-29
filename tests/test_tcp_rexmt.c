@@ -393,27 +393,44 @@ static void test_rto_gobackn_recovers_burst(void) {
 
 static void test_fin_wait2_timeout(void) {
     static uint8_t dd[10];
-    rec r; uint32_t ms;
+    rec r;
     memset(&r, 0, sizeof r);
     {
         SETUP(8192, 8192, rec_cb, &r);
         uint8_t f[100];
         uint16_t n;
-        ms = c.ms;
+        uint32_t ms = c.ms;
+        r.n = 0;
         mt_tcp_close(c.t, 10);
         ack_to(&c, ms + 1, 20);                                  /* our FIN acked -> FIN_WAIT_2 */
         T_EQ(c.t->state, MT_TCP_FIN_WAIT_2);
-        T_EQ(mt_next_deadline(c.s, 20), 60000);
-        /* the peer still sends data: that is not idle */
+        T_EQ(c.t->tmr[MT_TT_TW], 600020);                        /* MT_TCP_FW2_MS after the FIN ack */
+        ack_to(&c, ms + 1, 300000);                              /* a pure ACK / probe refreshes */
         n = mk_tcp(f, T_PEER, 23, T_ME, c.lport, c.ps, ms + 1, TF_ACK | TF_PSH, 8192, NULL, 0,
                    dd, 10);
-        mt_input(c.s, f, n, 30000);
-        mt_tick(c.s, 60020);
+        mt_input(c.s, f, n, 500000);                             /* so does data */
+        mt_tick(c.s, 1000000);
+        T_EQ(count_ev(&r, MT_TCP_EV_ULP_TIMEOUT), 0);
         T_EQ(count_ev(&r, MT_TCP_EV_TERMINATE), 0);
-        mt_tick(c.s, 90000);
-        T_EQ(count_ev(&r, MT_TCP_EV_TERMINATE), 1);
-        T_EQ(r.e[r.n - 1].arg, MT_TERM_ULP_TIMEOUT);
+        mt_tick(c.s, 1100000);                                   /* abort flag set: event, terminate */
+        T_EQ(r.e[r.n - 2].ev, MT_TCP_EV_ULP_TIMEOUT);
+        T_EQ(r.e[r.n - 1].ev, MT_TCP_EV_TERMINATE); T_EQ(r.e[r.n - 1].arg, MT_TERM_ULP_TIMEOUT);
         T_EQ(c.t->state, MT_TCP_CLOSED);
+    }
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, 8192, rec_cb, &r);
+        uint32_t ms = c.ms;
+        r.n = 0;
+        mt_tcp_set_ulp_timeout(c.t, 120, 0);                     /* report only */
+        mt_tcp_close(c.t, 10);
+        ack_to(&c, ms + 1, 20);
+        mt_tick(c.s, 600020);
+        T_EQ(count_ev(&r, MT_TCP_EV_ULP_TIMEOUT), 1);
+        T_EQ(c.t->state, MT_TCP_FIN_WAIT_2);                     /* keeps waiting */
+        mt_tick(c.s, 1200020);
+        T_EQ(count_ev(&r, MT_TCP_EV_ULP_TIMEOUT), 2);
+        T_EQ(count_ev(&r, MT_TCP_EV_TERMINATE), 0);
     }
 }
 
