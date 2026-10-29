@@ -19,6 +19,7 @@ static void arp_discard_held(mt_stack *s, mt_ip4 ip) {
     if (s->pend->len && s->pend->nexthop == ip) {
         s->pend->len = 0;
         s->stats.arp_drops++;
+        MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
     }
 }
 
@@ -27,12 +28,14 @@ static void arp_drop_pending(mt_stack *s, mt_arp_entry *e) {
     int held = s->pend->len && s->pend->nexthop == e->ip;
     if (held) s->pend->len = 0;
     s->stats.arp_drops++;
+    MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
     e->state = MT_ARP_FREE;
 }
 
 /* Frees e if it timed out; returns 1 when it did. */
 static int arp_expired(mt_stack *s, mt_arp_entry *e, uint32_t now) {
     if (e->state == MT_ARP_PENDING && !mt_time_before(now, e->t_stamp + ARP_PENDING_MS)) {
+        mt_log(s, MT_LOG_ARP_FAIL, e->tries, (uint16_t)e->ip);
         arp_drop_pending(s, e);
         return 1;
     }

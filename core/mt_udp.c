@@ -103,21 +103,21 @@ static uint32_t slot_for(mt_udp *u, uint32_t r) {
 void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len,
                   uint32_t now) {
     mt_udp *u;
-    uint16_t ulen, dlen;
+    uint16_t ulen, dlen, why;
     uint32_t r, off, sum = 0;
     uint8_t *rec;
     int checked;
 
-    if (len < UDP_HDR) goto drop;
+    if (len < UDP_HDR) MT_DROP_GOTO(why);
     ulen = mt_rd16(pl + 4);
-    if (ulen < UDP_HDR || ulen > len) goto drop;
+    if (ulen < UDP_HDR || ulen > len) MT_DROP_GOTO(why);
     dlen = (uint16_t)(ulen - UDP_HDR);
     checked = mt_rd16(pl + 6) != 0;
     u = udp_find(s, mt_rd16(pl + 2));
 
     if (!u) {
         if (checked &&
-            mt_cksum_fold(mt_cksum_add(pseudo_sum(src, dst, ulen), pl, ulen)) != 0) goto drop;
+            mt_cksum_fold(mt_cksum_add(pseudo_sum(src, dst, ulen), pl, ulen)) != 0) MT_DROP_GOTO(why);
         s->stats.udp_noport++;
         if (dst == s->cfg.addr) mt_icmp_send_unreach(s, src, dst, UDP_PROTO, pl, ulen, 3, now);
         return;
@@ -125,7 +125,7 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
 
     r = (UDP_HDR + (uint32_t)dlen + 1u) & ~1u;
     off = slot_for(u, r);
-    if (off == 0xFFFFFFFFu) goto drop;
+    if (off == 0xFFFFFFFFu) MT_DROP_GOTO(why);
     rec = u->buf + off;
 
     /* One pass: copy the payload into the record while summing it. The record is only
@@ -133,7 +133,7 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     if (checked) {
         sum = mt_cksum_add(pseudo_sum(src, dst, ulen), pl, UDP_HDR);
         sum = mt_cksum_copy(sum, rec + UDP_HDR, pl + UDP_HDR, dlen);
-        if (mt_cksum_fold(sum) != 0) goto drop;
+        if (mt_cksum_fold(sum) != 0) MT_DROP_GOTO(why);
     } else if (dlen) {
         memcpy(rec + UDP_HDR, pl + UDP_HDR, dlen);
     }
@@ -147,6 +147,7 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     return;
 drop:
     s->stats.udp_drops++;
+    MT_LOG_DROPPED(s, MT_LOGL_UDP, why);
 }
 
 void mt_udp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,

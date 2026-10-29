@@ -26,8 +26,8 @@ typedef struct {
 
 typedef struct { uint8_t max_tcp, max_udp, arp_entries, dns_cache; } mt_limits;
 
-/* Counters. Task 12 appends the remaining fields (ip_*, icmp_*, udp_*, tcp_*)
- * after these; field names follow the plan. */
+/* Counters (all uint32_t, in this order; tests index the struct as an array). tcp_conns_open is
+ * a gauge, the rest only count up (wrapping at 2^32). */
 typedef struct {
     uint32_t eth_in;      /* frames >= 14 bytes addressed to us or broadcast */
     uint32_t eth_out;     /* frames handed to link.tx successfully */
@@ -37,7 +37,7 @@ typedef struct {
     uint32_t arp_drops;   /* unresolved next hops given up on + held frames discarded/replaced */
     uint32_t ip_in;         /* datagrams/fragments accepted by IPv4 input */
     uint32_t ip_out;        /* datagrams handed to IPv4 output (fragmented ones count once) */
-    uint32_t ip_in_drops;   /* IPv4 frames dropped (malformed, not ours, reassembly refusal) */
+    uint32_t ip_in_drops;   /* IPv4 frames dropped (malformed, not ours, reassembly refusal, bad ICMP checksum/size) */
     uint32_t ip_frag_out;   /* fragment frames emitted */
     uint32_t ip_reasm_ok;   /* datagrams reassembled */
     uint32_t ip_reasm_fail; /* reassemblies abandoned (timeout, overlap, overflow, slot busy) */
@@ -50,12 +50,13 @@ typedef struct {
     uint32_t tcp_in;           /* well-formed segments (checksum, header, options ok) */
     uint32_t tcp_out;          /* segments handed to IPv4 output */
     uint32_t tcp_in_drops;     /* malformed / bad checksum / bad options */
-    uint32_t tcp_rexmt;        /* retransmitted segments */
+    uint32_t tcp_rexmt;        /* retransmitted segments (includes fast retransmits) */
+    uint32_t tcp_fast_rexmt;   /* fast retransmits (third duplicate ACK); also in tcp_rexmt */
     uint32_t tcp_active_opens;
     uint32_t tcp_passive_opens;
     uint32_t tcp_resets_in;    /* RSTs that tore a connection down */
     uint32_t tcp_resets_out;   /* RSTs transmitted */
-    uint32_t tcp_conns_open;   /* connections currently established (gauge) */
+    uint32_t tcp_conns_open;   /* connections established and not yet terminated (gauge) */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
@@ -68,6 +69,31 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
 void      mt_set_config(mt_stack *s, const mt_ifconfig *c);
 void      mt_get_config(const mt_stack *s, mt_ifconfig *c);
 const mt_stats *mt_get_stats(const mt_stack *s);
+/* Connections in use for TCPGlobalInfo: TCBs past LISTEN (SYN_SENT .. TIME_WAIT). */
+uint8_t mt_tcp_count_open(const mt_stack *s);
+
+/* ---- Diagnostic log: fixed ring of 128 eight-byte records inside the arena (1024 bytes) ----
+ * Off by default. A record is {t = the stack's clock (ms) when written, code, a, b}.
+ * Writing is O(1), allocation-free and overwrites the oldest record; the core may be entered
+ * from interrupt time provided calls into one stack are serialised (single writer context). A
+ * reader in another context (mt_log_read) is safe against that writer: it never sees a torn
+ * record (a record overwritten while being copied is skipped). Fields by code:
+ *   TCP_STATE a = new mt_tcp_state,      b = local port
+ *   TCP_TERM  a = mt_term_reason,        b = local port
+ *   TCP_REXMT                            b = local port
+ *   DROP      a = layer (MT_LOGL_xxx),     b = source line of the reason in the core sources
+ *   ARP_FAIL  a = requests sent,         b = low 16 bits of the unresolved IP
+ *   DNS_FAIL  a = mt_dns_status,         b = query id */
+typedef struct { uint32_t t; uint8_t code, a; uint16_t b; } mt_logrec;
+enum { MT_LOG_TCP_STATE = 1, MT_LOG_TCP_TERM, MT_LOG_TCP_REXMT, MT_LOG_DROP, MT_LOG_ARP_FAIL,
+       MT_LOG_DNS_FAIL };
+/* MT_LOGL_IP covers ICMP too. */
+enum { MT_LOGL_ETH = 1, MT_LOGL_ARP, MT_LOGL_IP, MT_LOGL_UDP, MT_LOGL_TCP };
+#define MT_LOG_RECS 128u
+void     mt_log_enable(mt_stack *s, int on);   /* default off; records are kept when turned off */
+/* Copy up to max records, oldest first, and consume them. Records overwritten before they
+ * were read are lost; returns the number copied. */
+uint16_t mt_log_read(mt_stack *s, mt_logrec *out, uint16_t max);
 
 /* ICMP echo. The callback fires for each echo reply addressed to us. */
 typedef void (*mt_echo_cb)(void *user, mt_ip4 from, uint16_t id, uint16_t seq,

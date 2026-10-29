@@ -188,6 +188,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         mt_tcp_xmit(t, t->snd_nxt, fl, sent, n, now);
         if (retx) {
             t->st->stats.tcp_rexmt++;
+            mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
             t->flags2 &= (uint8_t)~MT_T2_RTTING;
         } else if (!(t->flags2 & MT_T2_RTTING)) {
             t->flags2 |= MT_T2_RTTING;                    /* time this segment (one at a time) */
@@ -213,6 +214,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK | MT_TH_FIN, 0, 0, now);
         if (retx) {
             t->st->stats.tcp_rexmt++;
+            mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
             t->flags2 &= (uint8_t)~MT_T2_RTTING;
         }
         t->snd_nxt++;
@@ -263,4 +265,5 @@ void mt_tcp_rexmit(mt_tcp *t, uint32_t now) {
     }
     t->flags2 &= (uint8_t)~MT_T2_RTTING;                  /* Karn: nothing in flight is timed now */
     t->st->stats.tcp_rexmt++;
+    mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
 }

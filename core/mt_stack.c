@@ -11,6 +11,7 @@ typedef struct {
     uint32_t tcp;       /* offset of the TCB array */
     uint32_t dns;       /* offset of the DNS state (query slots + rx buffer) */
     uint32_t dcache;    /* offset of the DNS cache */
+    uint32_t log;       /* offset of the diagnostic log ring */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -33,7 +34,8 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off = mt_arena_up(off + (uint32_t)sizeof(mt_dns));
     o->dcache = off;
     off = mt_arena_up(off + (uint32_t)l->dns_cache * (uint32_t)sizeof(mt_dns_cent));
-    /* Later tasks: add their section here (offset = off; off = mt_arena_up(off + bytes);). */
+    o->log = off;
+    off = mt_arena_up(off + MT_LOG_RECS * (uint32_t)sizeof(mt_logrec));
     o->total = off;
 }
 
@@ -74,7 +76,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->dns = (mt_dns *)(void *)(base + lay.dns);
     s->dns->rnd = (seed ^ 0x5DEECE66u) | 1u;
     s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
-    /* Later tasks: point their sections here. */
+    s->log = (mt_logrec *)(void *)(base + lay.log);
     return s;
 }
 
@@ -87,11 +89,55 @@ void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
 void mt_get_config(const mt_stack *s, mt_ifconfig *c) { *c = s->cfg; }
 const mt_stats *mt_get_stats(const mt_stack *s) { return &s->stats; }
 
+uint8_t mt_tcp_count_open(const mt_stack *s) {
+    uint8_t i, n = 0;
+    for (i = 0; i < s->lim.max_tcp; i++)
+        if (s->tcp[i].used && s->tcp[i].state > MT_TCP_LISTEN) n++;
+    return n;
+}
+
+/* ---- Diagnostic log ----
+ * Single writer (the context currently inside the core), any one reader. The writer fills the
+ * record and only then publishes it by advancing log_wr (one 16-bit store); it never touches
+ * log_rd. The reader copies a record and re-checks that the writer has not lapped it, so a
+ * torn record is never returned. No loops, no allocation: O(1) and safe from interrupt time. */
+void mt_log_put(mt_stack *s, uint8_t code, uint8_t a, uint16_t b) {
+    mt_logrec *r = &s->log[s->log_wr & (MT_LOG_RECS - 1u)];
+    r->t = s->now;
+    r->code = code;
+    r->a = a;
+    r->b = b;
+    s->log_wr = (uint16_t)(s->log_wr + 1u);
+}
+
+void mt_log_enable(mt_stack *s, int on) { s->log_on = (uint8_t)(on != 0); }
+
+uint16_t mt_log_read(mt_stack *s, mt_logrec *out, uint16_t max) {
+    uint16_t n = 0;
+    while (n < max) {
+        uint16_t wr = s->log_wr, rd = s->log_rd;
+        if ((uint16_t)(wr - rd) > MT_LOG_RECS) rd = (uint16_t)(wr - MT_LOG_RECS);   /* lapped: skip lost */
+        if (rd == wr) {
+            s->log_rd = rd;
+            break;
+        }
+        out[n] = s->log[rd & (MT_LOG_RECS - 1u)];
+        if ((uint16_t)(s->log_wr - rd) > MT_LOG_RECS) {   /* overwritten while copying: retry newer */
+            s->log_rd = (uint16_t)(s->log_wr - MT_LOG_RECS);
+            continue;
+        }
+        s->log_rd = (uint16_t)(rd + 1u);
+        n++;
+    }
+    return n;
+}
+
 /* ---- Ethernet ---- */
 
 int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len) {
     if (!s->link.tx || s->link.tx(s->link.ctx, frame, len) != 0) {
         s->stats.eth_tx_err++;
+        MT_LOG_DROPPED(s, MT_LOGL_ETH, __LINE__);
         return -1;
     }
     s->stats.eth_out++;
@@ -121,9 +167,13 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
         mt_pending *p = s->pend;
         if (MT_ETH_HDR + payload_len > MT_PEND_MAX) {
             s->stats.arp_drops++;                  /* too big to hold; request already sent */
+            MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
             return 0;
         }
-        if (p->len) s->stats.arp_drops++;          /* older held frame replaced */
+        if (p->len) {                              /* older held frame replaced */
+            s->stats.arp_drops++;
+            MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
+        }
         memcpy(p->frame + 6, s->cfg.mac, 6);
         mt_wr16(p->frame + 12, ethertype);
         memcpy(p->frame + MT_ETH_HDR, s->txbuf + MT_ETH_HDR, payload_len);

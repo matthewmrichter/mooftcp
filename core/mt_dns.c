@@ -394,7 +394,8 @@ typedef struct { mt_dns_cb cb; void *user; mt_dns_result *out; } dns_done;
 
 /* Free the slot and fix up the result; the caller invokes the callback afterwards (so the
  * callback may start new queries). */
-static void dns_take(mt_dns_q *q, mt_dns_status st, dns_done *d) {
+static void dns_take(mt_stack *s, mt_dns_q *q, mt_dns_status st, dns_done *d) {
+    if (st != MT_DNS_OK) mt_log(s, MT_LOG_DNS_FAIL, (uint8_t)st, q->id);
     d->cb = q->cb; d->user = q->user; d->out = q->out;
     if (st != MT_DNS_OK) memset(q->out, 0, sizeof *q->out);
     q->out->status = st;
@@ -423,7 +424,7 @@ static int dns_rx(mt_stack *s, const mt_udp_dgram *g, dns_done *d) {
         q->t0 = s->now;
         if (dns_send(s, q, s->now) == MT_OK) return 0;
     }
-    dns_take(q, st, d);
+    dns_take(s, q, st, d);
     return 1;
 }
 
@@ -452,7 +453,7 @@ void mt_dns_timers(mt_stack *s, uint32_t now) {
         el = now - q->t0;
         if (el >= dns_sched[2]) {
             dns_done d;
-            dns_take(q, MT_DNS_TIMEOUT, &d);
+            dns_take(s, q, MT_DNS_TIMEOUT, &d);
             dns_fire(&d);
         } else if (el >= dns_sched[1] && q->tries < 2u) {
             q->tries = 2u;

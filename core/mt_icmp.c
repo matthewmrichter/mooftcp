@@ -38,12 +38,12 @@ static void icmp_echo_reply(mt_stack *s, mt_ip4 src, const uint8_t *pl, uint16_t
         /* One pass: copy into txbuf while summing the request for verification. */
         out = mt_ip_payload(s);
         t = mt_cksum_copy(0, out, pl, len);
-        if (mt_cksum_fold(t) != 0) { s->stats.ip_in_drops++; return; }
+        if (mt_cksum_fold(t) != 0) { MT_DROP_IP(s); return; }
     } else if (pl == s->reasm->buf) {
         /* Larger than one frame: only reassembled datagrams get here, and the reassembly
          * slot is free again (inactive) while we run, so the reply is rewritten in place. */
         out = s->reasm->buf;
-        if (mt_cksum_fold(mt_cksum_add(0, pl, len)) != 0) { s->stats.ip_in_drops++; return; }
+        if (mt_cksum_fold(mt_cksum_add(0, pl, len)) != 0) { MT_DROP_IP(s); return; }
     } else {
         return;
     }
@@ -81,7 +81,7 @@ void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint1
                    uint32_t now) {
     uint8_t type;
     if (len < ICMP_HDR || dst != s->cfg.addr || !unicast_src(s, src)) {
-        s->stats.ip_in_drops++;
+        MT_DROP_IP(s);
         return;
     }
     type = pl[0];
@@ -89,7 +89,7 @@ void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint1
         icmp_echo_reply(s, src, pl, len, now);
         return;
     }
-    if (mt_cksum_fold(mt_cksum_add(0, pl, len)) != 0) { s->stats.ip_in_drops++; return; }
+    if (mt_cksum_fold(mt_cksum_add(0, pl, len)) != 0) { MT_DROP_IP(s); return; }
     s->stats.icmp_in++;
     switch (type) {
     case ICMP_ECHO_REPLY:

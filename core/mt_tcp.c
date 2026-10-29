@@ -52,7 +52,8 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
     t->tmask = 0;
-    t->state = MT_TCP_CLOSED;
+    mt_tcp_set_state(t, MT_TCP_CLOSED);
+    mt_log(t->st, MT_LOG_TCP_TERM, (uint8_t)r, t->lport);
     t->gen++;
     fire(t, MT_TCP_EV_TERMINATE, r);
 }
@@ -110,7 +111,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     t->flags = MT_TF_ULPABORT;
     t->rto = MT_TCP_RTO_INIT;
     t->mss = TCP_MSS_DEFAULT;
-    t->state = MT_TCP_CLOSED;
+    t->state = MT_TCP_CLOSED;       /* creation is not logged */
     return t;
 }
 
@@ -156,6 +157,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
                 return MT_ERR_INUSE;
         }
     }
+    s->now = now;
     conn_reset(t);
     t->rip = rip;
     t->rport = rport;
@@ -165,7 +167,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
     t->tnow = now;
     t->iss = isn(s, now);
     t->snd_una = t->snd_nxt = t->snd_max = t->iss;   /* SYN goes out below, advancing snd_nxt */
-    t->state = MT_TCP_SYN_SENT;
+    mt_tcp_set_state(t, MT_TCP_SYN_SENT);
     s->stats.tcp_active_opens++;
     mt_tcp_output(t, now);
     return MT_OK;
@@ -180,7 +182,7 @@ int mt_tcp_listen(mt_tcp *t, mt_ip4 rip_filter, uint16_t rport_filter, uint16_t 
     t->rip = 0;
     t->rport = 0;
     t->lport = lport;
-    t->state = MT_TCP_LISTEN;
+    mt_tcp_set_state(t, MT_TCP_LISTEN);
     return MT_OK;
 }
 
@@ -195,7 +197,7 @@ static void back_to_listen(mt_tcp *t) {
     t->tmask = 0;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
-    t->state = MT_TCP_LISTEN;
+    mt_tcp_set_state(t, MT_TCP_LISTEN);
     t->rip = 0;
     t->rport = 0;
     t->lport = t->flport;
@@ -203,9 +205,10 @@ static void back_to_listen(mt_tcp *t) {
 
 int mt_tcp_close(mt_tcp *t, uint32_t now) {
     t->tnow = now;
+    t->st->now = now;
     switch (t->state) {
     case MT_TCP_LISTEN:
-        t->state = MT_TCP_CLOSED;
+        mt_tcp_set_state(t, MT_TCP_CLOSED);
         return MT_OK;
     case MT_TCP_SYN_SENT:
         tcp_term(t, MT_TERM_ULP_CLOSE);
@@ -215,10 +218,10 @@ int mt_tcp_close(mt_tcp *t, uint32_t now) {
         tcp_term(t, MT_TERM_ULP_CLOSE);
         return MT_OK;
     case MT_TCP_ESTABLISHED:
-        t->state = MT_TCP_FIN_WAIT_1;
+        mt_tcp_set_state(t, MT_TCP_FIN_WAIT_1);
         break;
     case MT_TCP_CLOSE_WAIT:
-        t->state = MT_TCP_LAST_ACK;
+        mt_tcp_set_state(t, MT_TCP_LAST_ACK);
         break;
     default:
         return MT_ERR_STATE;
@@ -230,7 +233,8 @@ int mt_tcp_close(mt_tcp *t, uint32_t now) {
 
 void mt_tcp_abort(mt_tcp *t, uint32_t now) {
     t->tnow = now;
-    if (t->state == MT_TCP_LISTEN) { t->state = MT_TCP_CLOSED; return; }
+    t->st->now = now;
+    if (t->state == MT_TCP_LISTEN) { mt_tcp_set_state(t, MT_TCP_CLOSED); return; }
     if (t->state == MT_TCP_CLOSED) return;
     send_rst(t, now);
     tcp_term(t, MT_TERM_ULP_ABORT);
@@ -348,7 +352,7 @@ void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, 
 /* ---- Timers ---- */
 
 static void enter_time_wait(mt_tcp *t, uint32_t now) {
-    t->state = MT_TCP_TIME_WAIT;
+    mt_tcp_set_state(t, MT_TCP_TIME_WAIT);
     tmr_clr(t, MT_TT_RTO);
     tmr_clr(t, MT_TT_DELACK);
     tmr_set(t, MT_TT_TW, now + TCP_TW_MS);
@@ -568,7 +572,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->snd_wl1 = g->seq;
     t->snd_wl2 = t->iss;
     t->flags |= MT_TF_PASSIVE;
-    t->state = MT_TCP_SYN_RCVD;
+    mt_tcp_set_state(t, MT_TCP_SYN_RCVD);
     s->stats.tcp_passive_opens++;
     mt_tcp_output(t, now);                 /* SYN-ACK */
 }
@@ -627,7 +631,7 @@ static void established(mt_tcp *t) {
     t->ca_acc = 0;
     t->dupacks = 0;
     t->recover = t->snd_una - 1u;
-    t->state = MT_TCP_ESTABLISHED;
+    mt_tcp_set_state(t, MT_TCP_ESTABLISHED);
     t->flags |= MT_TF_EST;
     t->st->stats.tcp_conns_open++;
     t->flags &= (uint8_t)~MT_TF_PASSIVE;
@@ -667,7 +671,7 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
         mt_tcp_output(t, now);                             /* ACK (plus queued data) */
         fire(t, MT_TCP_EV_ESTABLISHED, 0);
     } else {                                               /* simultaneous open */
-        t->state = MT_TCP_SYN_RCVD;
+        mt_tcp_set_state(t, MT_TCP_SYN_RCVD);
         mt_tcp_xmit(t, t->iss, MT_TH_SYN | MT_TH_ACK, 0, 0, now);   /* first SYN-ACK */
     }
 }
@@ -800,6 +804,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 t->cwnd = t->ssthresh;
                 t->recover = t->snd_max;
                 t->flags2 |= MT_T2_RECOV;
+                t->st->stats.tcp_fast_rexmt++;
                 mt_tcp_rexmit(t, now);
             }
         }
@@ -819,7 +824,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         ack_progress(t, acked, now);
         if (fa) {
             if (t->state == MT_TCP_FIN_WAIT_1) {
-                t->state = MT_TCP_FIN_WAIT_2;
+                mt_tcp_set_state(t, MT_TCP_FIN_WAIT_2);
                 tmr_set(t, MT_TT_TW, now + MT_TCP_FW2_MS);
             } else if (t->state == MT_TCP_CLOSING) {
                 enter_time_wait(t, now);
@@ -869,8 +874,8 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 t->rcv_nxt++;
                 t->flags |= MT_TF_ACKNOW;
                 ev |= EV_CLOSING;
-                if (t->state == MT_TCP_ESTABLISHED) t->state = MT_TCP_CLOSE_WAIT;
-                else if (t->state == MT_TCP_FIN_WAIT_1) t->state = MT_TCP_CLOSING;
+                if (t->state == MT_TCP_ESTABLISHED) mt_tcp_set_state(t, MT_TCP_CLOSE_WAIT);
+                else if (t->state == MT_TCP_FIN_WAIT_1) mt_tcp_set_state(t, MT_TCP_CLOSING);
                 else enter_time_wait(t, now);
             }
         } else if (dlen || fin) {                          /* a gap or duplicate: duplicate ACK */
@@ -928,11 +933,11 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     seg g;
     mt_tcp *t;
     uint32_t sum;
-    uint16_t hl, sport, dport;
-    if (len < TCP_HDR || dst != s->cfg.addr || src == 0 || src == MT_ETH_BCAST_IP) goto drop;
+    uint16_t hl, sport, dport, why;
+    if (len < TCP_HDR || dst != s->cfg.addr || src == 0 || src == MT_ETH_BCAST_IP) MT_DROP_GOTO(why);
     hl = (uint16_t)((pl[12] >> 4) << 2);
-    if (hl < TCP_HDR || hl > len) goto drop;
-    if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) goto drop;
+    if (hl < TCP_HDR || hl > len) MT_DROP_GOTO(why);
+    if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);
     sport = mt_rd16(pl);
     dport = mt_rd16(pl + 2);
     g.seq = mt_rd32(pl + 4);
@@ -952,7 +957,7 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     if (t) plan(t, &g);
     sum = mt_cksum_add(mt_tcp_pseudo(src, dst, len), pl, hl);
     sum += data_sum(t, &g);
-    if (mt_cksum_fold(sum) != 0) goto drop;
+    if (mt_cksum_fold(sum) != 0) MT_DROP_GOTO(why);
     s->stats.tcp_in++;
     if (!t) {                                              /* no connection: reset the sender */
         if (g.fl & MT_TH_RST) return;
@@ -973,4 +978,5 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     return;
 drop:
     s->stats.tcp_in_drops++;
+    MT_LOG_DROPPED(s, MT_LOGL_TCP, why);
 }

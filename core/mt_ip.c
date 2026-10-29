@@ -29,10 +29,10 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
     uint32_t end = (uint32_t)off + dlen;
     uint32_t u, u0, u1, set = 0;
 
-    if (dlen == 0 || (more && (dlen & 7u))) { s->stats.ip_in_drops++; return; }
+    if (dlen == 0 || (more && (dlen & 7u))) { MT_DROP_IP(s); return; }
     mt_ip_timers(s, now);                      /* lazily expire a stale slot */
     if (end > MT_REASM_MAX) {                  /* never fits: refuse (and kill a matching slot) */
-        s->stats.ip_in_drops++;
+        MT_DROP_IP(s);
         if (r->active && r->src == src && r->id == id && r->proto == proto) reasm_drop(s);
         else s->stats.ip_reasm_fail++;
         return;
@@ -42,7 +42,7 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
         r->t_start = now; r->src = src; r->id = id; r->proto = proto;
         r->got = 0; r->total = 0; r->maxend = 0; r->active = 1;
     } else if (r->src != src || r->id != id || r->proto != proto) {
-        s->stats.ip_in_drops++;                /* slot busy with another datagram */
+        MT_DROP_IP(s);                /* slot busy with another datagram */
         s->stats.ip_reasm_fail++;
         return;
     }
@@ -51,7 +51,7 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
     for (u = u0; u < u1; u++)
         if (r->bitmap[u >> 5] & ((uint32_t)1 << (u & 31u))) set++;
     if (set == u1 - u0 && (more || r->total == end)) {   /* exact duplicate: ignore this frame */
-        s->stats.ip_in_drops++;
+        MT_DROP_IP(s);
         return;
     }
     if (set) goto bad;                                   /* partial overlap */
@@ -72,23 +72,23 @@ static void ip_reasm(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, uint16_
     }
     return;
 bad:
-    s->stats.ip_in_drops++;
+    MT_DROP_IP(s);
     reasm_drop(s);
 }
 
 void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
-    uint16_t ihl, tot, ff;
+    uint16_t ihl, tot, ff, why;
     mt_ip4 dst;
-    if (len < MT_IP_HDR || (ip[0] >> 4) != 4) goto drop;
+    if (len < MT_IP_HDR || (ip[0] >> 4) != 4) MT_DROP_GOTO(why);
     ihl = (uint16_t)((ip[0] & 15u) << 2);
-    if (ihl < MT_IP_HDR || ihl > len) goto drop;
+    if (ihl < MT_IP_HDR || ihl > len) MT_DROP_GOTO(why);
     tot = mt_rd16(ip + 2);
-    if (tot < ihl || tot > len) goto drop;
-    if (mt_cksum_fold(mt_cksum_add(0, ip, ihl)) != 0) goto drop;
+    if (tot < ihl || tot > len) MT_DROP_GOTO(why);
+    if (mt_cksum_fold(mt_cksum_add(0, ip, ihl)) != 0) MT_DROP_GOTO(why);
     dst = mt_rd32(ip + 16);
     if (s->cfg.addr == 0 ||
         (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
-        goto drop;
+        MT_DROP_GOTO(why);
     s->stats.ip_in++;
     ff = mt_rd16(ip + 6);
     if ((ff & 0x3FFFu) == 0) {                                      /* fast path: whole datagram */
@@ -101,6 +101,7 @@ void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
     return;
 drop:
     s->stats.ip_in_drops++;
+    MT_LOG_DROPPED(s, MT_LOGL_IP, why);
 }
 
 /* ---- Reassembly timer ---- */
@@ -167,6 +168,7 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     mtu = s->cfg.mtu;
     if (mtu > MT_TXBUF_SIZE - MT_ETH_HDR) mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
     if (tot > 65535u - MT_IP_HDR) return MT_ERR_INVAL;
+    if (MT_IP_HDR + tot > mtu && mtu < MT_IP_HDR + 8u) return MT_ERR_INVAL;   /* cannot fragment */
     id = s->ip_id++;
     s->stats.ip_out++;
 
@@ -176,7 +178,6 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
         mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + tot), now);
         return MT_OK;
     }
-    if (mtu < MT_IP_HDR + 8u) { s->stats.ip_out--; return MT_ERR_INVAL; }
 
     chunk = (uint16_t)(((mtu - MT_IP_HDR) >> 3) << 3);
     for (off = 0; off < tot; off += chunk) {   /* off is 32-bit: no wrap near 65535 */

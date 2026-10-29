@@ -201,6 +201,11 @@ struct mt_stack {
     mt_tcp *tcp;             /* lim.max_tcp TCBs */
     mt_dns *dns;
     mt_dns_cent *dcache;     /* lim.dns_cache entries */
+    mt_logrec *log;          /* MT_LOG_RECS records (arena section) */
+    uint16_t log_wr, log_rd; /* free-running counters, modulo 65536 (a multiple of MT_LOG_RECS):
+                              * log_wr is written only by the logging context, log_rd only by
+                              * mt_log_read; record index = counter & (MT_LOG_RECS - 1) */
+    uint8_t log_on;
     uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
     /* The TCP segment (if any) that mt_arp_insert just released from the held slot; consulted
@@ -221,6 +226,20 @@ struct mt_stack {
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
 };
+
+/* ---- Diagnostic log (mt_stack.c) ----
+ * mt_log() is the only call sites use: one load + branch while the log is off. */
+void mt_log_put(mt_stack *s, uint8_t code, uint8_t a, uint16_t b);
+static inline void mt_log(mt_stack *s, uint8_t code, uint8_t a, uint16_t b) {
+    if (s->log_on) mt_log_put(s, code, a, b);
+}
+/* A packet was refused for the reason at this source line (b = __LINE__). Use together with the
+ * drop counter. In input functions that `goto drop`, MT_DROP_GOTO records the line of the
+ * failing check in the local `why`. */
+#define MT_LOG_DROPPED(s, layer, line) mt_log((s), MT_LOG_DROP, (layer), (uint16_t)(line))
+/* Count an IPv4-layer drop (ip_in_drops) and log it with the line of this statement. */
+#define MT_DROP_IP(s) do { (s)->stats.ip_in_drops++; MT_LOG_DROPPED((s), MT_LOGL_IP, __LINE__); } while (0)
+#define MT_DROP_GOTO(why) do { (why) = (uint16_t)__LINE__; goto drop; } while (0)
 
 /* Hand a finished frame to the link; counts eth_out / eth_tx_err. 0 = sent. */
 int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len);
@@ -289,6 +308,12 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
                           uint16_t len, uint8_t code, uint32_t now);
 
 /* ---- TCP internals ---- */
+/* Every TCB state change goes through here so it can be logged (state changes are not on the
+ * per-segment fast path). */
+static inline void mt_tcp_set_state(mt_tcp *t, uint8_t st) {
+    t->state = st;
+    mt_log(t->st, MT_LOG_TCP_STATE, st, t->lport);
+}
 void mt_tcp_timers(mt_stack *s, uint32_t now);
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now);
 /* An ARP entry for `ip` just resolved: every connection whose next hop is `ip` and that has
