@@ -3,9 +3,10 @@
 # fresh work.hda with scripts/testnet.py running, and collect EnetSpike.out into build-mac/enetspike/EnetSpike.out.
 #   enetspike-run.sh [--keep-disk] [--test N]
 #     --keep-disk  do not run fresh-disk.sh (use the current work.hda as is)
-#     --test N     the app's test mode digit, written to EnetSpike.cfg (default 0; the app lists
-#                  the modes). A mode that hangs the machine is cut off by ENETSPIKE_TIMEOUT and
-#                  the partial EnetSpike.out is still collected.
+#     --test N     written to EnetSpike.cfg. The current (glue test) form of the app ignores it; the
+#                  hand-driven spike form (version history, commit "Ethernet driver spike") read it
+#                  as a test mode, and a mode that hung the machine was cut off by ENETSPIKE_TIMEOUT
+#                  with the partial EnetSpike.out still collected.
 # Same launch and screen checks as scripts/probe-run.sh (the app sits in the first icon slot
 # of ":MoofTCP Test:", and its final alert is ApiProbe's box). A system error box (an address
 # error from a misaligned word/long access in the asm) is reported as a crash.

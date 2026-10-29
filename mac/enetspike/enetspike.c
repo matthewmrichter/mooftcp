@@ -1,11 +1,18 @@
-/* enetspike.c - EnetSpike: Task 9 spike of the .ENET0 (DaynaPORT) interface in Snow.
+/* enetspike.c - EnetSpike, second form: the Task 9 glue test. The Ethernet/timer/gate glue
+ * (mac/glue/mt_enet.c, mt_enet_ph.s, mt_gate.c, mt_timer.c, mt_os_mac.c) runs the portable core
+ * (a real mt_stack with the address 10.0.0.77) against Snow's NAT gateway 10.0.0.1:
  *
- * Every number the interface doc lists as "obs" for the Ethernet driver comes from here:
- * csCodes and PB layout (EGetInfo, EAttachPH, EWrite), the handler's register convention and
- * interrupt level (spike_ph.s logs SR/SP/A3/A4/D1 into a ring), delivery of whole packets with
- * ReadRest, bursts, a 1514-byte frame, EWrite timing, a send from inside the handler, and
- * the Time Manager (version, a 1 ms self-priming task: accuracy and CPU cost).
- * Output: EnetSpike.out beside the app (CR separated). Host side: scripts/testnet.py running. */
+ *   A  ARP + ICMP echo through the stack (the stack ARPs for the gateway by itself)
+ *   B  1000 sequential echo round trips with a pattern payload; each must come back intact
+ *   C  20 echoes of 1472 bytes (1514-byte frames both ways)
+ *   D  a burst of 60 echoes without waiting (4 transmit slots: drops are counted, nothing hangs)
+ *   E  the Time Manager timer: requested deadlines vs ticks, re-arm replaces, cancel, periodic
+ *   G  the core's own timers through the Time Manager task (ARP retries of an unanswered address)
+ *   F  gate / driver counters and the stack space seen at interrupt time
+ *
+ * The first form of this app (git history, "Ethernet driver spike") drove the driver by hand to
+ * find the interface; docs/dev/MACTCP-INTERFACE.md "Ethernet driver calls" records what it found.
+ * Output: EnetSpike.out (CR separated), last line "RESULT PASS" or "RESULT FAIL". */
 #include <Quickdraw.h>
 #include <Dialogs.h>
 #include <Fonts.h>
@@ -16,73 +23,20 @@
 #include <Events.h>
 #include <Files.h>
 #include <Devices.h>
-#include <Gestalt.h>
-#include <Timer.h>
 #include <OSUtils.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdint.h>
+#include "mt.h"
+#include "mt_gate.h"
+#include "mt_enet.h"
+#include "mt_timer.h"
+#include "mt_os_mac.h"
+
+uint32_t mt_os_ms(void);
 
 QDGlobals qd;
-
-/* ---- ENET parameter block (csParam at offset 28) ---- */
-#pragma pack(push, 2)
-typedef struct EPB {
-    uint32_t qLink; int16_t qType; int16_t ioTrap; uint32_t ioCmdAddr;
-    uint32_t ioCompletion; int16_t ioResult; uint32_t ioNamePtr; int16_t ioVRefNum;
-    int16_t ioRefNum; int16_t csCode;
-    int16_t eProtType; uint32_t ePointer; int16_t eBuffSize; int16_t eDataSize;
-    int16_t pad[10];
-} EPB;
-typedef struct WDS { uint16_t len; uint32_t ptr; } WDS;
-#pragma pack(pop)
-
-enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_READ = 250, E_RDCANCEL = 251,
-       E_GETINFO = 252, E_SETGENERAL = 253 };
-
-/* ---- ring shared with spike_ph.s (offsets there) ---- */
-#define NSLOT 8
-#define SLOTSZ 1572
-typedef struct Slot {
-    uint16_t len, sr, type, rr;
-    uint32_t ticks, a3, a4, d1, sp, us0, us1;
-    uint8_t buf[1536];
-} Slot;
-typedef struct Ring {
-    volatile uint16_t head, tail, over, hook;
-    Slot s[NSLOT];
-    EPB hpb;                 /* used by the send-from-handler hook */
-    WDS hwds[2];
-    uint8_t hframe[64];
-    volatile int16_t hres;
-    volatile uint32_t hticks0, hticks1;
-    volatile int16_t hran;
-    volatile int16_t hasync;
-    volatile int16_t hdt;                 /* 1: install a deferred task from the hook */
-    struct { uint32_t qLink; int16_t qType; int16_t dtFlags; uint32_t dtAddr; uint32_t dtParm;
-             uint32_t dtReserved; } dt;
-    volatile uint16_t dsr; volatile int16_t dran, dres, dinst;
-    volatile uint32_t dtk0, dtk1;
-} Ring;
-
-/* _DTInstall (A082): A0 = task, D0 = result */
-static int16_t dt_install(void *t)
-{
-    register void *a0 __asm__("a0") = t;
-    register int16_t d0 __asm__("d0");
-    __asm__ volatile(".short 0xA082" : "=d"(d0) : "a"(a0) : "d1", "a1", "cc", "memory");
-    return d0;
-}
-
-extern void spike_ph(void);
-extern void spike_ph_set_ctx(void *ring);
-extern void spike_tm(void);
-extern void spike_dt(void);
-
-static Ring ring;
-static int16_t drv = 0;
-static uint8_t mac[6];
 
 /* ---- output ---- */
 static short outref = -1;
@@ -98,203 +52,128 @@ static void P(const char *fmt, ...)
     if (outref >= 0) FSWrite(outref, &n, b);
 }
 
-/* ---- Time Manager ---- */
-typedef struct TmRec {
-    TMTask t; volatile uint32_t count; uint32_t period;
-    volatile int16_t mode;            /* 0 count, 1 sync EWrite once, 2 async EWrite once */
-    volatile uint16_t sr; volatile int16_t ran, res;
-    volatile uint32_t tk0, tk1;
-    EPB pb; WDS w[2]; uint8_t frame[64];
-} TmRec;
-void spike_tm_c(TmRec *r);
-void spike_tm_c(TmRec *r)
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory Ticks at 0x16A */
+static unsigned long now_ticks(void) { return *(volatile unsigned long *)0x16A; }
+
+/* ---- the application: everything the callbacks reach through one pointer ---- */
+typedef struct App {
+    mt_stack *s;
+    MtGate   *g;
+    MtEnet   *e;
+    MtTimer   tm;                 /* drives mt_gate_tick */
+    volatile uint16_t got_seq;    /* last echo reply seq */
+    volatile uint32_t replies, bad_payload, bad_from;
+    volatile uint32_t pat_len;
+    volatile uint32_t min_stack_irq, min_stack_task;
+    volatile uint32_t after_calls, tick_calls;
+} App;
+
+#define PAT(i) ((uint8_t)((i) * 7u + 3u))
+
+static void note_stack(volatile uint32_t *min)
 {
-    uint16_t sr;
-    __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
-    r->sr = sr;
-    r->count++;
-    if (r->mode) {
-        r->tk0 = TickCount();
-        if (r->mode == 1) r->res = (int16_t)PBControlSync((ParmBlkPtr)&r->pb);
-        else r->res = (int16_t)PBControlAsync((ParmBlkPtr)&r->pb);
-        r->tk1 = TickCount();
-        r->ran = 1;
-        r->mode = 0;
-        return;
+    uint32_t sp = (uint32_t)StackSpace();
+    if (sp < *min) *min = sp;
+}
+
+static void rx_cb(void *ctx, const uint8_t *f, uint16_t len)
+{
+    App *a = (App *)ctx;
+    note_stack(mt_gate_in_irq(a->g) ? &a->min_stack_irq : &a->min_stack_task);
+    mt_input(a->s, f, len, mt_os_ms());
+}
+static void tick_cb(void *ctx)
+{
+    App *a = (App *)ctx;
+    note_stack(mt_gate_in_irq(a->g) ? &a->min_stack_irq : &a->min_stack_task);
+    a->tick_calls++;
+    mt_tick(a->s, mt_os_ms());
+}
+static void after_cb(void *ctx)
+{
+    App *a = (App *)ctx;
+    uint32_t d = mt_next_deadline(a->s, mt_os_ms());
+    a->after_calls++;
+    mt_timer_arm(&a->tm, d == MT_NO_DEADLINE ? MT_TIMER_NONE : d);
+}
+static void tm_cb(void *ctx) { mt_gate_tick(((App *)ctx)->g); }
+
+static void echo_cb(void *user, mt_ip4 from, uint16_t id, uint16_t seq, const uint8_t *data,
+                    uint16_t len, uint32_t now)
+{
+    App *a = (App *)user;
+    uint16_t i;
+    (void)now;
+    if (from != 0x0A000001u || id != 0x4D54) { a->bad_from++; return; }
+    if (len != a->pat_len) { a->bad_payload++; return; }
+    for (i = 0; i < len; i++)
+        if (data[i] != PAT(i)) { a->bad_payload++; break; }
+    a->replies++;
+    a->got_seq = seq;
+}
+
+/* send one echo from the application thread (the gated path every PBControl takes) */
+static int send_echo_to(App *a, mt_ip4 dst, uint16_t seq, uint16_t len)
+{
+    uint8_t d[1472];
+    uint16_t i;
+    int r;
+    for (i = 0; i < len; i++) d[i] = PAT(i);
+    a->pat_len = len;
+    MT_GATE_ENTER(a->g);
+    r = mt_icmp_echo(a->s, dst, 0x4D54, seq, d, len, mt_os_ms());
+    MT_GATE_LEAVE(a->g);
+    return r;
+}
+static int send_echo(App *a, uint16_t seq, uint16_t len)
+{
+    return send_echo_to(a, 0x0A000001u, seq, len);
+}
+
+/* wait for reply `seq`; returns elapsed ticks or -1 on timeout */
+static long wait_reply(App *a, uint16_t seq, unsigned long max_ticks)
+{
+    unsigned long t0 = now_ticks();
+    while (now_ticks() - t0 < max_ticks) {
+        if (a->replies && a->got_seq == seq) return (long)(now_ticks() - t0);
     }
-    PrimeTime((QElemPtr)r, (long)r->period);
+    return -1;
 }
 
-static void spin(uint32_t n) { volatile uint32_t i; for (i = 0; i < n; i++) { } }
-
-/* ---- ENET calls ---- */
-static int16_t ecall(EPB *pb)
+/* ---- timer test ---- */
+typedef struct TT { MtTimer t; volatile uint32_t fired, at; volatile uint32_t period_left; uint32_t period; } TT;
+static void tt_cb(void *ctx)
 {
-    pb->ioRefNum = drv;
-    pb->ioCompletion = 0;
-    return (int16_t)PBControlSync((ParmBlkPtr)pb);
-}
-
-static int16_t e_attach(uint16_t type, void (*h)(void))
-{
-    EPB pb;
-    memset(&pb, 0, sizeof pb);
-    pb.csCode = E_ATTACH; pb.eProtType = (int16_t)type; pb.ePointer = (uint32_t)h;
-    return ecall(&pb);
-}
-
-static int16_t e_write(const uint8_t *frame, uint16_t len)
-{
-    EPB pb;
-    WDS w[2];
-    memset(&pb, 0, sizeof pb);
-    w[0].len = len; w[0].ptr = (uint32_t)frame; w[1].len = 0; w[1].ptr = 0;
-    pb.csCode = E_WRITE; pb.ePointer = (uint32_t)w;
-    return ecall(&pb);
-}
-
-/* ---- frame builders ---- */
-static const uint8_t bcast[6] = { 255, 255, 255, 255, 255, 255 };
-static uint8_t gwmac[6];
-static int have_gw;
-static uint32_t cks(const uint8_t *p, int n)
-{
-    uint32_t s = 0;
-    int i;
-    for (i = 0; i + 1 < n; i += 2) s += (uint32_t)(p[i] << 8 | p[i + 1]);
-    if (n & 1) s += (uint32_t)p[n - 1] << 8;
-    while (s >> 16) s = (s & 0xFFFF) + (s >> 16);
-    return (~s) & 0xFFFF;
-}
-
-static int arp_req(uint8_t *f)
-{
-    memset(f, 0, 60);
-    memcpy(f, bcast, 6); memcpy(f + 6, mac, 6);
-    f[12] = 0x08; f[13] = 0x06; f[15] = 1; f[16] = 0x08; f[18] = 6; f[19] = 4; f[21] = 1;
-    memcpy(f + 22, mac, 6); f[28] = 10; f[31] = 77; f[38] = 10; f[41] = 1;
-    return 60;
-}
-
-static int ip_hdr(uint8_t *f, int total, int proto, const uint8_t *dst)
-{
-    uint32_t c;
-    memcpy(f, gwmac, 6); memcpy(f + 6, mac, 6); f[12] = 8; f[13] = 0;
-    f[14] = 0x45; f[16] = (uint8_t)(total >> 8); f[17] = (uint8_t)total; f[19] = 1;
-    f[22] = 64; f[23] = (uint8_t)proto;
-    f[26] = 10; f[29] = 77; memcpy(f + 30, dst, 4);
-    c = cks(f + 14, 20);
-    f[24] = (uint8_t)(c >> 8); f[25] = (uint8_t)c;
-    return 34;
-}
-
-static int icmp_echo(uint8_t *f, int seq)
-{
-    static const uint8_t gw[4] = { 10, 0, 0, 1 };
-    int i, n = 34;
-    uint32_t c;
-    memset(f, 0, 100);
-    ip_hdr(f, 20 + 8 + 32, 1, gw);
-    f[34] = 8; f[38] = 0x12; f[39] = 0x34; f[41] = (uint8_t)seq; f[40] = (uint8_t)(seq >> 8);
-    for (i = 0; i < 32; i++) f[42 + i] = (uint8_t)(i + 1);
-    c = cks(f + 34, 40);
-    f[36] = (uint8_t)(c >> 8); f[37] = (uint8_t)c;
-    n = 14 + 20 + 8 + 32;
-    return n;
-}
-
-static int udp_big(uint8_t *f, int payload)
-{
-    static const uint8_t host[4] = { 172, 17, 0, 1 };
-    int i;
-    memset(f, 0, 14 + 20 + 8 + payload);
-    ip_hdr(f, 20 + 8 + payload, 17, host);
-    f[34] = 0x0F; f[35] = 0xA0; f[36] = 17007 >> 8; f[37] = 17007 & 255;
-    f[38] = (uint8_t)((8 + payload) >> 8); f[39] = (uint8_t)(8 + payload);
-    for (i = 0; i < payload; i++) f[42 + i] = (uint8_t)(i * 7);
-    return 14 + 20 + 8 + payload;
-}
-
-/* ---- ring drain ---- */
-static unsigned n_rx, n_arp_reply, n_ip, n_icmp_reply, n_udp;
-static uint32_t sr_or, sr_min = 0xFFFF;
-
-static void drain(const char *tag, int verbose)
-{
-    while (ring.tail != ring.head) {
-        Slot *s = &ring.s[ring.tail];
-        uint8_t *b = s->buf;
-        int i, n = s->len;
-        n_rx++;
-        sr_or |= s->sr;
-        if ((s->sr & 0x0700) < sr_min) sr_min = s->sr & 0x0700;
-        if (s->type == 0x0806 && n >= 42 && b[21] == 2 && b[28] == 10 && b[31] == 1) {
-            n_arp_reply++;
-            if (!have_gw) { memcpy(gwmac, b + 22, 6); have_gw = 1; }
-        } else if (s->type == 0x0800) {
-            n_ip++;
-            if (n >= 35 && b[23] == 1 && b[34] == 0) n_icmp_reply++;
-            if (n >= 35 && b[23] == 17) n_udp++;
-        }
-        if (verbose) {
-            P("RX %s #%u tick=%lu sr=%04x type=%04x len=%d rr=%d a3-sp=%ld a4=%08lx d1=%lu sp=%08lx dst=%02x%02x%02x%02x%02x%02x [",
-              tag, n_rx, (unsigned long)s->ticks, s->sr, s->type, n, (int)(int16_t)s->rr,
-              (long)(s->a3 - s->sp), (unsigned long)s->a4, (unsigned long)s->d1,
-              (unsigned long)s->sp, b[0], b[1], b[2], b[3], b[4], b[5]);
-            for (i = 14; i < 14 + 16 && i < n; i++) P("%02x", b[i]);
-            P("]\r");
-        }
-        ring.tail = (uint16_t)((ring.tail + 1) & 7);
+    TT *x = (TT *)ctx;
+    x->fired++;
+    x->at = (uint32_t)now_ticks();
+    if (x->period_left) {                     /* re-arm from inside the callback */
+        x->period_left--;
+        mt_timer_arm(&x->t, x->period);
     }
 }
 
-static void wait_ticks(int t, const char *tag, int verbose)
+static int fails;
+static void check(int ok, const char *what)
 {
-    unsigned long end = TickCount() + (unsigned long)t;
-    while (TickCount() < end) drain(tag, verbose);
-    drain(tag, verbose);
-}
-
-/* hook: runs inside the handler, tries an EWrite from interrupt level */
-void spike_hook_c(Ring *r);
-void spike_hook_c(Ring *r)
-{
-    if (r->hdt) { r->dinst = dt_install(&r->dt); r->hran = 1; return; }
-    r->hticks0 = TickCount();
-    if (r->hasync) r->hres = (int16_t)PBControlAsync((ParmBlkPtr)&r->hpb);
-    else r->hres = (int16_t)PBControlSync((ParmBlkPtr)&r->hpb);
-    r->hticks1 = TickCount();
-    r->hran = 1;
-}
-
-void spike_dt_c(Ring *r);
-void spike_dt_c(Ring *r)
-{
-    uint16_t sr;
-    __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
-    r->dsr = sr;
-    r->dtk0 = TickCount();
-    r->dres = (int16_t)PBControlSync((ParmBlkPtr)&r->hpb);
-    r->dtk1 = TickCount();
-    r->dran = 1;
+    if (!ok) { fails++; P("FAIL %s\r", what); }
 }
 
 int main(void)
 {
-    char line[200];
+    char line[160];
     Str255 ps;
     size_t n;
-    long gv;
-    int i, got;
-    OSErr err;
-    EPB pb;
-    uint8_t frame[1536];
-    uint8_t info[128];
-    unsigned long t0, t1;
-    unsigned long iter, iter1;
-    int16_t r;
-    static TmRec tm;
-    int test = 0;
+    int i, r;
+    mt_limits lim;
+    mt_link link;
+    mt_ifconfig cfg;
+    uint32_t arena_len;
+    void *arena;
+    static App app;
+    static TT tt;
+    MtGate *g;
+    MtEnet *e;
 
     MaxApplZone();
     InitGraf(&qd.thePort); InitFonts(); InitWindows(); InitMenus(); TEInit(); InitDialogs(0);
@@ -302,293 +181,195 @@ int main(void)
     Create((ConstStringPtr)"\pEnetSpike.out", 0, 'ttxt', 'TEXT');
     if (FSOpen((ConstStringPtr)"\pEnetSpike.out", 0, &outref)) outref = -1;
     else SetEOF(outref, 0);
-    P("EnetSpike\r");
+    P("EnetSpike (glue test)\r");
+
+    mt_limits_default(&lim);
+    lim.max_tcp = 2; lim.max_udp = 1; lim.arp_entries = 4; lim.dns_cache = 1;
+    arena_len = mt_stack_size(&lim);
+    g = (MtGate *)NewPtrClear(sizeof(MtGate));
+    e = (MtEnet *)NewPtrClear(sizeof(MtEnet));
+    /* obs: NewPtr blocks are only 2-byte aligned on the 68000 Mac; the core wants MT_ARENA_ALIGN (4) */
+    arena = NewPtrClear((long)arena_len + 4);
+    if (arena) arena = (void *)(((uintptr_t)arena + 3u) & ~(uintptr_t)3u);
+    P("sizeof: MtGate %lu MtEnet %lu arena %lu\r", (unsigned long)sizeof(MtGate),
+      (unsigned long)sizeof(MtEnet), (unsigned long)arena_len);
+    if (!g || !e || !arena) { P("out of memory\rRESULT FAIL\r"); fails++; goto fin; }
+
+    memset(&app, 0, sizeof app);
+    app.g = g; app.e = e;
+    app.min_stack_irq = app.min_stack_task = 0xFFFFFFFFu;
+    mt_gate_init(g, &app, rx_cb, tick_cb, after_cb);
+    mt_os_mac_set_gate(g);
+
+    r = mt_enet_open(e, g);
+    P("mt_enet_open = %d refnum=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\r", r, e->refnum, e->mac[0],
+      e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
+    if (r) { P("RESULT FAIL\r"); fails++; goto fin; }
+
+    link.ctx = e; link.tx = mt_enet_write;
+    app.s = mt_stack_init(arena, arena_len, &lim, &link, (uint32_t)now_ticks());
+    if (!app.s) {
+        P("mt_stack_init failed (alignment?) arena=%08lx\rRESULT FAIL\r", (unsigned long)arena);
+        fails++;
+        goto fin;
+    }
+    memset(&cfg, 0, sizeof cfg);
+    cfg.addr = 0x0A00004Du; cfg.mask = 0xFF000000u; cfg.gateway = 0x0A000001u; cfg.mtu = 1500;
+    memcpy(cfg.mac, e->mac, 6);
+    mt_set_config(app.s, &cfg);
+    mt_set_echo_cb(app.s, echo_cb, &app);
+    mt_timer_init(&app.tm, tm_cb, &app);
+
+    /* A: ARP + the first echo */
     {
-        short cr;
-        long cn = 1;
-        char cc = '0';
-        if (FSOpen((ConstStringPtr)"\pEnetSpike.cfg", 0, &cr) == 0) { FSRead(cr, &cn, &cc); FSClose(cr); }
-        test = cc - '0';
-        P("test mode %d\r", test);
+        unsigned long t0 = now_ticks();
+        long rt;
+        r = send_echo(&app, 0, 56);
+        rt = wait_reply(&app, 0, 120);
+        P("A: first echo (includes the ARP exchange): send=%d reply after %ld ticks (%lu ms)\r", r, rt,
+          (unsigned long)((now_ticks() - t0) * 1000 / 60));
+        check(rt >= 0, "A first echo");
     }
 
-    /* --- environment --- */
-    err = Gestalt(gestaltTimeMgrVersion, &gv);
-    P("gestalt tmgr err=%d val=%ld\r", (int)err, gv);
-    P("sizeof EPB=%u WDS=%u Slot=%u\r", (unsigned)sizeof(EPB), (unsigned)sizeof(WDS),
-      (unsigned)sizeof(Slot));
-
-    /* --- open --- */
-    {
-        short ref = 0;
-        err = OpenDriver((ConstStringPtr)"\p.ENET0", &ref);
-        P("OpenDriver .ENET0 err=%d ref=%d\r", (int)err, (int)ref);
-        drv = ref;
-        err = OpenDriver((ConstStringPtr)"\p.ENET", &ref);
-        P("OpenDriver .ENET err=%d ref=%d\r", (int)err, (int)ref);
-        err = OpenDriver((ConstStringPtr)"\p.ENET1", &ref);
-        P("OpenDriver .ENET1 err=%d ref=%d\r", (int)err, (int)ref);
-    }
-    if (drv == 0) { P("no driver\r"); goto fin; }
-
-    /* --- EGetInfo --- */
-    memset(info, 0xEE, sizeof info);
-    memset(&pb, 0, sizeof pb);
-    pb.csCode = E_GETINFO; pb.ePointer = (uint32_t)info; pb.eBuffSize = 18;
-    t0 = TickCount();
-    r = ecall(&pb);
-    P("EGetInfo(buf 18) res=%d eDataSize=%d eBuffSize=%d ticks=%lu\r", r, pb.eDataSize,
-      pb.eBuffSize, (unsigned long)(TickCount() - t0));
-    for (i = 0; i < 24; i++) P("%02x%s", info[i], i == 23 ? "\r" : " ");
-    memcpy(mac, info, 6);
-    memset(&pb, 0, sizeof pb);
-    memset(info, 0xEE, sizeof info);
-    pb.csCode = E_GETINFO; pb.ePointer = (uint32_t)info; pb.eBuffSize = 6;
-    r = ecall(&pb);
-    P("EGetInfo(buf 6) res=%d bytes beyond 6: %02x %02x\r", r, info[6], info[7]);
-
-    /* --- attach --- */
-    spike_ph_set_ctx(&ring);
-    r = e_attach(0x0806, spike_ph); P("EAttachPH 0806 res=%d\r", r);
-    r = e_attach(0x0800, spike_ph); P("EAttachPH 0800 res=%d\r", r);
-    r = e_attach(0x0800, spike_ph); P("EAttachPH 0800 again res=%d\r", r);
-    FlushVol(0, 0);
-
-    /* --- one ARP request --- */
-    n = (size_t)arp_req(frame);
-    t0 = TickCount();
-    r = e_write(frame, (uint16_t)n);
-    t1 = TickCount();
-    P("EWrite arp 60 res=%d ticks=%lu\r", r, t1 - t0);
-    wait_ticks(120, "arp1", 1);
-    P("after arp1: rx=%u arp_reply=%u gw=%d\r", n_rx, n_arp_reply, have_gw);
-    if (have_gw)
-        P("gwmac %02x:%02x:%02x:%02x:%02x:%02x\r", gwmac[0], gwmac[1], gwmac[2], gwmac[3],
-          gwmac[4], gwmac[5]);
-    FlushVol(0, 0);
-
-    /* --- EWrite shorter than 60 and WDS in two parts --- */
-    if (test == 0) {
-        EPB pb2; WDS w[3];
-        n = (size_t)arp_req(frame);
-        memset(&pb2, 0, sizeof pb2);
-        w[0].len = 14; w[0].ptr = (uint32_t)frame;
-        w[1].len = 28; w[1].ptr = (uint32_t)(frame + 14);   /* 42 bytes total: runt */
-        w[2].len = 0; w[2].ptr = 0;
-        pb2.csCode = E_WRITE; pb2.ePointer = (uint32_t)w;
-        n_arp_reply = 0;
-        r = ecall(&pb2);
-        P("EWrite arp 42 bytes in 2 WDS pieces res=%d\r", r);
-        wait_ticks(60, "arp42", 1);
-        P("reply to the 42-byte request: %u\r", n_arp_reply);
-        /* 1-byte write: error? */
-        w[0].len = 10; w[0].ptr = (uint32_t)frame; w[1].len = 0;
-        r = ecall(&pb2);
-        P("EWrite 10 bytes res=%d\r", r);
-        w[0].len = 1515;
-        r = ecall(&pb2);
-        P("EWrite 1515 bytes res=%d\r", r);
-    }
-
-    if (test == 0) {
-    /* --- burst of 20 --- */
-    n_arp_reply = 0;
-    t0 = TickCount();
-    for (i = 0; i < 20; i++) {
-        n = (size_t)arp_req(frame);
-        r = e_write(frame, (uint16_t)n);
-        if (r) P("burst write %d res=%d\r", i, r);
-    }
-    t1 = TickCount();
-    P("burst 20 writes took %lu ticks\r", t1 - t0);
-    wait_ticks(180, "burst", 1);
-    P("burst: replies=%u of 20, over=%u\r", n_arp_reply, ring.over);
-    FlushVol(0, 0);
-
-    /* --- ICMP echo to 10.0.0.1 --- */
-    if (have_gw) {
-        n_icmp_reply = 0;
-        n = (size_t)icmp_echo(frame, 1);
-        r = e_write(frame, (uint16_t)n);
-        P("EWrite icmp echo len=%u res=%d\r", (unsigned)n, r);
-        wait_ticks(120, "icmp", 1);
-        P("icmp replies=%u (0800 frames=%u)\r", n_icmp_reply, n_ip);
-
-        /* 1514-byte UDP echo via the host (testnet.py UDP echo 17007) */
-        n_udp = 0;
-        n = (size_t)udp_big(frame, 1472);
-        r = e_write(frame, (uint16_t)n);
-        P("EWrite udp len=%u res=%d\r", (unsigned)n, r);
-        wait_ticks(240, "udp", 1);
-        P("udp frames=%u\r", n_udp);
-        FlushVol(0, 0);
-    }
-
-    /* --- sequential round trips (ARP) --- */
+    /* B: 1000 sequential echoes */
     {
         unsigned ok = 0, lost = 0;
-        unsigned long maxrt = 0, sumrt = 0;
-        t0 = TickCount();
-        for (i = 0; i < 200; i++) {
-            unsigned before = n_arp_reply;
-            unsigned long a = TickCount(), b;
-            n = (size_t)arp_req(frame);
-            e_write(frame, (uint16_t)n);
-            while (n_arp_reply == before && TickCount() - a < 60) drain("rt", 0);
-            b = TickCount() - a;
-            if (n_arp_reply != before) { ok++; sumrt += b; if (b > maxrt) maxrt = b; }
+        long rt, maxrt = 0, sum = 0;
+        unsigned long t0 = now_ticks();
+        uint32_t bad0 = app.bad_payload;
+        for (i = 1; i <= 1000; i++) {
+            r = send_echo(&app, (uint16_t)i, 56);
+            rt = wait_reply(&app, (uint16_t)i, 60);
+            if (r == 0 && rt >= 0) { ok++; sum += rt; if (rt > maxrt) maxrt = rt; }
             else lost++;
         }
-        P("200 sequential ARP round trips: ok=%u lost=%u max=%lu ticks sum=%lu total=%lu ticks\r",
-          ok, lost, maxrt, sumrt, TickCount() - t0);
+        P("B: 1000 echo round trips: ok=%u lost=%u max=%ld ticks, mean %lu.%02lu ticks, total %lu ticks; bad payloads %lu\r",
+          ok, lost, maxrt, (unsigned long)(sum / (ok ? ok : 1)),
+          (unsigned long)((sum * 100 / (ok ? ok : 1)) % 100), now_ticks() - t0,
+          (unsigned long)(app.bad_payload - bad0));
+        check(ok == 1000, "B all 1000 round trips");
+        check(app.bad_payload == bad0, "B payload intact");
     }
-    P("handler SR values seen: or=%04x min-mask=%04x\r", (unsigned)sr_or, (unsigned)sr_min);
     FlushVol(0, 0);
 
-    }   /* test == 0 */
-
-    if (test == 1) {
-        /* gate level: EWrite under mask L, then spin masked: does the handler still run? */
-        int L;
-        for (L = 0; L <= 7; L++) {
-            uint16_t sr, sr2, h0, h1, h2;
-            int16_t wr;
-            uint32_t ta, tb;
-            P("mask L=%d: trying EWrite under the mask ...\r", L);
-            FlushVol(0, 0);
-            drain("m", 0);
-            h0 = ring.head;
-            __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
-            sr2 = (uint16_t)((sr & ~0x0700) | (L << 8));
-            ta = TickCount();
-            __asm__ volatile("move.w %0,%%sr" : : "d"(sr2) : "memory");
-            n = (size_t)arp_req(frame);
-            wr = e_write(frame, (uint16_t)n);
-            h1 = ring.head;
-            spin(300000);
-            h2 = ring.head;
-            __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory");
-            tb = TickCount();
-            P("  L=%d: ewrite=%d records during write=%d, after spin=%d; ticks advanced %lu (0 = VBL masked); ",
-              L, wr, (int)((h1 - h0) & 7), (int)((h2 - h0) & 7), (unsigned long)(tb - ta));
-            wait_ticks(30, "m", 0);
-            P("after unmask: %d (total rx %u)\r", (int)((ring.head - h0) & 7) , n_rx);
-            FlushVol(0, 0);
+    /* C: big echoes */
+    {
+        unsigned ok = 0;
+        for (i = 0; i < 20; i++) {
+            r = send_echo(&app, (uint16_t)(2000 + i), 1472);
+            if (r == 0 && wait_reply(&app, (uint16_t)(2000 + i), 60) >= 0) ok++;
         }
-    }
-    if (test == 7) {
-        /* which interrupt mask keeps the protocol handler out? ASYNC EWrite (returns at once),
-         * then mask L and spin: does a record appear while masked? */
-        static EPB apb;
-        static WDS aw[2];
-        static uint8_t af[64];
-        int L;
-        for (L = 0; L <= 7; L++) {
-            uint16_t sr, sr2, h0, h1, h2;
-            uint32_t ta, tb;
-            drain("m", 0);
-            h0 = ring.head;
-            arp_req(af);
-            memset(&apb, 0, sizeof apb);
-            aw[0].len = 60; aw[0].ptr = (uint32_t)af; aw[1].len = 0; aw[1].ptr = 0;
-            apb.csCode = E_WRITE; apb.ePointer = (uint32_t)aw; apb.ioRefNum = drv;
-            __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
-            sr2 = (uint16_t)((sr & ~0x0700) | (L << 8));
-            ta = TickCount();
-            __asm__ volatile("move.w %0,%%sr" : : "d"(sr2) : "memory");
-            PBControlAsync((ParmBlkPtr)&apb);
-            h1 = ring.head;
-            spin(300000);
-            h2 = ring.head;
-            __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory");
-            tb = TickCount();
-            P("mask L=%d: records right after async write=%d, after masked spin=%d, ioResult=%d, ticks advanced %lu; ",
-              L, (int)((h1 - h0) & 7), (int)((h2 - h0) & 7), (int)apb.ioResult, (unsigned long)(tb - ta));
-            wait_ticks(40, "m", 0);
-            P("after unmask: records=%d ioResult=%d\r", (int)((ring.head - h0) & 7), (int)apb.ioResult);
-            FlushVol(0, 0);
-        }
-    }
-    if (test == 6) {
-        P("JDTInstall=%08lx DTInstall trap %08lx unimplemented %08lx\r", *(unsigned long *)0x0D9C,
-          (unsigned long)NGetTrapAddress(0x82, (TrapType)0), (unsigned long)NGetTrapAddress(0x89F, (TrapType)1));
-        P("Microseconds trap %08lx\r", (unsigned long)NGetTrapAddress(0x93, (TrapType)0));
-        FlushVol(0, 0);
-    }
-    if (test == 2 || test == 5 || test == 6) {
-        memset(&ring.hpb, 0, sizeof ring.hpb);
-        arp_req(ring.hframe);
-        ring.hwds[0].len = 60; ring.hwds[0].ptr = (uint32_t)ring.hframe;
-        ring.hwds[1].len = 0; ring.hwds[1].ptr = 0;
-        ring.hpb.csCode = E_WRITE; ring.hpb.ePointer = (uint32_t)ring.hwds; ring.hpb.ioRefNum = drv;
-        ring.hran = 0;
-        ring.hasync = (test == 2);
-        ring.hdt = (test == 6);
-        ring.dt.qType = 7; ring.dt.dtAddr = (uint32_t)spike_dt; ring.dt.dtParm = (uint32_t)&ring;
-        P("hook test: %s EWrite from inside the handler ...\r", test == 6 ? "DEFERRED TASK" : ring.hasync ? "ASYNC" : "SYNC");
-        FlushVol(0, 0);
-        n_arp_reply = 0;
-        ring.hook = 1;
-        n = (size_t)arp_req(frame);
-        e_write(frame, (uint16_t)n);
-        wait_ticks(120, "hook", 1);
-        P("hook ran=%d res=%d ioResult now=%d ticks %lu..%lu; replies now %u\r", ring.hran, ring.hres,
-          ring.hpb.ioResult, (unsigned long)ring.hticks0, (unsigned long)ring.hticks1, n_arp_reply);
-        P("deferred task: installed=%d ran=%d sr=%04x res=%d ticks %lu..%lu\r", ring.dinst, ring.dran, ring.dsr, ring.dres, (unsigned long)ring.dtk0, (unsigned long)ring.dtk1);
-    }
-    if (test == 3 || test == 4) {
-        memset(&tm, 0, sizeof tm);
-        tm.t.tmAddr = (ProcPtr)spike_tm;
-        arp_req(tm.frame);
-        tm.w[0].len = 60; tm.w[0].ptr = (uint32_t)tm.frame; tm.w[1].len = 0; tm.w[1].ptr = 0;
-        tm.pb.csCode = E_WRITE; tm.pb.ePointer = (uint32_t)tm.w; tm.pb.ioRefNum = drv;
-        tm.mode = (int16_t)(test == 3 ? 1 : 2);
-        P("TM test: %s EWrite from a Time Manager task ...\r", test == 3 ? "SYNC" : "ASYNC");
-        FlushVol(0, 0);
-        n_arp_reply = 0;
-        InsTime((QElemPtr)&tm);
-        PrimeTime((QElemPtr)&tm, 5);
-        wait_ticks(120, "tm", 1);
-        P("TM task ran=%d sr=%04x res=%d ioResult=%d ticks %lu..%lu; replies %u\r", tm.ran, tm.sr,
-          tm.res, tm.pb.ioResult, (unsigned long)tm.tk0, (unsigned long)tm.tk1, n_arp_reply);
-        RmvTime((QElemPtr)&tm);
+        P("C: 20 echoes of 1472 bytes (1514-byte frames): ok=%u, bad payloads %lu\r", ok,
+          (unsigned long)app.bad_payload);
+        check(ok == 20 && app.bad_payload == 0, "C big echoes");
     }
 
-    if (test == 0) {
-    /* --- Time Manager: 1 ms self-priming task, accuracy and cost --- */
-    iter = 0;
-    t0 = TickCount();
-    while (TickCount() - t0 < 120) iter++;
-    memset(&tm, 0, sizeof tm);
-    tm.t.tmAddr = (ProcPtr)spike_tm;
-    tm.period = 1;
-    InsTime((QElemPtr)&tm);
-    PrimeTime((QElemPtr)&tm, 1);
-    iter1 = 0;
-    t0 = TickCount();
-    while (TickCount() - t0 < 120) iter1++;
-    t1 = tm.count;
-    RmvTime((QElemPtr)&tm);
-    P("TM 1ms task: count=%lu in 120 ticks (%lu ms expected %lu); busy-loop iterations %lu without, %lu with\r",
-      t1, 120UL * 1000 / 60, 2000UL, iter, iter1);
+    /* D: burst */
+    {
+        uint32_t r0 = app.replies, ok0 = e->tx_ok, busy0 = e->tx_drop_busy;
+        unsigned sent_ok = 0;
+        unsigned long t0;
+        for (i = 0; i < 60; i++) if (send_echo(&app, (uint16_t)(3000 + i), 56) == 0) sent_ok++;
+        t0 = now_ticks();
+        while (now_ticks() - t0 < 120) { }       /* let it settle: 2 s */
+        P("D: burst of 60: core sends ok=%u, tx started %lu, tx dropped (all slots busy) %lu, replies %lu\r",
+          sent_ok, (unsigned long)(e->tx_ok - ok0), (unsigned long)(e->tx_drop_busy - busy0),
+          (unsigned long)(app.replies - r0));
+        check(app.replies - r0 == e->tx_ok - ok0, "D every started echo came back");
+    }
     FlushVol(0, 0);
 
-
+    /* E: timer */
+    {
+        static const unsigned ms_list[5] = { 10, 50, 100, 250, 1000 };
+        memset(&tt, 0, sizeof tt);
+        mt_timer_init(&tt.t, tt_cb, &tt);
+        for (i = 0; i < 5; i++) {
+            unsigned long t0 = now_ticks();
+            uint32_t f0 = tt.fired;
+            long el;
+            unsigned long want = (ms_list[i] * 60UL + 999) / 1000;
+            mt_timer_arm(&tt.t, ms_list[i]);
+            while (tt.fired == f0 && now_ticks() - t0 < 300) { }
+            el = (long)(tt.at - t0);
+            P("E: arm %u ms -> fired after %ld ticks (expect %lu..%lu)\r", ms_list[i], el, want, want + 1);
+            check(tt.fired == f0 + 1 && el >= (long)want - 1 && el <= (long)want + 2,
+                  "E deadline within a tick");
+        }
+        {   /* re-arm replaces the pending shot */
+            uint32_t f0 = tt.fired;
+            unsigned long t0 = now_ticks();
+            mt_timer_arm(&tt.t, 500);
+            mt_timer_arm(&tt.t, 50);
+            while (tt.fired == f0 && now_ticks() - t0 < 100) { }
+            while (now_ticks() - t0 < 80) { }     /* 1.3 s: the 500 ms shot must not fire */
+            P("E: re-arm 500 -> 50: fired %lu time(s) at tick +%lu\r", (unsigned long)(tt.fired - f0),
+              (unsigned long)(tt.at - t0));
+            check(tt.fired == f0 + 1, "E re-arm replaces");
+        }
+        {   /* cancel */
+            uint32_t f0 = tt.fired;
+            unsigned long t0 = now_ticks();
+            mt_timer_arm(&tt.t, 100);
+            mt_timer_cancel(&tt.t);
+            while (now_ticks() - t0 < 30) { }
+            P("E: arm 100 then cancel: fired %lu time(s)\r", (unsigned long)(tt.fired - f0));
+            check(tt.fired == f0, "E cancel");
+        }
+        {   /* periodic re-arm from the callback: 20 x 100 ms */
+            uint32_t f0 = tt.fired;
+            unsigned long t0 = now_ticks(), el;
+            tt.period = 100; tt.period_left = 19;
+            mt_timer_arm(&tt.t, 100);
+            while (tt.fired - f0 < 20 && now_ticks() - t0 < 400) { }
+            el = now_ticks() - t0;
+            P("E: 20 periodic 100 ms re-arms from the callback took %lu ticks (ideal 120)\r", el);
+            check(tt.fired - f0 == 20 && el >= 118 && el <= 130, "E periodic");
+        }
     }
 
-    /* detach */
-    memset(&pb, 0, sizeof pb);
-    pb.csCode = E_DETACH; pb.eProtType = 0x0806;
-    r = ecall(&pb); P("EDetachPH 0806 res=%d\r", r);
-    pb.eProtType = 0x0800;
-    r = ecall(&pb); P("EDetachPH 0800 res=%d\r", r);
-    P("RESULT DONE\r");
+    /* G: the tick path through the real timer: an echo to an address nobody answers makes the
+     * core ARP at +0, +1 s and +2 s (timer driven) and give up at +3 s */
+    {
+        uint32_t arp0 = mt_get_stats(app.s)->arp_out, t0n = g->n_tick;
+        unsigned long t0 = now_ticks();
+        send_echo_to(&app, 0x0A000063u, 9000, 56);
+        while (now_ticks() - t0 < 240) { }
+        P("G: unanswered ARP: %lu requests sent (expect 3), gate ticks run %lu\r",
+          (unsigned long)(mt_get_stats(app.s)->arp_out - arp0), (unsigned long)(g->n_tick - t0n));
+        check(mt_get_stats(app.s)->arp_out - arp0 == 3, "G three ARP requests from the timer");
+        check(g->n_tick - t0n >= 2, "G timer ticks reached the core");
+    }
+
+    /* F: counters */
+    {
+        const mt_stats *st = mt_get_stats(app.s);
+        P("F: gate: rx run %lu, deferred %lu, ticks run %lu (deferred %lu), after %lu, ring drops %u, max ring %lu, max depth %lu\r",
+          (unsigned long)g->n_rx, (unsigned long)g->n_deferred, (unsigned long)g->n_tick,
+          (unsigned long)g->n_tick_deferred, (unsigned long)g->n_after, g->drops,
+          (unsigned long)g->max_ring, (unsigned long)g->max_depth);
+        P("F: enet: tx ok %lu pad %lu busy-drop %lu len-drop %lu err %lu, in flight %d, last_err %d\r",
+          (unsigned long)e->tx_ok, (unsigned long)e->tx_pad, (unsigned long)e->tx_drop_busy,
+          (unsigned long)e->tx_drop_len, (unsigned long)e->tx_err, mt_enet_tx_busy(e), e->last_err);
+        P("F: core: eth_in %lu eth_out %lu eth_tx_err %lu arp_in %lu icmp_in %lu ip_in_drops %lu\r",
+          (unsigned long)st->eth_in, (unsigned long)st->eth_out, (unsigned long)st->eth_tx_err,
+          (unsigned long)st->arp_in, (unsigned long)st->icmp_in, (unsigned long)st->ip_in_drops);
+        P("F: stack space left (min): at interrupt time %lu, at task time %lu; ticks run %lu, after calls %lu\r",
+          (unsigned long)app.min_stack_irq, (unsigned long)app.min_stack_task,
+          (unsigned long)app.tick_calls, (unsigned long)app.after_calls);
+        check(g->drops == 0, "F no ring drops");
+    }
+
+    mt_timer_close(&tt.t);
+    mt_timer_close(&app.tm);
+    mt_enet_close(e);
+    P("closed; handlers detached\r");
+    P("RESULT %s\r", fails ? "FAIL" : "PASS");
 
 fin:
     if (outref >= 0) { FSClose(outref); outref = -1; }
     FlushVol(0, 0);
-    got = 0; (void)got;
-    sprintf(line, "EnetSpike finished. Results are in EnetSpike.out");
+    sprintf(line, "EnetSpike %s. Results are in EnetSpike.out", fails ? "FAIL" : "finished");
     n = strlen(line);
     ps[0] = (unsigned char)n;
     memcpy(ps + 1, line, n);

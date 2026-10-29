@@ -30,6 +30,7 @@ endif()
 # The MacTCP PB dispatcher (mac/glue/mt_pb*.c), host-built against the fake OS layer
 # tests/pbfake.c (mt_os.h). Packed PB structs: taking a member's address is an error.
 file(GLOB MT_GLUE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/mac/glue/mt_pb*.c)
+list(APPEND MT_GLUE_SRC ${CMAKE_SOURCE_DIR}/mac/glue/mt_gate.c)
 if(MT_GLUE_SRC)
   add_library(mtglue STATIC ${MT_GLUE_SRC} ${CMAKE_SOURCE_DIR}/tests/pbfake.c)
   target_include_directories(mtglue PUBLIC ${CMAKE_SOURCE_DIR}/mac/glue
