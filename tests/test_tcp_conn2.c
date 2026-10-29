@@ -233,7 +233,54 @@ static void test_rst_in_last_ack_is_clean_close(void) {
     rst_in_last_ack(1, MT_TERM_REMOTE_ABORT);
 }
 
+/* LAST_ACK with the FIN still queued (not sent) behind a 1-byte zero-window probe: snd_max -
+ * snd_una == 1, but that byte is data, so an RST is a genuine abort. */
+static void test_rst_with_unsent_fin_is_abort(void) {
+    fake_link fl; rec r; mt_tcp_info in; uint32_t ps, ms;
+    static uint8_t f[200];
+    mt_stack *s = setup(&fl);
+    mt_tcp *t = tconn_established(s, &fl, &r, &ps, &ms);
+    uint16_t n;
+    T_CHECK(t != NULL);
+    mt_tcp_get_info(t, &in);
+    inject(s, 23, in.lport, ps, ms, TF_ACK | TF_FIN, NULL, 0, 10);       /* peer FIN: CLOSE_WAIT */
+    n = mk_tcp(f, T_PEER, 23, T_ME, in.lport, ps + 1, ms, TF_ACK, 0, NULL, 0, NULL, 0);
+    mt_input(s, f, n, 11);                                               /* window closes */
+    T_EQ(mt_tcp_send(t, (const uint8_t *)"abc", 3, 1, 0, 12), 3);
+    mt_tick(s, 20000);                                                   /* persist probe: 1 byte */
+    mt_tcp_get_info(t, &in);
+    T_EQ(in.unacked, 1);
+    T_EQ(mt_tcp_close(t, 20001), MT_OK);                                 /* FIN queued, not sent */
+    mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_LAST_ACK); T_EQ(in.unacked, 1);
+    r.n = 0;
+    inject(s, 23, in.lport, ps + 1, 0, TF_RST, NULL, 0, 20002);
+    T_EQ(r.n, 1); T_EQ(r.e[0].ev, MT_TCP_EV_TERMINATE); T_EQ(r.e[0].arg, MT_TERM_REMOTE_ABORT);
+}
+
+/* Three duplicate ACKs while only our FIN is outstanding: mt_tcp_rexmit's FIN-only branch must
+ * resend the FIN at its own sequence number. */
+static void test_fast_retransmit_of_lone_fin(void) {
+    fake_link fl; rec r; tcpv v; mt_tcp_info in; uint32_t ps, ms;
+    mt_stack *s = setup(&fl);
+    mt_tcp *t = tconn_established(s, &fl, &r, &ps, &ms);
+    int i;
+    T_CHECK(t != NULL);
+    mt_tcp_get_info(t, &in);
+    T_EQ(mt_tcp_close(t, 10), MT_OK);
+    T_EQ(fl.n, 1);
+    T_CHECK(last_tcp(&fl, &v)); T_EQ(v.flags, TF_FIN | TF_ACK); T_EQ(v.seq, ms);
+    for (i = 0; i < 3; i++) {
+        T_EQ(fl.n, 1);                                  /* nothing resent before the third */
+        inject(s, 23, in.lport, ps, ms, TF_ACK, NULL, 0, 20 + (uint32_t)i);
+    }
+    T_EQ(fl.n, 2);
+    T_CHECK(last_tcp(&fl, &v));
+    T_EQ(v.flags, TF_FIN | TF_ACK); T_EQ(v.seq, ms); T_EQ(v.dlen, 0);
+    T_EQ(mt_get_stats(s)->tcp_rexmt, 1);
+}
+
 T_MAIN(test_simultaneous_open_scripted, test_simultaneous_open_two_stacks,
        test_abort_inside_data_callback, test_relisten_in_terminate_callback,
        test_release_create_in_callback, test_zero_window_still_processes_ack,
-       test_tiny_mtu_clamped, test_rst_in_last_ack_is_clean_close)
+       test_tiny_mtu_clamped, test_rst_in_last_ack_is_clean_close,
+       test_rst_with_unsent_fin_is_abort, test_fast_retransmit_of_lone_fin)

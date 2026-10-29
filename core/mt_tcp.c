@@ -715,7 +715,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             t->st->stats.tcp_resets_in++;
             if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE)) back_to_listen(t);
             else if ((t->state == MT_TCP_LAST_ACK || t->state == MT_TCP_CLOSING) &&
-                     t->snd_una == t->snd_max - 1u)
+                     (t->flags & MT_TF_FINSENT) && t->snd_una == t->snd_max - 1u)
                 tcp_term(t, MT_TERM_ULP_CLOSE);            /* all data acked, only our FIN open:
                                                             * the peer already finished (its
                                                             * TIME_WAIT expired): a clean close */
