@@ -132,6 +132,24 @@ typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
   uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms; } mt_tcp_info;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
 
+/* Data transfer. Send/receive rings are the two halves of the buffer given to mt_tcp_create.
+ * Latency rules: a send with nothing unacked leaves before mt_tcp_send returns; in-order data
+ * is readable (and DATA fired) before the mt_input that delivered it returns. */
+/* Copies into the send ring and transmits what the policy allows before returning. Returns
+ * the bytes accepted (< len when the ring is full; SEND_SPACE then fires once ACKs free
+ * room), or MT_ERR_STATE unless ESTABLISHED / CLOSE_WAIT. `push` also disables Nagle's hold
+ * for this data; `urgent` marks everything up to the end of this data as urgent. */
+int32_t  mt_tcp_send(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
+                     uint32_t now);
+uint32_t mt_tcp_recv(mt_tcp *t, uint8_t *dst, uint32_t max, uint32_t now);   /* copy out + consume */
+/* Contiguous run of received data starting `off` bytes in (0 if none); *p points into the ring. */
+uint32_t mt_tcp_peek(mt_tcp *t, uint32_t off, const uint8_t **p);
+/* Drop n received bytes; sends a window update when the window reopens meaningfully. */
+void     mt_tcp_consume(mt_tcp *t, uint32_t n, uint32_t now);
+uint32_t mt_tcp_send_free(const mt_tcp *t);
+/* 1 if unread data precedes the urgent mark; *bytes_to_mark = bytes still to read up to it. */
+int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
+
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);
 uint32_t  mt_next_deadline(const mt_stack *s, uint32_t now);   /* ms from now, or MT_NO_DEADLINE */

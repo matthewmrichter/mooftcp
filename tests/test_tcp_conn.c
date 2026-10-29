@@ -406,6 +406,7 @@ static void test_arp_hazard_no_duplicate(void) {
         T_EQ(mt_ring_write(&t2->sndq, (const uint8_t *)"BBBB", 4), 4);
         mt_tcp_output(t2, 1400000);
         T_EQ(mt_ring_write(&t2->sndq, (const uint8_t *)"CCCC", 4), 4);
+        t2->flags2 |= MT_T2_PUSHQ;                  /* as mt_tcp_send(push=1): Nagle would hold C */
         mt_tcp_output(t2, 1400000);
         T_EQ(fl2.n, 1);                             /* just the ARP request */
         n = mk_arp(f, 2, T_PEER_MAC, T_PEER, T_ME_MAC, T_ME);

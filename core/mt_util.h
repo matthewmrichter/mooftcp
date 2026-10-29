@@ -36,6 +36,9 @@ uint32_t mt_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len);
 uint16_t mt_cksum_fold(uint32_t sum);
 /* Copy and checksum in one pass (separate symbol so Plan 2 can override with asm). */
 uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len);
+/* A chunk sum computed as if it started at an even stream offset, re-based to an odd one
+ * (fold to 16 bits, swap the bytes). Add the result to the running sum. */
+uint32_t mt_cksum_odd(uint32_t part);
 
 /* Byte ring buffer. head = index of first used byte. */
 typedef struct { uint8_t *base; uint32_t size, head, used; } mt_ring;

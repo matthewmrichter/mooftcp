@@ -105,11 +105,19 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TF_PASSIVE  0x08u   /* SYN_RCVD reached from LISTEN: RST/timeout re-listens */
 #define MT_TF_EST      0x10u   /* counted in stats.tcp_conns_open */
 #define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
+/* flags2 */
+#define MT_T2_ACKHALF  0x01u   /* one full-size segment received and not yet ACKed (ack every 2nd) */
+#define MT_T2_PUSHQ    0x02u   /* app pushed: queued data goes out regardless of Nagle */
+#define MT_T2_SNDWANT  0x04u   /* a send was short: fire SEND_SPACE when ACKs free ring space */
+#define MT_T2_SNDURG   0x08u   /* snd_up is live: segments before it carry URG */
+#define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
 #define MT_TH_FIN 0x01u
 #define MT_TH_SYN 0x02u
 #define MT_TH_RST 0x04u
 #define MT_TH_PSH 0x08u
 #define MT_TH_ACK 0x10u
+#define MT_TH_URG 0x20u
+#define MT_TCP_DELACK_MS 100u
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
 struct mt_tcp {
@@ -117,6 +125,8 @@ struct mt_tcp {
     uint32_t snd_una, snd_nxt, snd_wnd, rcv_nxt;
     mt_ring sndq, rcvq;
     uint32_t snd_wl1, snd_wl2, iss, irs;
+    uint32_t rcv_adv;         /* right edge of the window last advertised (receiver SWS) */
+    uint32_t rcv_up, snd_up;  /* urgent marks: sequence number just past the urgent data */
     uint32_t tmr[MT_TT_N];    /* absolute ms deadlines, valid where the tmask bit is set */
     uint32_t rto, srtt;       /* ms; srtt 0 until measured (Task 9) */
     uint32_t ulp_start;       /* when the oldest unacked data last made progress */
@@ -126,7 +136,7 @@ struct mt_tcp {
     void *user;
     uint16_t lport, rport, flport, frport;   /* connection; listen filters (0 = any) */
     uint16_t mss, ulp_s;
-    uint8_t state, flags, tmask, used;
+    uint8_t state, flags, flags2, tmask, used;
     uint8_t gen;              /* bumped on create/release/terminate/abort: stale deferred events are dropped */
 };
 
@@ -240,6 +250,10 @@ void mt_tcp_note_released(mt_stack *s, const uint8_t *iphdr);   /* held frame ab
 /* Transmit whatever the state permits: SYN / SYN-ACK, queued data within the peer window,
  * FIN, or a pending ACK. Single decision point; every sender goes through it. */
 void mt_tcp_output(mt_tcp *t, uint32_t now);
+/* Window to advertise now: the receive ring's free space, except that growth smaller than
+ * min(mss, ring/2) over the last advertised edge is withheld (receiver SWS avoidance). With
+ * `commit` the advertised edge is recorded. Never shrinks an advertised window. */
+uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit);
 /* Build and send one segment of t: seq, flags (ACK is added/ack filled from rcv_nxt when the
  * MT_TH_ACK bit is set), n payload bytes copied from the send ring at offset off. */
 void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);

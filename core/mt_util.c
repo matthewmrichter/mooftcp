@@ -19,6 +19,12 @@ uint16_t mt_cksum_fold(uint32_t sum) {
     return (uint16_t)~sum;
 }
 
+uint32_t mt_cksum_odd(uint32_t part) {
+    part = (part & 0xFFFFu) + (part >> 16);
+    part = (part & 0xFFFFu) + (part >> 16);
+    return ((part << 8) | (part >> 8)) & 0xFFFFu;
+}
+
 uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len) {
     while (len > 1) {
         uint8_t a = src[0], b = src[1];

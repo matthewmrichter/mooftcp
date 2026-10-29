@@ -19,13 +19,15 @@
 /* 16 TCBs must fit the 16 KB stack budget: ~140 bytes with 32-bit pointers. */
 typedef char mt_tcp_size_ok[sizeof(struct mt_tcp) <= 300u ? 1 : -1];
 
-enum { EV_EST = 1, EV_DATA = 2, EV_CLOSING = 4 };
+enum { EV_EST = 1, EV_DATA = 2, EV_CLOSING = 4, EV_SPACE = 8, EV_URG = 16 };
 
 typedef struct {
     const uint8_t *data;
     uint32_t seq, ack;
-    uint16_t dlen, win, mss;
+    uint32_t acc_off, acc_n;     /* data[acc_off .. +acc_n) is accepted at rcv_nxt (see plan()) */
+    uint16_t dlen, win, mss, up;
     uint8_t fl;
+    uint8_t acc_fin;             /* the FIN is accepted too */
 } seg;
 
 static uint32_t rel(uint32_t at, uint32_t now) { return mt_time_before(at, now) ? 0u : at - now; }
@@ -48,6 +50,7 @@ static int is_sync(unsigned st) {      /* a SYN-ACK has been sent or received: R
 static void tcp_term(mt_tcp *t, mt_term_reason r) {
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
     t->flags &= MT_TF_ULPABORT;
+    t->flags2 = 0;
     t->tmask = 0;
     t->state = MT_TCP_CLOSED;
     t->gen++;
@@ -64,6 +67,8 @@ static void conn_reset(mt_tcp *t) {
     t->rto = MT_TCP_RTO_INIT;
     t->srtt = 0;
     t->flags &= MT_TF_ULPABORT;
+    t->flags2 = 0;
+    t->rcv_adv = t->rcv_up = t->snd_up = 0;
     t->mss = TCP_MSS_DEFAULT;
 }
 
@@ -188,6 +193,7 @@ static void send_rst(mt_tcp *t, uint32_t now) {
 static void back_to_listen(mt_tcp *t) {
     t->tmask = 0;
     t->flags &= MT_TF_ULPABORT;
+    t->flags2 = 0;
     t->state = MT_TCP_LISTEN;
     t->rip = 0;
     t->rport = 0;
@@ -260,6 +266,68 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     i->rto_ms = t->rto;
 }
 
+/* ---- Data transfer API ---- */
+
+int32_t mt_tcp_send(mt_tcp *t, const uint8_t *p, uint32_t len, int push, int urgent,
+                    uint32_t now) {
+    uint32_t n;
+    if (t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_CLOSE_WAIT) return MT_ERR_STATE;
+    t->tnow = now;
+    n = mt_ring_write(&t->sndq, p, len);
+    if (n < len) t->flags2 |= MT_T2_SNDWANT;               /* SEND_SPACE owed once ACKs free room */
+    if (push) t->flags2 |= MT_T2_PUSHQ;                    /* disables the Nagle hold */
+    if (urgent && n) {
+        t->snd_up = t->snd_una + t->sndq.used;             /* just past the last queued byte */
+        t->flags2 |= MT_T2_SNDURG;
+    }
+    mt_tcp_output(t, now);                                 /* leaves before we return if allowed */
+    return (int32_t)n;
+}
+
+/* Receive buffer space was freed by the app: tell the peer if the window reopens meaningfully
+ * (from below one MSS to at least one, or by at least half the ring). */
+static void rcv_freed(mt_tcp *t, uint32_t now) {
+    uint32_t cur, win;
+    if ((t->flags2 & MT_T2_RCVURG) && !mt_seq_gt(t->rcv_up, t->rcv_nxt - t->rcvq.used))
+        t->flags2 &= (uint8_t)~MT_T2_RCVURG;               /* mark passed: keeps the compare sane */
+    if (t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_FIN_WAIT_1 &&
+        t->state != MT_TCP_FIN_WAIT_2)
+        return;
+    cur = t->rcv_adv - t->rcv_nxt;
+    if (cur & 0x80000000u) cur = 0;
+    win = mt_tcp_rcv_window(t, 0);                         /* receiver SWS already applied */
+    if (win > cur && ((cur < t->mss && win >= t->mss) || win - cur >= t->rcvq.size / 2u)) {
+        t->flags |= MT_TF_ACKNOW;
+        mt_tcp_output(t, now);
+    }
+}
+
+void mt_tcp_consume(mt_tcp *t, uint32_t n, uint32_t now) {
+    t->tnow = now;
+    mt_ring_consume(&t->rcvq, n);
+    rcv_freed(t, now);
+}
+
+uint32_t mt_tcp_recv(mt_tcp *t, uint8_t *dst, uint32_t max, uint32_t now) {
+    uint32_t n = mt_ring_read(&t->rcvq, dst, max);
+    t->tnow = now;
+    if (n) rcv_freed(t, now);
+    return n;
+}
+
+uint32_t mt_tcp_peek(mt_tcp *t, uint32_t off, const uint8_t **p) {
+    return mt_ring_peek(&t->rcvq, off, p);
+}
+
+uint32_t mt_tcp_send_free(const mt_tcp *t) { return mt_ring_free(&t->sndq); }
+
+int mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark) {
+    uint32_t rd = t->rcv_nxt - t->rcvq.used;
+    if (!(t->flags2 & MT_T2_RCVURG) || !mt_seq_gt(t->rcv_up, rd)) return 0;
+    if (bytes_to_mark) *bytes_to_mark = t->rcv_up - rd;
+    return 1;
+}
+
 /* ---- ICMP ---- */
 
 void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, uint8_t type,
@@ -298,6 +366,7 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
             continue;
         }
         if ((t->tmask & (1u << MT_TT_DELACK)) && !mt_time_before(now, t->tmr[MT_TT_DELACK])) {
+            tmr_clr(t, MT_TT_DELACK);
             t->flags |= MT_TF_ACKNOW;
             mt_tcp_output(t, now);
         }
@@ -434,6 +503,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->lport = dport;
     t->irs = g->seq;
     t->rcv_nxt = g->seq + 1u;
+    t->rcv_adv = t->rcv_nxt;
     set_mss(t, g->mss);
     t->iss = isn(s, now);
     t->snd_una = t->snd_nxt = t->iss;
@@ -473,6 +543,7 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
     if (!(g->fl & MT_TH_SYN)) return;
     t->irs = g->seq;
     t->rcv_nxt = g->seq + 1u;
+    t->rcv_adv = t->rcv_nxt;
     set_mss(t, g->mss);
     t->snd_wnd = g->win;
     t->snd_wl1 = g->seq;
@@ -492,9 +563,37 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
     }
 }
 
+/* Which part of the segment's data is acceptable now: the bytes at rcv_nxt (an overlapping
+ * retransmission is trimmed at the front, anything past the free ring space at the back), plus
+ * the FIN if all the data fits. Pure: mt_tcp_input calls it before the checksum is known so the
+ * payload can be copied into the ring in the same pass as it is summed; in_sync commits it only
+ * after the checksum verified. Out of order, duplicate, zero-window and wrong-state segments get
+ * acc_n == 0 and are checksummed only. */
+static void plan(const mt_tcp *t, seg *g) {
+    uint32_t free_, dlen = g->dlen, skip = 0;
+    int fin = (g->fl & MT_TH_FIN) != 0;
+    g->acc_off = g->acc_n = 0;
+    g->acc_fin = 0;
+    if (t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_FIN_WAIT_1 &&
+        t->state != MT_TCP_FIN_WAIT_2 && t->state != MT_TCP_SYN_RCVD)
+        return;
+    free_ = mt_ring_free(&t->rcvq);
+    if (free_ == 0 || (g->fl & (MT_TH_SYN | MT_TH_RST))) return;
+    if (mt_seq_lt(g->seq, t->rcv_nxt)) {                   /* retransmission overlapping old data */
+        skip = t->rcv_nxt - g->seq;
+        if (skip > dlen) return;
+        dlen -= skip;
+    } else if (g->seq != t->rcv_nxt) {
+        return;                                            /* a gap: no reassembly in phase 1 */
+    }
+    if (dlen > free_) { dlen = free_; fin = 0; }
+    g->acc_off = skip;
+    g->acc_n = dlen;
+    g->acc_fin = (uint8_t)fin;
+}
+
 static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
-    uint32_t free_ = mt_ring_free(&t->rcvq), seq = g->seq, dlen = g->dlen, skip, seglen;
-    const uint8_t *d = g->data;
+    uint32_t free_ = mt_ring_free(&t->rcvq), seq = g->seq, dlen = g->dlen, seglen;
     int fin = (g->fl & MT_TH_FIN) != 0, inwin;
     unsigned ev = 0;
     uint32_t dacc = 0;
@@ -575,7 +674,13 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         int fa = (t->flags & MT_TF_FINSENT) && g->ack == t->snd_nxt;
         n -= (uint32_t)fa;
         mt_ring_consume(&t->sndq, n);
+        if (n && (t->flags2 & MT_T2_SNDWANT)) {            /* a short send is waiting for room */
+            t->flags2 &= (uint8_t)~MT_T2_SNDWANT;
+            ev |= EV_SPACE;
+        }
         t->snd_una = g->ack;
+        if ((t->flags2 & MT_T2_SNDURG) && mt_seq_ge(g->ack, t->snd_up))
+            t->flags2 &= (uint8_t)~MT_T2_SNDURG;
         t->rto = MT_TCP_RTO_INIT;
         t->ulp_start = now;
         if (t->snd_una == t->snd_nxt) tmr_clr(t, MT_TT_RTO);
@@ -598,64 +703,124 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         t->snd_wl2 = g->ack;
     }
 
-    if ((dlen || fin) &&
-        (t->state == MT_TCP_ESTABLISHED || t->state == MT_TCP_FIN_WAIT_1 ||
-         t->state == MT_TCP_FIN_WAIT_2)) {
-        if (mt_seq_lt(seq, t->rcv_nxt)) {                  /* retransmission overlapping old data */
-            skip = t->rcv_nxt - seq;
-            if (skip > dlen) { dlen = 0; fin = 0; }
-            else { d += skip; dlen -= skip; }
-            seq = t->rcv_nxt;
+    if (t->state == MT_TCP_ESTABLISHED || t->state == MT_TCP_FIN_WAIT_1 ||
+        t->state == MT_TCP_FIN_WAIT_2) {
+        if ((g->fl & MT_TH_URG) && !mt_seq_gt(seq, t->rcv_nxt)) {   /* urgent pointer advances? */
+            uint32_t ue = seq + g->up, rd = t->rcv_nxt - t->rcvq.used;
+            if (mt_seq_gt(ue, rd) &&
+                (!(t->flags2 & MT_T2_RCVURG) || mt_seq_gt(ue, t->rcv_up))) {
+                t->rcv_up = ue;
+                t->flags2 |= MT_T2_RCVURG;
+                ev |= EV_URG;
+            }
         }
-        if (dlen > free_) { dlen = free_; fin = 0; }
-        if (seq != t->rcv_nxt) {                           /* a gap: no reassembly, duplicate ACK */
+        if (g->acc_n || g->acc_fin) {
+            if (g->acc_n) {                                /* commit what mt_tcp_input copied */
+                t->rcvq.used += g->acc_n;
+                t->rcv_nxt += g->acc_n;
+                ev |= EV_DATA;
+                dacc = g->acc_n;
+                /* ACK policy: sub-MSS, PSH or FIN -> ACK before mt_input returns (output below,
+                 * after the callbacks, so a reply sent by the app carries it); a full segment is
+                 * ACKed with every second one, else by the 100 ms timer. */
+                if (g->acc_n >= t->mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
+                    !(t->flags2 & MT_T2_ACKHALF)) {
+                    t->flags2 |= MT_T2_ACKHALF;
+                    if (!(t->tmask & (1u << MT_TT_DELACK)))
+                        tmr_set(t, MT_TT_DELACK, now + MT_TCP_DELACK_MS);
+                } else {
+                    t->flags |= MT_TF_ACKNOW;
+                }
+            }
+            if (g->acc_fin) {
+                t->rcv_nxt++;
+                t->flags |= MT_TF_ACKNOW;
+                ev |= EV_CLOSING;
+                if (t->state == MT_TCP_ESTABLISHED) t->state = MT_TCP_CLOSE_WAIT;
+                else if (t->state == MT_TCP_FIN_WAIT_1) t->state = MT_TCP_CLOSING;
+                else enter_time_wait(t, now);
+            }
+        } else if (dlen || fin) {                          /* a gap or duplicate: duplicate ACK */
             t->flags |= MT_TF_ACKNOW;
-            goto out;
-        }
-        if (dlen) {
-            mt_ring_write(&t->rcvq, d, dlen);
-            t->rcv_nxt += dlen;
-            t->flags |= MT_TF_ACKNOW;
-            ev |= EV_DATA;
-            dacc = dlen;
-        }
-        if (fin) {
-            t->rcv_nxt++;
-            t->flags |= MT_TF_ACKNOW;
-            ev |= EV_CLOSING;
-            if (t->state == MT_TCP_ESTABLISHED) t->state = MT_TCP_CLOSE_WAIT;
-            else if (t->state == MT_TCP_FIN_WAIT_1) t->state = MT_TCP_CLOSING;
-            else enter_time_wait(t, now);
         }
     }
 out:
-    mt_tcp_output(t, now);
-    /* A callback may abort/release/re-listen: gen changes and the rest of the batch is stale. */
+    /* Data events run before the ACK goes out so a reply from the callback carries it. Other
+     * work (ACK, window, queued data) is sent first. A callback may abort/release/re-listen:
+     * gen changes and the rest of the batch is stale. */
+    if (!(ev & EV_DATA)) mt_tcp_output(t, now);
     if (ev & EV_EST) fire(t, MT_TCP_EV_ESTABLISHED, 0);
+    if ((ev & EV_URG) && t->gen == g0)
+        fire(t, MT_TCP_EV_URGENT, t->rcv_up - (t->rcv_nxt - t->rcvq.used));
     if ((ev & EV_DATA) && t->gen == g0) fire(t, MT_TCP_EV_DATA, dacc);
     if ((ev & EV_CLOSING) && t->gen == g0) fire(t, MT_TCP_EV_CLOSING, 0);
+    if ((ev & EV_SPACE) && t->gen == g0) fire(t, MT_TCP_EV_SEND_SPACE, mt_ring_free(&t->sndq));
+    if ((ev & EV_DATA) && t->gen == g0) mt_tcp_output(t, now);
+}
+
+/* Sum the segment's payload for the checksum. Accepted bytes are copied into the free space of
+ * the receive ring in the same pass (nothing is committed until the sum verifies); the skipped
+ * front and the trimmed tail are summed only. Chunk sums are computed as if each started at an
+ * even offset and re-based with mt_cksum_odd where the chunk really starts at an odd stream
+ * offset. */
+static uint32_t data_sum(mt_tcp *t, const seg *g) {
+    uint32_t n = g->acc_n, skip = g->acc_off, size, pos, c1, part, sum, tail;
+    const uint8_t *d;
+    uint8_t *base;
+    if (n == 0) return mt_cksum_add(0, g->data, g->dlen);
+    size = t->rcvq.size;
+    base = t->rcvq.base;
+    pos = t->rcvq.head + t->rcvq.used;
+    if (pos >= size) pos -= size;
+    d = g->data + skip;
+    c1 = size - pos;
+    if (c1 > n) c1 = n;
+    part = mt_cksum_copy(0, base + pos, d, c1);
+    if (n > c1) {                                          /* the free space wraps: two chunks */
+        uint32_t p2 = mt_cksum_copy(0, base, d + c1, n - c1);
+        part += (c1 & 1u) ? mt_cksum_odd(p2) : p2;
+    }
+    if (skip & 1u) part = mt_cksum_odd(part);
+    sum = (skip ? mt_cksum_add(0, g->data, skip) : 0u) + part;
+    tail = g->dlen - skip - n;
+    if (tail) {
+        uint32_t ts = mt_cksum_add(0, d + n, tail);
+        sum += ((skip + n) & 1u) ? mt_cksum_odd(ts) : ts;
+    }
+    return sum;
 }
 
 void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len,
                   uint32_t now) {
     seg g;
     mt_tcp *t;
+    uint32_t sum;
     uint16_t hl, sport, dport;
     if (len < TCP_HDR || dst != s->cfg.addr || src == 0 || src == MT_ETH_BCAST_IP) goto drop;
     hl = (uint16_t)((pl[12] >> 4) << 2);
     if (hl < TCP_HDR || hl > len) goto drop;
-    if (mt_cksum_fold(mt_cksum_add(mt_tcp_pseudo(src, dst, len), pl, len)) != 0) goto drop;
     if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) goto drop;
-    s->stats.tcp_in++;
     sport = mt_rd16(pl);
     dport = mt_rd16(pl + 2);
     g.seq = mt_rd32(pl + 4);
     g.ack = mt_rd32(pl + 8);
-    g.fl = (uint8_t)(pl[13] & 0x17u);                      /* FIN SYN RST ACK; PSH/URG ignored */
+    g.fl = (uint8_t)(pl[13] & 0x3Fu);                      /* FIN SYN RST PSH ACK URG */
     g.win = mt_rd16(pl + 14);
+    g.up = mt_rd16(pl + 18);
     g.data = pl + hl;
     g.dlen = (uint16_t)(len - hl);
+    /* Single pass over the payload: the header sum first (hl is a multiple of 4, so chaining
+     * is exact), then payload bytes are copied into the receive ring while summed. The
+     * connection is found, and the acceptable part of the data planned, before the checksum
+     * is known; only the ring's unused space is touched until it verifies. */
     t = lookup(s, src, sport, dport);
+    g.acc_off = g.acc_n = 0;
+    g.acc_fin = 0;
+    if (t) plan(t, &g);
+    sum = mt_cksum_add(mt_tcp_pseudo(src, dst, len), pl, hl);
+    sum += data_sum(t, &g);
+    if (mt_cksum_fold(sum) != 0) goto drop;
+    s->stats.tcp_in++;
     if (!t) {                                              /* no connection: reset the sender */
         if (g.fl & MT_TH_RST) return;
         if (g.fl & MT_TH_ACK)
