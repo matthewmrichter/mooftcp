@@ -9,6 +9,8 @@ typedef struct {
     uint32_t reasm;     /* offset of the IPv4 reassembly slot */
     uint32_t udp;       /* offset of the UDP endpoint array */
     uint32_t tcp;       /* offset of the TCB array */
+    uint32_t dns;       /* offset of the DNS state (query slots + rx buffer) */
+    uint32_t dcache;    /* offset of the DNS cache */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -27,6 +29,10 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off = mt_arena_up(off + (uint32_t)l->max_udp * (uint32_t)sizeof(mt_udp));
     o->tcp = off;
     off = mt_arena_up(off + (uint32_t)l->max_tcp * (uint32_t)sizeof(mt_tcp));
+    o->dns = off;
+    off = mt_arena_up(off + (uint32_t)sizeof(mt_dns));
+    o->dcache = off;
+    off = mt_arena_up(off + (uint32_t)l->dns_cache * (uint32_t)sizeof(mt_dns_cent));
     /* Later tasks: add their section here (offset = off; off = mt_arena_up(off + bytes);). */
     o->total = off;
 }
@@ -65,6 +71,9 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->udp_eph = (uint16_t)(49152u + seed % 16384u);
     s->tcp = (mt_tcp *)(void *)(base + lay.tcp);
     s->tcp_eph = (uint16_t)(49152u + (seed + 7919u) % 16384u);
+    s->dns = (mt_dns *)(void *)(base + lay.dns);
+    s->dns->rnd = (seed ^ 0x5DEECE66u) | 1u;
+    s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
     /* Later tasks: point their sections here. */
     return s;
 }
@@ -91,6 +100,7 @@ int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len) {
 
 void mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now) {
     uint16_t type;
+    s->now = now;
     if (len < MT_ETH_HDR) return;
     if (memcmp(frame, s->cfg.mac, 6) != 0 &&
         (frame[0] & frame[1] & frame[2] & frame[3] & frame[4] & frame[5]) != 0xFF)
@@ -130,16 +140,17 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
 /* ---- Timers: plain call chain; see the module checklist in mt_int.h ---- */
 
 void mt_tick(mt_stack *s, uint32_t now) {
+    s->now = now;
     mt_arp_tick(s, now);
     mt_ip_timers(s, now);
     mt_tcp_timers(s, now);
-    /* Later: mt_dns_timers. */
+    mt_dns_timers(s, now);
 }
 
 uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     uint32_t d = mt_arp_deadline(s, now);
     d = mt_dl_min(d, mt_ip_deadline(s, now));
     d = mt_dl_min(d, mt_tcp_deadline(s, now));
-    /* Later: likewise DNS. */
+    d = mt_dl_min(d, mt_dns_deadline(s, now));
     return d;
 }

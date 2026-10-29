@@ -154,6 +154,39 @@ struct mt_tcp {
 };
 
 
+/* ---- DNS (mt_dns.c) ----
+ * One lazily created UDP endpoint (rx buffer inside the arena), MT_DNS_SLOTS concurrent
+ * queries, and a lim.dns_cache entry cache (separate arena section). The query name is kept
+ * once per slot (256 bytes) so retries and response validation can rebuild it. */
+#define MT_DNS_SLOTS 4u
+#define MT_DNS_RXBUF 1024u
+#define MT_DNS_CNAME 64u         /* cache key / canonical name capacity (63 chars + NUL) */
+typedef struct {
+    char name[MT_DNS_CNAME];     /* key: the name as queried (lower case) */
+    char canon[MT_DNS_CNAME];    /* canonical name from the answer */
+    mt_ip4 addr[MT_DNS_MAXADDR];
+    uint32_t exp;                /* absolute ms expiry */
+    uint32_t used;               /* ms stamp of last use (LRU) */
+    uint8_t naddr;               /* 0 = free */
+} mt_dns_cent;
+typedef struct {
+    mt_dns_result *out;
+    mt_dns_cb cb;
+    void *user;
+    uint32_t t0;                 /* time the current question was first sent */
+    uint16_t id;
+    uint8_t used, qtype, tries, dom;   /* tries = retransmissions done; dom = domain appended */
+    char name[MT_DNS_NAMELEN + 1];     /* as queried, no trailing dot */
+} mt_dns_q;
+typedef struct {
+    mt_udp *udp;                 /* NULL until the first network query */
+    uint32_t rnd;                /* xorshift32 state for query IDs */
+    mt_dns_q q[MT_DNS_SLOTS];
+    uint8_t rx[MT_DNS_RXBUF];
+} mt_dns;
+void mt_dns_timers(mt_stack *s, uint32_t now);
+uint32_t mt_dns_deadline(const mt_stack *s, uint32_t now);
+
 struct mt_stack {
     mt_ifconfig cfg;
     mt_link link;
@@ -166,6 +199,9 @@ struct mt_stack {
     mt_reasm *reasm;
     mt_udp *udp;             /* lim.max_udp endpoints */
     mt_tcp *tcp;             /* lim.max_tcp TCBs */
+    mt_dns *dns;
+    mt_dns_cent *dcache;     /* lim.dns_cache entries */
+    uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
     /* The TCP segment (if any) that mt_arp_insert just released from the held slot; consulted
      * and cleared by mt_tcp_arp_resolved so it does not retransmit that same segment. */

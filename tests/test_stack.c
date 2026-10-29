@@ -11,6 +11,9 @@ static void test_stack_size_budget(void) {
     T_EQ(l.max_tcp, 16); T_EQ(l.max_udp, 8); T_EQ(l.arp_entries, 8); T_EQ(l.dns_cache, 8);
     sz = mt_stack_size(&l);
     T_CHECK(sz <= 16384);
+    /* Interim cap (controller ruling): Task 12 adds a 1024-byte log, so before it lands the
+     * stack must stay <= 15360 to leave the final 16384 budget intact. */
+    T_CHECK(sz <= 15360);
     T_CHECK(mt_stack_init(mem, sz, &l, &link, 1) != NULL);
     T_CHECK(mt_stack_init(mem, sz - 1, &l, &link, 1) == NULL);
     T_CHECK(mt_stack_init((uint8_t *)mem + 2, sz, &l, &link, 1) == NULL);  /* misaligned */

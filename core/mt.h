@@ -99,6 +99,33 @@ void     mt_udp_done(mt_udp *u);                       /* drop the peeked (oldes
 uint32_t mt_udp_queued(const mt_udp *u);               /* number of queued datagrams */
 void     mt_udp_release(mt_udp *u);
 
+/* ---- DNS resolver (mt_dns.c) ---- */
+#define MT_DNS_MAXADDR 4          /* matches MacTCP hostInfo addr[4] */
+#define MT_DNS_NAMELEN 255
+typedef enum { MT_DNS_OK = 0, MT_DNS_NOT_FOUND, MT_DNS_NO_ANSWER, MT_DNS_TIMEOUT,
+               MT_DNS_NO_SERVER, MT_DNS_BUSY, MT_DNS_BAD_NAME } mt_dns_status;
+typedef enum { MT_DNS_Q_A = 1, MT_DNS_Q_PTR = 12, MT_DNS_Q_HINFO = 13, MT_DNS_Q_MX = 15 } mt_dns_qtype;
+typedef struct { mt_dns_status status; char cname[MT_DNS_NAMELEN + 1];
+  mt_ip4 addr[MT_DNS_MAXADDR]; uint8_t naddr;                 /* A */
+  char cpu[64], os[64];                                        /* HINFO */
+  uint16_t mx_pref; char mx_name[MT_DNS_NAMELEN + 1];          /* MX (lowest pref) */
+} mt_dns_result;                                               /* PTR answer -> cname */
+typedef void (*mt_dns_cb)(void *user, const mt_dns_result *r);
+#define MT_DNS_IN_PROGRESS 1
+/* Returns 0 (= MT_DNS_OK; *out filled, cb NOT called) for dotted-decimal names and cache hits,
+ * MT_DNS_IN_PROGRESS (1; cb(user, out) fires later from mt_input / mt_tick; `out` must stay
+ * valid until then; `name` is copied), or the NEGATED mt_dns_status (e.g. -MT_DNS_BUSY) on an
+ * immediate error. (Errors are negative because positive status values would collide with the
+ * "in progress" value 1.) The first network query lazily creates one ephemeral UDP endpoint
+ * (counts against max_udp; kept for the stack's lifetime); if no slot is free the query fails
+ * with -MT_DNS_BUSY. */
+int  mt_dns_query(mt_stack *s, const char *name, mt_dns_qtype q, mt_dns_result *out,
+                  mt_dns_cb cb, void *user, uint32_t now);
+int  mt_dns_ptr_name(mt_ip4 a, char out[32]);    /* "d.c.b.a.in-addr.arpa"; returns its length */
+typedef void (*mt_dns_enum_cb)(void *user, const char *name, const mt_ip4 *addr, uint8_t naddr,
+                               uint32_t ttl_left_s);
+void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now);
+
 /* ---- TCP ---- */
 typedef struct mt_tcp mt_tcp;
 typedef enum {
