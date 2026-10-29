@@ -97,17 +97,25 @@ uint8_t mt_tcp_count_open(const mt_stack *s) {
 }
 
 /* ---- Diagnostic log ----
- * Single writer (the context currently inside the core), any one reader. The writer fills the
- * record and only then publishes it by advancing log_wr (one 16-bit store); it never touches
- * log_rd. The reader copies a record and re-checks that the writer has not lapped it, so a
- * torn record is never returned. No loops, no allocation: O(1) and safe from interrupt time. */
+ * One writer context (whichever is inside the core), one reader context (mt_log_read), either
+ * may interrupt the other. The writer fills slot (log_wr & 127), then publishes it by advancing
+ * log_wr (one 16-bit store, after a barrier); it never touches log_rd. While it fills a slot,
+ * log_wr still points at that slot, so a slot is stable only if it is not the one log_wr names:
+ * of the 128 slots at most 127 are readable (wr - rd <= 127). The reader copies a record, then
+ * re-reads log_wr (after a barrier) and keeps the copy only if the slot was still safe; otherwise
+ * it skips ahead to the oldest safe record. A torn record is never returned. O(1) writes. */
 void mt_log_put(mt_stack *s, uint8_t code, uint8_t a, uint16_t b) {
-    mt_logrec *r = &s->log[s->log_wr & (MT_LOG_RECS - 1u)];
+    uint16_t wr = s->log_wr;
+    mt_logrec *r = &s->log[wr & (MT_LOG_RECS - 1u)];
     r->t = s->now;
+#ifdef MT_TEST_HOOKS
+    if (s->log_put_spy) s->log_put_spy(s);
+#endif
     r->code = code;
     r->a = a;
     r->b = b;
-    s->log_wr = (uint16_t)(s->log_wr + 1u);
+    MT_BARRIER();                                       /* record complete before it is published */
+    s->log_wr = (uint16_t)(wr + 1u);
 }
 
 void mt_log_enable(mt_stack *s, int on) { s->log_on = (uint8_t)(on != 0); }
@@ -116,14 +124,22 @@ uint16_t mt_log_read(mt_stack *s, mt_logrec *out, uint16_t max) {
     uint16_t n = 0;
     while (n < max) {
         uint16_t wr = s->log_wr, rd = s->log_rd;
-        if ((uint16_t)(wr - rd) > MT_LOG_RECS) rd = (uint16_t)(wr - MT_LOG_RECS);   /* lapped: skip lost */
+        const mt_logrec *r;
+        MT_BARRIER();                                   /* the copy below is after the log_wr load */
+        if ((uint16_t)(wr - rd) >= MT_LOG_RECS) rd = (uint16_t)(wr - (MT_LOG_RECS - 1u));   /* lapped */
         if (rd == wr) {
             s->log_rd = rd;
             break;
         }
-        out[n] = s->log[rd & (MT_LOG_RECS - 1u)];
-        if ((uint16_t)(s->log_wr - rd) > MT_LOG_RECS) {   /* overwritten while copying: retry newer */
-            s->log_rd = (uint16_t)(s->log_wr - MT_LOG_RECS);
+        r = &s->log[rd & (MT_LOG_RECS - 1u)];
+        out[n].t = r->t;
+        out[n].code = r->code;
+        out[n].a = r->a;
+        out[n].b = r->b;
+        MT_BARRIER();                                   /* the copy is before the log_wr re-load */
+        wr = s->log_wr;
+        if ((uint16_t)(wr - rd) >= MT_LOG_RECS) {       /* writer reached this slot meanwhile: retry */
+            s->log_rd = (uint16_t)(wr - (MT_LOG_RECS - 1u));
             continue;
         }
         s->log_rd = (uint16_t)(rd + 1u);

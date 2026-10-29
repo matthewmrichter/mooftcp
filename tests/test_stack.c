@@ -153,21 +153,73 @@ static void test_log_records_and_wraps(void) {
         T_EQ(mt_tcp_close(t, 100u + i), MT_OK);
     }
     n = mt_log_read(s, r, MT_LOG_RECS + 8);
-    T_EQ(n, MT_LOG_RECS);                              /* ring holds the newest 128 */
+    T_EQ(n, MT_LOG_RECS - 1);                          /* newest 127: one slot is the writer's */
     for (i = 0; i < n; i++) {
         T_CHECK(r[i].t >= last);
         last = r[i].t;
     }
     T_EQ(r[n - 1].a, MT_TCP_CLOSED);
     T_EQ(r[n - 1].t, 199);                             /* newest kept */
-    T_EQ(r[0].t, 136);                                 /* oldest 72 were dropped */
-    T_EQ(r[0].a, MT_TCP_LISTEN);
+    T_EQ(r[0].t, 136);                                 /* oldest 73 were dropped */
+    T_EQ(r[0].a, MT_TCP_CLOSED);
     T_EQ(r[0].b, 1036);
     mt_log_enable(s, 0);
     mt_tick(s, 500);
     T_EQ(mt_tcp_listen(t, 0, 0, 5), MT_OK);
     T_EQ(mt_log_read(s, r, 4), 0);                     /* off again: nothing recorded */
     mt_tcp_release(t);
+}
+
+/* Self-checking records: t = seq, a = low byte of seq, b = ~seq. */
+static void put_seq(mt_stack *s, uint32_t seq) {
+    s->now = seq;
+    mt_log_put(s, MT_LOG_DROP, (uint8_t)seq, (uint16_t)~seq);
+}
+static int rec_ok(const mt_logrec *r) {
+    return r->code == MT_LOG_DROP && r->a == (uint8_t)r->t && r->b == (uint16_t)~r->t;
+}
+static mt_stack *race_stack;
+static mt_logrec race_buf[MT_LOG_RECS];
+static uint16_t race_n;
+static void race_spy(mt_stack *s) {            /* a reader interrupts the writer mid-record */
+    (void)s;
+    race_n = mt_log_read(race_stack, race_buf, MT_LOG_RECS);
+}
+
+static void test_log_no_torn_records(void) {
+    fake_link fl; mt_logrec r[MT_LOG_RECS + 8];
+    static const uint16_t pending[] = {127, 128, 129, 255, 300};
+    uint16_t k, i, n;
+    mt_stack *s = tstack_new(&fl, T_ME);
+    mt_log_enable(s, 1);
+    for (k = 0; k < sizeof pending / sizeof pending[0]; k++) {   /* plain: never torn, newest kept */
+        uint32_t seq0 = 1000u * (k + 1u), last;
+        for (i = 0; i < pending[k]; i++) put_seq(s, seq0 + i);
+        n = mt_log_read(s, r, MT_LOG_RECS + 8);
+        T_CHECK(n >= 1 && n <= MT_LOG_RECS - 1);
+        for (i = 0; i < n; i++) T_CHECK(rec_ok(&r[i]));
+        last = seq0 + pending[k] - 1u;
+        T_EQ(r[n - 1].t, last);
+        for (i = 1; i < n; i++) T_EQ(r[i].t, r[i - 1].t + 1);   /* contiguous, oldest first */
+    }
+    /* Deterministic race: ring holds 128 unread records, the writer is mid-record in the very
+     * slot the oldest record occupies when a reader runs. That slot must not be returned. */
+    {
+        mt_stack *s2 = tstack_new(&fl, T_ME);
+        uint32_t seq;
+        mt_log_enable(s2, 1);
+        for (seq = 5000; seq < 5000 + MT_LOG_RECS; seq++) put_seq(s2, seq);
+        race_stack = s2;
+        race_n = 0;
+        s2->log_put_spy = race_spy;
+        put_seq(s2, 5000 + MT_LOG_RECS);
+        s2->log_put_spy = NULL;
+        T_CHECK(race_n >= 1);
+        for (i = 0; i < race_n; i++) T_CHECK(rec_ok(&race_buf[i]));
+        for (i = 1; i < race_n; i++) T_EQ(race_buf[i].t, race_buf[i - 1].t + 1);
+        n = mt_log_read(s2, r, MT_LOG_RECS + 8);                /* and the rest is consistent too */
+        for (i = 0; i < n; i++) T_CHECK(rec_ok(&r[i]));
+    }
 }
 
 /* ---- every counter is bumped by some scripted scenario ---- */
@@ -180,6 +232,8 @@ static const char *const stat_names[] = {
     "tcp_passive_opens", "tcp_resets_in", "tcp_resets_out", "tcp_conns_open"
 };
 #define N_STATS (sizeof stat_names / sizeof stat_names[0])
+/* C99 compile-time check: the name table covers exactly the (all-uint32) fields of mt_stats. */
+typedef char stat_names_cover_struct[(sizeof(mt_stats) == N_STATS * sizeof(uint32_t)) ? 1 : -1];
 #define STAT_GAUGE (N_STATS - 1)   /* tcp_conns_open: a gauge, so it is checked (back to 0) instead */
 
 static void stats_add(uint32_t *sum, const mt_stack *s) {
@@ -198,6 +252,7 @@ static int drop_nth_data(void *user, int from, const uint8_t *f, uint16_t len) {
 
 static void test_stats_all_counters_live(void) {
     uint32_t sum[N_STATS];
+    mt_stats sa, sb, ss;      /* per stack: A, B (pair) and S (single stack on a fake wire) */
     size_t i;
     static uint8_t big[60000], pay[3000], ba[65536], bb[32768], ub[8192], ub2[2048], trb[4096];
     int cnt = 0;
@@ -236,6 +291,7 @@ static void test_stats_all_counters_live(void) {
         pair_run(p, 20000);
         T_EQ(mt_get_stats(a)->tcp_conns_open, 0);
         T_EQ(mt_get_stats(b)->tcp_conns_open, 0);
+        sa = *mt_get_stats(a); sb = *mt_get_stats(b);
         stats_add(sum, a); stats_add(sum, b);
         mt_tcp_release(ta); mt_tcp_release(tb); mt_tcp_release(tr);
         mt_udp_release(ua); mt_udp_release(ub_);
@@ -271,6 +327,7 @@ static void test_stats_all_counters_live(void) {
         T_EQ(dr.status, MT_DNS_TIMEOUT);
         n = mk_arp(f, 1, T_PEER_MAC, T_PEER, zero, T_ME);
         for (i = 0; i < 70; i++) mt_input(s, f, n, 100000);        /* the wire refuses after 64 */
+        ss = *mt_get_stats(s);
         stats_add(sum, s);
         k = mt_log_read(s, lr, MT_LOG_RECS);
         for (n = 0; n < k; n++) {
@@ -281,6 +338,29 @@ static void test_stats_all_counters_live(void) {
         for (n = 1; n < 8; n++)                                    /* drops on ETH..TCP, ARP and DNS failures */
             if (n != MT_LOGL_UDP + 0 || 1) T_CHECK(seen[n]);
     }
+    /* Exact values, per stack: catches counters bumped on the wrong stack or twice. */
+    T_EQ(sa.arp_out, 1); T_EQ(sa.arp_in, 1); T_EQ(sb.arp_out, 1); T_EQ(sb.arp_in, 1);
+    T_EQ(sa.tcp_active_opens, 2);        /* the refused connect and the bulk connection */
+    T_EQ(sa.tcp_passive_opens, 0); T_EQ(sb.tcp_active_opens, 0);
+    T_EQ(sb.tcp_passive_opens, 1);       /* only the bulk connection had a listener */
+    T_EQ(sb.tcp_resets_out, 1); T_EQ(sa.tcp_resets_in, 1);   /* the refused connect */
+    T_EQ(sa.tcp_resets_out, 0); T_EQ(sb.tcp_resets_in, 0);
+    T_EQ(sb.ip_reasm_ok, 1); T_EQ(sa.ip_reasm_ok, 0);        /* the 3000-byte UDP datagram */
+    T_EQ(sa.ip_frag_out, 3); T_EQ(sb.ip_frag_out, 0);
+    T_EQ(sb.udp_noport, 1); T_EQ(sa.udp_noport, 0);          /* one datagram to a closed port */
+    T_EQ(sb.udp_in, 1);
+    T_EQ(sa.icmp_out, 1); T_EQ(sb.icmp_in, 1);               /* echo request */
+    T_EQ(sb.icmp_out, 2); T_EQ(sa.icmp_in, 2);               /* echo reply + port unreachable */
+    T_CHECK(sa.tcp_fast_rexmt >= 1);
+    T_CHECK(sa.tcp_rexmt >= sa.tcp_fast_rexmt);
+    T_EQ(sb.tcp_fast_rexmt, 0);
+    T_EQ(ss.tcp_in_drops, 1);            /* the one corrupted segment */
+    T_EQ(ss.ip_in_drops, 1);             /* the one corrupted IP header */
+    T_EQ(ss.udp_drops, 1); T_EQ(ss.ip_reasm_fail, 1); T_EQ(ss.ip_reasm_ok, 0);
+    T_EQ(ss.arp_in, 70);                 /* 70 ARP requests injected */
+    T_EQ(ss.arp_out, 64);                /* ARP frames the wire accepted (it takes 64 in all)... */
+    T_EQ(ss.eth_tx_err, 8);              /* ...and those it refused after 64 frames */
+    for (i = 0; i < N_STATS; i++) T_CHECK(stat_names[i] != NULL);
     for (i = 0; i < N_STATS; i++)
         if (i != STAT_GAUGE && sum[i] == 0) {
             fprintf(stderr, "%s:%d: counter %s was never bumped\n", __FILE__, __LINE__, stat_names[i]);
@@ -290,4 +370,4 @@ static void test_stats_all_counters_live(void) {
 
 T_MAIN(test_stack_size_budget, test_unconfigured_silent, test_demux_filters, test_tx_error_counted,
        test_stats_counts, test_log_disabled_by_default, test_log_records_and_wraps,
-       test_stats_all_counters_live)
+       test_log_no_torn_records, test_stats_all_counters_live)

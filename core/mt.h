@@ -35,9 +35,12 @@ typedef struct {
     uint32_t arp_in;      /* ARP frames received (accepted by the Ethernet filter) */
     uint32_t arp_out;     /* ARP requests/replies transmitted */
     uint32_t arp_drops;   /* unresolved next hops given up on + held frames discarded/replaced */
-    uint32_t ip_in;         /* datagrams/fragments accepted by IPv4 input */
+    uint32_t ip_in;         /* datagrams/fragments that passed IPv4 header validation (counted before
+                             * reassembly and ICMP checks: some also appear in ip_in_drops) */
     uint32_t ip_out;        /* datagrams handed to IPv4 output (fragmented ones count once) */
-    uint32_t ip_in_drops;   /* IPv4 frames dropped (malformed, not ours, reassembly refusal, bad ICMP checksum/size) */
+    uint32_t ip_in_drops;   /* all IPv4-layer drops: header-validation failures (never in ip_in) AND later refusals
+                             * (reassembly, bad ICMP checksum/size; those are also in ip_in), so
+                             * ip_in - ip_in_drops is NOT the number delivered */
     uint32_t ip_frag_out;   /* fragment frames emitted */
     uint32_t ip_reasm_ok;   /* datagrams reassembled */
     uint32_t ip_reasm_fail; /* reassemblies abandoned (timeout, overlap, overflow, slot busy) */
@@ -91,8 +94,8 @@ enum { MT_LOG_TCP_STATE = 1, MT_LOG_TCP_TERM, MT_LOG_TCP_REXMT, MT_LOG_DROP, MT_
 enum { MT_LOGL_ETH = 1, MT_LOGL_ARP, MT_LOGL_IP, MT_LOGL_UDP, MT_LOGL_TCP };
 #define MT_LOG_RECS 128u
 void     mt_log_enable(mt_stack *s, int on);   /* default off; records are kept when turned off */
-/* Copy up to max records, oldest first, and consume them. Records overwritten before they
- * were read are lost; returns the number copied. */
+/* Copy up to max records, oldest first, and consume them. At most 127 records are pending (one
+ * of the 128 slots is the writer's in-flight slot); older ones are lost. Returns the number copied. */
 uint16_t mt_log_read(mt_stack *s, mt_logrec *out, uint16_t max);
 
 /* ICMP echo. The callback fires for each echo reply addressed to us. */

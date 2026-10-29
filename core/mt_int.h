@@ -202,9 +202,10 @@ struct mt_stack {
     mt_dns *dns;
     mt_dns_cent *dcache;     /* lim.dns_cache entries */
     mt_logrec *log;          /* MT_LOG_RECS records (arena section) */
-    uint16_t log_wr, log_rd; /* free-running counters, modulo 65536 (a multiple of MT_LOG_RECS):
-                              * log_wr is written only by the logging context, log_rd only by
-                              * mt_log_read; record index = counter & (MT_LOG_RECS - 1) */
+    /* Free-running counters, modulo 65536 (a multiple of MT_LOG_RECS); record index = counter &
+     * (MT_LOG_RECS - 1). volatile: the writer may be an interrupt handler and the reader main
+     * code. Assumption: exactly one writer context (log_wr) and one reader context (log_rd). */
+    volatile uint16_t log_wr, log_rd;
     uint8_t log_on;
     uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
@@ -221,6 +222,8 @@ struct mt_stack {
     void (*icmp_err_spy)(void *ctx, uint8_t proto, mt_ip4 dst, uint16_t lport, uint16_t rport,
                          uint8_t type, uint8_t code);
     void *icmp_err_ctx;
+    void (*log_put_spy)(mt_stack *s);   /* called inside mt_log_put after the time is stored,
+                                         * before the rest of the record and before log_wr moves */
 #endif
     /* scratch */
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
@@ -229,6 +232,12 @@ struct mt_stack {
 
 /* ---- Diagnostic log (mt_stack.c) ----
  * mt_log() is the only call sites use: one load + branch while the log is off. */
+/* Compiler-only barrier: keeps record accesses on the correct side of the log_wr accesses. */
+#if defined(__GNUC__)
+#define MT_BARRIER() __asm__ volatile("" ::: "memory")
+#else
+#define MT_BARRIER() ((void)0)
+#endif
 void mt_log_put(mt_stack *s, uint8_t code, uint8_t a, uint16_t b);
 static inline void mt_log(mt_stack *s, uint8_t code, uint8_t a, uint16_t b) {
     if (s->log_on) mt_log_put(s, code, a, b);
