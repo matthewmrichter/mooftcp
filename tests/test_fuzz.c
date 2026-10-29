@@ -696,10 +696,41 @@ static uint16_t gen_frame(uint8_t *f) {
     }
 }
 
+/* Does the (possibly damaged) frame carry a TCP segment whose checksum verifies, read the way
+ * the core reads it (IHL and total length from the header)? Returns the offset of the TCP
+ * checksum field, or 0. */
+static uint32_t tcp_cksum_verifies(const uint8_t *f, uint16_t n) {
+    const uint8_t *ip = f + 14;
+    uint32_t ihl, tot, src, dst, sum;
+    if (n < 34 || mt_rd16(f + 12) != 0x0800 || ip[9] != 6) return 0;
+    ihl = (uint32_t)(ip[0] & 15) << 2;
+    tot = mt_rd16(ip + 2);
+    if (ihl < 20 || tot > (uint32_t)n - 14 || tot < ihl + 20) return 0;
+    src = mt_rd32(ip + 12);
+    dst = mt_rd32(ip + 16);
+    sum = (src >> 16) + (src & 0xFFFFu) + (dst >> 16) + (dst & 0xFFFFu) + 6u + (tot - ihl);
+    if (mt_cksum_fold(mt_cksum_add(sum, ip + ihl, (uint16_t)(tot - ihl))) != 0) return 0;
+    return 14 + ihl + 16;
+}
+
+/* Did the damage touch anything the TCP checksum covers (pseudo-header fields: header length,
+ * total length, protocol, addresses; and everything after the 20-byte IP header)? Changes to
+ * TOS, ID, flags/offset or TTL alone leave the segment intact and its checksum rightly valid. */
+static int tcp_visible_change(const uint8_t *a, const uint8_t *b, uint16_t n) {
+    const uint8_t *x = a + 14, *y = b + 14;
+    return (x[0] & 15) != (y[0] & 15) || x[2] != y[2] || x[3] != y[3] || x[9] != y[9] ||
+           memcmp(x + 12, y + 12, 8) != 0 || memcmp(x + 20, y + 20, (size_t)n - 34) != 0;
+}
+
 /* Flip 1..4 bytes of the IP packet; half the time repair the IP header checksum so the damage
- * reaches the upper layers. */
+ * reaches the upper layers. The flips are random, so with two or more of them the TCP checksum
+ * can still verify (the ones-complement sum of the changes cancels, about 1 in 65535): damage
+ * TCP cannot detect by design, which the receive-data oracle (rx_check) must never see. Such a
+ * frame gets one more bit flipped in its TCP checksum, so every damaged segment is detectable. */
 static void mutate(uint8_t *f, uint16_t n) {
-    uint32_t k, m = 1 + rn(4), hl;
+    static uint8_t orig[1600];
+    uint32_t k, m = 1 + rn(4), hl, ck;
+    memcpy(orig, f, n < sizeof orig ? n : sizeof orig);
     for (k = 0; k < m; k++) f[14 + rn((uint32_t)n - 14)] ^= (uint8_t)(1 + rn(255));
     if (rn(2)) {
         hl = (uint32_t)(f[14] & 15) << 2;
@@ -707,6 +738,8 @@ static void mutate(uint8_t *f, uint16_t n) {
         mt_wr16(f + 24, 0);
         mt_wr16(f + 24, mt_cksum_fold(mt_cksum_add(0, f + 14, hl)));
     }
+    if (n <= sizeof orig && tcp_visible_change(orig, f, n) && (ck = tcp_cksum_verifies(f, n)) != 0)
+        f[ck + 1] ^= 1u;
 }
 
 /* ---- the run ---- */
@@ -1722,10 +1755,11 @@ static void test_fuzz_pb(void) {
     /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n */
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
+    long steps = getenv("FZ_STEPS") ? atol(getenv("FZ_STEPS")) : PB_STEPS;   /* FZ_STEPS=n steps per seed */
     for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
-        for (g.step = 0; g.step < PB_STEPS && g.bad == 0; g.step++) pb_step(f);
+        for (g.step = 0; g.step < steps && g.bad == 0; g.step++) pb_step(f);
         if (g.bad == 0) pb_full_canary_check();
         T_EQ(g.bad, 0);
         if (g.bad) fprintf(stderr, "pb fuzz seed %u failed at step %ld\n", (unsigned)seed, g.step);
@@ -1755,4 +1789,30 @@ static void test_fuzz_pb(void) {
     T_CHECK(early > 0); T_CHECK(rx > 0);
 }
 
-T_MAIN(test_fuzz_seeds, test_fuzz_clock_wrap, test_fuzz_pb)
+/* The fuzzer's frame damage must always be detectable by TCP: 400000 mutations of one segment
+ * (fixed seed) never leave a frame whose TCP-covered bytes changed yet whose TCP checksum still
+ * verifies. Without the guard in mutate() some do (flips whose ones-complement changes cancel,
+ * e.g. the same value added to one 16-bit word and subtracted from another), and one such frame
+ * delivered pattern-breaking bytes to rx_check (PB fuzzer, FZ_SEED=15 FZ_STEPS=30000, step
+ * 23371). */
+static void test_fuzz_mutate_always_detectable(void) {
+    uint8_t base[200], f[200], d[100];
+    uint16_t n, i;
+    long k, changed = 0, undetected = 0;
+    memset(&g, 0, sizeof g);
+    g.rng = 12345u;
+    for (i = 0; i < sizeof d; i++) d[i] = (uint8_t)(1000u + i);
+    n = mk_tcp(base, PEER, 1026, ME, 23, 1000, 7, TF_ACK, 8192, NULL, 0, d, sizeof d);
+    T_CHECK(tcp_cksum_verifies(base, n) != 0);
+    for (k = 0; k < 400000; k++) {
+        memcpy(f, base, n);
+        mutate(f, n);
+        if (!tcp_visible_change(base, f, n)) continue;
+        changed++;
+        if (tcp_cksum_verifies(f, n)) undetected++;
+    }
+    T_CHECK(changed > 300000);
+    T_EQ(undetected, 0);
+}
+
+T_MAIN(test_fuzz_seeds, test_fuzz_clock_wrap, test_fuzz_pb, test_fuzz_mutate_always_detectable)
