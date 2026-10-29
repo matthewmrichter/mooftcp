@@ -714,6 +714,11 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             if (t->state == MT_TCP_TIME_WAIT) return;      /* never let an RST cut TIME_WAIT short */
             t->st->stats.tcp_resets_in++;
             if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE)) back_to_listen(t);
+            else if ((t->state == MT_TCP_LAST_ACK || t->state == MT_TCP_CLOSING) &&
+                     t->snd_una == t->snd_max - 1u)
+                tcp_term(t, MT_TERM_ULP_CLOSE);            /* all data acked, only our FIN open:
+                                                            * the peer already finished (its
+                                                            * TIME_WAIT expired): a clean close */
             else tcp_term(t, MT_TERM_REMOTE_ABORT);
         } else {
             t->flags |= MT_TF_ACKNOW;                      /* challenge ACK */

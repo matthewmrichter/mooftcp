@@ -208,7 +208,32 @@ static void test_tiny_mtu_clamped(void) {
     mtu_case(40);
 }
 
+/* An in-window RST while our FIN is the only unacknowledged thing (LAST_ACK) means the peer
+ * already finished and forgot the connection: a clean close. With data still unacked it is an abort. */
+static void rst_in_last_ack(int unacked_data, int expect_reason) {
+    fake_link fl; rec r; mt_tcp_info in; uint32_t ps, ms;
+    mt_stack *s = setup(&fl);
+    mt_tcp *t = tconn_established(s, &fl, &r, &ps, &ms);
+    memset(&r, 0, sizeof r);
+    T_CHECK(t != NULL);
+    mt_tcp_get_info(t, &in);
+    inject(s, 23, in.lport, ps, ms, TF_ACK | TF_FIN, NULL, 0, 10);
+    if (unacked_data) T_EQ(mt_tcp_send(t, (const uint8_t *)"abc", 3, 1, 0, 20), 3);
+    T_EQ(mt_tcp_close(t, 30), MT_OK);
+    mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_LAST_ACK);
+    T_EQ(in.unacked, unacked_data ? 3u : 0u);
+    r.n = 0;
+    inject(s, 23, in.lport, ps + 1, 0, TF_RST, NULL, 0, 40);
+    T_EQ(r.n, 1); T_EQ(r.e[0].ev, MT_TCP_EV_TERMINATE); T_EQ(r.e[0].arg, expect_reason);
+    mt_tcp_get_info(t, &in); T_EQ(in.state, MT_TCP_CLOSED);
+}
+
+static void test_rst_in_last_ack_is_clean_close(void) {
+    rst_in_last_ack(0, MT_TERM_ULP_CLOSE);
+    rst_in_last_ack(1, MT_TERM_REMOTE_ABORT);
+}
+
 T_MAIN(test_simultaneous_open_scripted, test_simultaneous_open_two_stacks,
        test_abort_inside_data_callback, test_relisten_in_terminate_callback,
        test_release_create_in_callback, test_zero_window_still_processes_ack,
-       test_tiny_mtu_clamped)
+       test_tiny_mtu_clamped, test_rst_in_last_ack_is_clean_close)
