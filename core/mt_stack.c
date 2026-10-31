@@ -7,6 +7,7 @@ typedef struct {
     uint32_t arp;       /* offset of the ARP table */
     uint32_t pend;      /* offset of the pending-frame slot */
     uint32_t reasm;     /* offset of the IPv4 reassembly slot */
+    uint32_t lo;        /* offset of the loopback FIFO */
     uint32_t udp;       /* offset of the UDP endpoint array */
     uint32_t tcp;       /* offset of the TCB array */
     uint32_t dns;       /* offset of the DNS state (query slots + rx buffer) */
@@ -26,6 +27,8 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off = mt_arena_up(off + (uint32_t)sizeof(mt_pending));
     o->reasm = off;
     off = mt_arena_up(off + (uint32_t)sizeof(mt_reasm));
+    o->lo = off;
+    off = mt_arena_up(off + (uint32_t)sizeof(mt_lo));
     o->udp = off;
     off = mt_arena_up(off + ((uint32_t)l->max_udp + 1u) * (uint32_t)sizeof(mt_udp));
     o->tcp = off;
@@ -68,6 +71,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->arp = (mt_arp_entry *)(void *)(base + lay.arp);
     s->pend = (mt_pending *)(void *)(base + lay.pend);
     s->reasm = (mt_reasm *)(void *)(base + lay.reasm);
+    s->lo = (mt_lo *)(void *)(base + lay.lo);
     s->ip_id = (uint16_t)seed;
     s->udp = (mt_udp *)(void *)(base + lay.udp);
     s->udp_eph = (uint16_t)(49152u + seed % 16384u);
@@ -107,6 +111,7 @@ void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
             MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
         }
         s->arp_rel.live = 0;
+        if (old.addr != s->cfg.addr) mt_ip_lo_flush(s);   /* queued with the old source address */
     }
     if (s->cfg.mtu < old.mtu) {
         lm = mt_tcp_local_mss(s);
@@ -242,6 +247,7 @@ void mt_tick(mt_stack *s, uint32_t now) {
     mt_ip_timers(s, now);
     mt_tcp_timers(s, now);
     mt_dns_timers(s, now);
+    mt_ip_lo_drain(s, now);       /* last: frames the timers just queued to ourselves go too */
 }
 
 uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {

@@ -31,7 +31,13 @@
  *  - link refusals (2% at random plus bursts of 1..8 refused frames): tcp_tx_stalls equals the
  *    TCP frames the link refused, a stalled TCB always has the stall timer armed, and a refused
  *    new data/FIN segment never counts as sent (snd_max does not pass its sequence number until
- *    the link accepts a frame covering it). */
+ *    the link accepts a frame covering it);
+ *  - loopback (Plan 3 Task 3): TCBs connect to our own address and 127.0.0.1 (to the fuzzer's
+ *    listeners), UDP and ICMP go to ourselves; such frames never reach link.tx, the FIFO never
+ *    holds more than its slots, data a loopback TCB reads equals the pattern its sender (our own
+ *    TCB, local port = our rport) wrote for that sequence number, the stall counter stays between
+ *    the link's TCP refusals and those plus the FIFO's, and the peer's crafted frames to loopback
+ *    TCBs (source = our address) are dropped by IPv4 input. */
 
 #define NT 16                 /* TCBs the fuzzer creates (= default max_tcp) */
 #define NU 4
@@ -42,6 +48,7 @@
 #define ME   T_ME
 #define PEER T_PEER
 #define GW   T_GW
+#define LO1  0x7F000001u      /* 127.0.0.1 */
 
 typedef struct {
     uint32_t rng, seed, now;
@@ -62,6 +69,7 @@ typedef struct {
     long ev[9];               /* TCP events seen, by mt_tcp_event */
     long done_ok, done_abort, busy, two_queued, inval, reopen_in_done;
     long tcp_refused, stalls_seen, rf_checked;   /* TCP frames the link refused; stalled TCBs seen */
+    long lo_rx;                                  /* loopback TCP bytes read and checked */
     int refuse_burst;                            /* frames still to refuse in the current burst */
     uint8_t rf_live[NT];                         /* per stack TCB: a refused new segment pending */
     uint32_t rf_seq[NT], rf_iss[NT];
@@ -85,7 +93,7 @@ static sreq g_rq[16][RQ_PER];
 static long g_serial[16], g_next_done[16];
 
 static fz g;
-static uint64_t g_arena[16384 / 8];
+static uint64_t g_arena[20480 / 8];
 static uint8_t g_tbuf[NT][8192 + 1];
 static uint8_t g_ubuf[NU][2048];
 
@@ -395,7 +403,21 @@ static void tcp_action(mt_tcp *t) {
     case 0: case 1: case 2: case 14:
         fuzz_send(t);
         break;
-    case 3: case 4: case 5: mt_tcp_recv(t, b, rn(sizeof b), g.now); break;
+    case 3: case 4: case 5: {
+        /* A loopback TCB's data came from our own TCB (local port = t->rport), which wrote
+         * spat(seq, its lport). Before a FIN arrives the ring holds rcv_nxt - used .. rcv_nxt. */
+        int lo = mt_ip_is_local(g.s, t->rip) && (t->state == MT_TCP_ESTABLISHED ||
+                 t->state == MT_TCP_FIN_WAIT_1 || t->state == MT_TCP_FIN_WAIT_2);
+        uint32_t seq0 = t->rcv_nxt - t->rcvq.used, n, k;
+        uint16_t sport = t->rport;
+        n = mt_tcp_recv(t, b, rn(sizeof b), g.now);
+        if (lo) {
+            for (k = 0; k < n; k++)
+                if (b[k] != spat(seq0 + k, sport)) { bad("loopback data differs from the sender's bytes"); break; }
+            g.lo_rx += n;
+        }
+        break;
+    }
     case 6: {
         const uint8_t *p;
         uint32_t n = mt_tcp_peek(t, 0, &p);
@@ -414,8 +436,21 @@ static void tcp_action(mt_tcp *t) {
             }
         }
         break;
-    case 11: if (g.u[0] && rn(3) == 0) mt_udp_send(g.u[0], PEER, 9, b, (uint16_t)rn(300), 1, g.now); break;
-    case 12: if (rn(4) == 0) mt_icmp_echo(g.s, PEER, 1, 2, b, (uint16_t)rn(100), g.now); break;
+    case 11:
+        if (g.u[0] && rn(3) == 0) {
+            int u = (int)rn(NU);                            /* sometimes to ourselves (port 7 echoes) */
+            mt_ip4 dst = rn(4) ? PEER : rn(2) ? ME : LO1;
+            uint16_t dp = dst == PEER ? 9 : g.u[u] ? mt_udp_port(g.u[u]) : 7;
+            static uint8_t big[1800];
+            mt_udp_send(g.u[0], dst, dp, big, (uint16_t)rn(rn(8) ? 300 : sizeof big), 1, g.now);
+        }
+        break;
+    case 12:
+        if (rn(4) == 0) {
+            static uint8_t big[1400];
+            mt_icmp_echo(g.s, rn(4) ? PEER : rn(2) ? ME : LO1, 1, 2, big, (uint16_t)rn(rn(8) ? 100 : sizeof big), g.now);
+        }
+        break;
     case 13: { mt_tcp_info info; mt_tcp_get_info(t, &info); break; }
     default: break;
     }
@@ -477,7 +512,10 @@ static void ensure_objects(void) {
         if (!t && rn(4) == 0)                               /* any size >= 512, odd address */
             t = g.t[i] = mt_tcp_create(g.s, g_tbuf[i] + rn(2), 512 + rn(8192 - 512), tcp_cb, NULL);
         if (t && t->state == MT_TCP_CLOSED && rn(8) == 0) {
-            if (rn(2)) mt_tcp_listen(t, rn(4) ? 0 : PEER, 0, (uint16_t)(rn(2) ? 23 : 21));
+            if (rn(2)) mt_tcp_listen(t, rn(4) ? 0 : rn(3) ? PEER : ME, 0, (uint16_t)(rn(2) ? 23 : 21));
+            else if (rn(5) == 0)                            /* loopback: to our own listeners */
+                mt_tcp_open(t, rn(3) ? ME : LO1, (uint16_t)(rn(4) ? 23 : rn(2) ? 21 : 80),
+                            rn(4) ? 0 : (uint16_t)(1024 + rn(4)), g.now);
             else mt_tcp_open(t, rn(8) ? PEER : T_FAR, (uint16_t)(80 + rn(3)),
                              rn(4) ? 0 : (uint16_t)(1024 + rn(4)), g.now);
         }
@@ -570,17 +608,32 @@ static void check_invariants(void) {
             }
         }
     }
-    if (g.s->stats.tcp_tx_stalls != (uint32_t)g.tcp_refused) bad("tcp_tx_stalls differs from refused TCP frames");
+    /* Refused TCP frames: the link's (counted in link_tx) plus some of the loopback FIFO's. */
+    if (g.s->stats.tcp_tx_stalls < (uint32_t)g.tcp_refused ||
+        g.s->stats.tcp_tx_stalls > (uint32_t)g.tcp_refused + g.s->stats.ip_lo_drops)
+        bad("tcp_tx_stalls differs from refused TCP frames");
+    if (g.s->lo->n > MT_LO_SLOTS || g.s->lo->head >= MT_LO_SLOTS || g.s->lo->dlv)
+        bad("loopback FIFO state");
 }
 
-/* Calling mt_tick whenever the deadline reads 0 must clear it. */
+/* Calling mt_tick whenever the deadline reads 0 must clear it. Loopback traffic is the exception:
+ * each tick delivers what was queued and may queue replies (one hop per tick; a UDP echo endpoint
+ * answering itself never stops), so a 0 that persists must come with frames in the FIFO. */
 static void deadline_check(void) {
     int k;
-    for (k = 0; k < 6; k++) {
+    for (k = 0; k < 64; k++) {
         if (mt_next_deadline(g.s, g.now) != 0) return;
+        if (k >= 6 && g.s->lo->n == 0) break;            /* no loopback hop left to explain it */
         mt_tick(g.s, g.now);
     }
-    bad("expired deadline survives mt_tick");
+    if (mt_next_deadline(g.s, g.now) != 0) return;
+    if (g.s->lo->n == 0) {
+        if (getenv("FZ_DEBUG"))
+            fprintf(stderr, "dl arp %u ip %u tcp %u dns %u stall_on %u at %u now %u\n",
+                    mt_arp_deadline(g.s, g.now), mt_ip_deadline(g.s, g.now), mt_tcp_deadline(g.s, g.now),
+                    mt_dns_deadline(g.s, g.now), g.s->stall_on, g.s->stall_at, g.now);
+        bad("expired deadline survives mt_tick");
+    }
 }
 
 /* ---- frame generation ---- */
@@ -908,13 +961,15 @@ static void fuzz_seed(uint32_t seed) {
 static void test_fuzz_seeds(void) {
     uint32_t seed;
     long est = 0, data = 0, term = 0, tx = 0, dok = 0, dab = 0, busy = 0, two = 0, inval = 0;
-    long reopen = 0, refused = 0, stalled = 0, rfc = 0;
+    long reopen = 0, refused = 0, stalled = 0, rfc = 0, lo_out = 0, lo_drops = 0, lo_rx = 0;
     /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n (default NSEEDS) */
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : NSEEDS;
     for (seed = first; seed <= last; seed++) {
         fuzz_seed(seed);
         refused += g.tcp_refused; stalled += g.stalls_seen; rfc += g.rf_checked;
+        if (g.s) { lo_out += (long)g.s->stats.ip_lo_out; lo_drops += (long)g.s->stats.ip_lo_drops; }
+        lo_rx += g.lo_rx;
         est += g.ev[MT_TCP_EV_ESTABLISHED]; data += g.ev[MT_TCP_EV_DATA];
         term += g.ev[MT_TCP_EV_TERMINATE]; tx += g.ntx;
         dok += g.done_ok; dab += g.done_abort; busy += g.busy; two += g.two_queued;
@@ -923,8 +978,10 @@ static void test_fuzz_seeds(void) {
     }
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "est %ld data %ld term %ld tx %ld done ok %ld abort %ld busy %ld two %ld inval %ld"
-                " reopen %ld; tcp refused %ld stalled-TCB checks %ld refused-segment checks %ld\n",
-                est, data, term, tx, dok, dab, busy, two, inval, reopen, refused, stalled, rfc);
+                " reopen %ld; tcp refused %ld stalled-TCB checks %ld refused-segment checks %ld;"
+                " loopback out %ld drops %ld tcp bytes checked %ld\n",
+                est, data, term, tx, dok, dab, busy, two, inval, reopen, refused, stalled, rfc,
+                lo_out, lo_drops, lo_rx);
     /* The fuzzer must actually exercise the stack: connections come up, carry data and die;
      * sends complete and abort, the queue fills to two and refuses a third. */
     T_CHECK(est > 0);
@@ -940,6 +997,9 @@ static void test_fuzz_seeds(void) {
     T_CHECK(refused > 0);       /* the link refused TCP frames, TCBs stalled and were checked */
     T_CHECK(stalled > 0);
     T_CHECK(rfc > 0);
+    T_CHECK(lo_out > 0);        /* loopback traffic flowed, overflowed the FIFO, carried TCP data */
+    T_CHECK(lo_drops > 0);
+    T_CHECK(lo_rx > 0);
 }
 
 /* A long run whose clock starts just below the 32-bit wrap (the seed picks near-wrap starts for
@@ -1018,7 +1078,7 @@ static struct {
          echo_tmo, u_lent;
     MacPtr32 compl, asr, uasr;
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
-         defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes;
+         defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes, lo_rx;
 } P;
 
 static TCPiopb *pr_pb(prec *r) { return (TCPiopb *)r->blk; }
@@ -1160,7 +1220,7 @@ static void act_uwrite(void) {
         e.length = 0; e.ptr = 0;
         memcpy(pr_ds(r) + i * 6, &e, 6);
     }
-    pb->csParam.send.remoteHost = rn(8) ? PEER : (rn(2) ? T_FAR : 0);
+    pb->csParam.send.remoteHost = rn(8) ? PEER : (rn(3) ? ME : rn(2) ? T_FAR : 0);
     pb->csParam.send.remotePort = (uint16_t)(rn(3) ? 17007 : rn(65536));
     pb->csParam.send.wdsPtr = rn(30) ? pbf_a(pr_ds(r)) : 0;
     pb->csParam.send.checkSum = (uint8_t)rn(2);
@@ -1241,7 +1301,7 @@ static void act_echo(void) {
     pb = (IPParamBlock *)pr_pb(r);
     if (len > PR_BUF) len = PR_BUF;
     for (j = 0; j < len; j++) pr_buf(r)[j] = (uint8_t)(0x20 + j);
-    pb->csParam.IPEchoPB.dest = rn(5) ? PEER : (rn(2) ? GW : rn(2) ? T_FAR : 0);
+    pb->csParam.IPEchoPB.dest = rn(5) ? PEER : (rn(3) ? ME : rn(2) ? GW : rn(2) ? T_FAR : 0);
     pb->csParam.IPEchoPB.data.length = (uint16_t)len;
     pb->csParam.IPEchoPB.data.ptr = len && rn(40) ? pbf_a(pr_buf(r)) : 0;
     pb->csParam.IPEchoPB.timeout = (int16_t)(rn(8) == 0 ? -1 : (int)rn(6));
@@ -1309,11 +1369,19 @@ static void pb_action(void);
 
 /* Received bytes continue the stream where the previous read stopped (also across no-copy
  * loans and copies made behind outstanding loans). */
+static MtStream *pb_stream(StreamPtr h);
 static void rx_check(int slot, const uint8_t *b, uint32_t n) {
     pstream *p;
     uint32_t i;
+    const MtStream *ms;
     if (slot < 0 || !b) return;
     p = &P.ps[slot];
+    ms = pb_stream(p->h);
+    if (ms && ms->t && mt_ip_is_local(P.d->s, ms->t->rip)) {   /* loopback: our own pattern, */
+        p->rx_valid = 0;                                         /* checked by the core fuzzer */
+        P.lo_rx += n;
+        return;
+    }
     for (i = 0; i < n; i++) {
         if (p->rx_valid && b[i] != p->rx_next) { bad("received data out of order or wrong"); return; }
         p->rx_next = (uint8_t)(b[i] + 1u);
@@ -1516,10 +1584,11 @@ static void act_open(int passive) {
     StreamPtr h = pick_handle(&slot);
     prec *r = pr_get();
     TCPiopb *pb;
+    int self = !passive && rn(6) == 0;          /* loopback: to our own listeners (23, 21) */
     if (!r) return;
     pb = pr_pb(r);
-    pb->csParam.open.remoteHost = passive ? (rn(4) ? 0 : PEER) : (rn(8) ? PEER : (rn(2) ? T_FAR : 0));
-    pb->csParam.open.remotePort = passive ? 0 : (uint16_t)(80 + rn(3));
+    pb->csParam.open.remoteHost = passive ? (rn(4) ? 0 : PEER) : self ? ME : (rn(8) ? PEER : (rn(2) ? T_FAR : 0));
+    pb->csParam.open.remotePort = passive ? 0 : self ? (uint16_t)(rn(3) ? 23 : 21) : (uint16_t)(80 + rn(3));
     pb->csParam.open.localPort = (uint16_t)(passive ? (rn(3) ? 23 : rn(2) ? 21 : 0)
                                             : (rn(4) ? 0 : 1024 + rn(4)));
     pb->csParam.open.validityFlags = (int8_t)(rn(2) ? (timeoutValue | timeoutAction) : rn(2) ? timeoutValue : 0);
@@ -1820,8 +1889,10 @@ static void pb_step(uint8_t *f) {
     check_invariants();
     pb_invariants();
     if ((g.step & 63) == 0) pb_full_canary_check();
-    for (k = 0; k < 6 && mt_pb_next_deadline_ms(P.d) == 0; k++) mt_pb_tick(P.d);
-    if (k == 6) bad("expired deadline survives mt_pb_tick");
+    /* loopback hops keep the deadline at 0 while frames are queued (see deadline_check) */
+    for (k = 0; k < 64 && mt_pb_next_deadline_ms(P.d) == 0 && (k < 6 || P.d->s->lo->n); k++)
+        mt_pb_tick(P.d);
+    if (mt_pb_next_deadline_ms(P.d) == 0 && P.d->s->lo->n == 0) bad("expired deadline survives mt_pb_tick");
     d = mt_pb_next_deadline_ms(P.d);
     dt = rn(10) == 0 ? rn(5000) : rn(150);
     if (d != MT_NO_DEADLINE && d < dt && rn(2)) {
@@ -1840,7 +1911,7 @@ static void test_fuzz_pb(void) {
     static uint8_t f[1514];
     uint32_t seed;
     long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, drc = 0,
-         drp = 0, ie = 0, re = 0, op = 0, mg = 0, early = 0, rx = 0;
+         drp = 0, ie = 0, re = 0, op = 0, mg = 0, early = 0, rx = 0, lo = 0, lorx = 0;
     long uro = 0, utm = 0, uwr = 0, urt = 0, uas = 0, urp = 0, uin = 0, eok = 0, eto = 0, ese = 0;
     /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n */
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
@@ -1857,6 +1928,7 @@ static void test_fuzz_pb(void) {
         tmo += P.tmo; ad += P.asr_data; at += P.asr_term; ac += P.asr_closing; drc += P.defer_core;
         drp += P.defer_call; ie += P.imm_err; re += P.reenter; op += P.open_ok; mg += P.merged;
         early += (long)P.d->early_done; rx += P.rx_bytes;
+        lo += (long)mt_get_stats(P.d->s)->ip_lo_out; lorx += P.lo_rx;
         uro += P.u_read_ok; utm += P.u_tmo; uwr += P.u_write_ok; urt += P.u_ret_ok; uas += P.u_asr;
         urp += P.u_rel_pending; uin += P.u_in; eok += P.echo_ok; eto += P.echo_tmo; ese += P.echo_sent;
     }
@@ -1864,8 +1936,8 @@ static void test_fuzz_pb(void) {
         fprintf(stderr, "pb: open %ld send ok %ld term %ld rcv ok %ld nocopy %ld returned %ld timeouts %ld "
                 "asr data %ld term %ld closing %ld deferred releases in core %ld in call-outs %ld "
                 "immediate errors %ld re-entries %ld sends past the core queue %ld early in merged "
-                "%ld bytes received %ld\n",
-                op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, drc, drp, ie, re, mg, early, rx);
+                "%ld bytes received %ld; loopback frames %ld loopback bytes received %ld\n",
+                op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, drc, drp, ie, re, mg, early, rx, lo, lorx);
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "pb udp/icmp: datagrams in %ld reads ok %ld timeouts %ld writes %ld returned %ld "
                 "data asr %ld reads failed by release %ld; echoes sent %ld replied %ld timed out %ld\n",
@@ -1877,6 +1949,7 @@ static void test_fuzz_pb(void) {
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
     T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
     T_CHECK(early > 0); T_CHECK(rx > 0);
+    T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
 }
 
 /* The fuzzer's frame damage must always be detectable by TCP: 400000 mutations of one segment

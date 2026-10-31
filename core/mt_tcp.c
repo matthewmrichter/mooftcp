@@ -150,11 +150,12 @@ static uint32_t isn(const mt_stack *s, uint32_t now, mt_ip4 rip, uint16_t rport,
 
 static void set_mss(mt_tcp *t, uint16_t peer) {
     uint16_t m = peer >= TCP_MSS_MIN ? peer : (uint16_t)TCP_MSS_DEFAULT;
-    uint16_t l = mt_tcp_local_mss(t->st);
+    uint16_t l = mt_tcp_local_mss_to(t->st, t->rip);
     t->mss = m < l ? m : l;
 }
 
 static mt_ip4 nexthop(const mt_stack *s, mt_ip4 rip) {
+    if (mt_ip_is_local(s, rip)) return rip;                 /* loopback: no gateway, no ARP */
     return ((rip ^ s->cfg.addr) & s->cfg.mask) == 0 ? rip : s->cfg.gateway;
 }
 
@@ -342,7 +343,7 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     uint32_t sent = 0, q = mt_tcp_sq_total(t);
     memset(i, 0, sizeof *i);
     i->state = (mt_tcp_state)t->state;
-    i->lip = t->st->cfg.addr;
+    i->lip = mt_ip_src_for(t->st, t->rip);   /* the 127 address on a 127/8 connection */
     i->rip = t->rip;
     i->lport = t->lport;
     i->rport = t->rport;
@@ -350,6 +351,8 @@ void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
         sent = mt_tcp_data_out(t);
         i->unacked = sent;
         i->send_queued = q > sent ? q - sent : 0u;
+    } else if (t->state == MT_TCP_SYN_SENT || t->state == MT_TCP_SYN_RCVD) {
+        i->unacked = t->snd_max - t->snd_una;        /* the SYN (MacTCP TCPStatus, matrix 703: 1) */
     }
     i->rcv_avail = t->rcvq.used;
     i->snd_wnd = t->snd_wnd;
@@ -1026,7 +1029,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                  * the 100 ms timer or when the app empties the queue (rcv_freed); while MT_T2_GAP is
                  * set (a hole is being repaired) every in-order segment is ACKed at once. */
                 if (g->acc_n > t->rcv_mss) {               /* largest segment seen, <= local MSS */
-                    uint16_t lm = mt_tcp_local_mss(t->st);
+                    uint16_t lm = mt_tcp_local_mss_to(t->st, t->rip);
                     t->rcv_mss = g->acc_n < lm ? (uint16_t)g->acc_n : lm;
                 }
                 if (t->qack < MT_TCP_QUICKACK) {
@@ -1117,7 +1120,8 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     mt_tcp *t;
     uint32_t sum;
     uint16_t hl, sport, dport, why;
-    if (len < TCP_HDR || dst != s->cfg.addr || src == 0 || src == MT_ETH_BCAST_IP) MT_DROP_GOTO(why);
+    /* dst is cfg.addr, or 127/8 from the loopback FIFO (mt_ip_input lets nothing else through) */
+    if (len < TCP_HDR || !mt_ip_is_local(s, dst) || src == 0 || src == MT_ETH_BCAST_IP) MT_DROP_GOTO(why);
     hl = (uint16_t)((pl[12] >> 4) << 2);
     if (hl < TCP_HDR || hl > len) MT_DROP_GOTO(why);
     if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);

@@ -15,9 +15,13 @@ uint16_t mt_tcp_local_mss(const mt_stack *s) {
     return mtu > 104u ? (uint16_t)(mtu - 40u) : 64u;   /* floor 64: output can never spin */
 }
 
+uint16_t mt_tcp_local_mss_to(const mt_stack *s, mt_ip4 rip) {
+    return mt_ip_is_local(s, rip) ? (uint16_t)(MT_LO_MTU - 40u) : mt_tcp_local_mss(s);
+}
+
 /* Header at the IP payload area; returns its length. */
-static uint16_t build_hdr(mt_stack *s, uint16_t lport, uint16_t rport, uint32_t seq, uint32_t ack,
-                          uint8_t flags, uint16_t win, uint16_t up) {
+static uint16_t build_hdr(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
+                          uint32_t ack, uint8_t flags, uint16_t win, uint16_t up) {
     uint8_t *h = mt_ip_payload(s);
     uint16_t hl = (flags & MT_TH_SYN) ? TCP_HDR_SYN : TCP_HDR;
     mt_wr16(h, lport);
@@ -32,7 +36,7 @@ static uint16_t build_hdr(mt_stack *s, uint16_t lport, uint16_t rport, uint32_t 
     if (hl == TCP_HDR_SYN) {
         h[20] = 2;
         h[21] = 4;
-        mt_wr16(h + 22, mt_tcp_local_mss(s));
+        mt_wr16(h + 22, mt_tcp_local_mss_to(s, rip));
     }
     return hl;
 }
@@ -44,7 +48,7 @@ static int finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t 
                   uint32_t now) {
     uint8_t *h = mt_ip_payload(s);
     uint16_t tl = (uint16_t)(hl + plen);
-    uint32_t sum = mt_tcp_pseudo(s->cfg.addr, rip, tl) + psum;
+    uint32_t sum = mt_tcp_pseudo(mt_ip_src_for(s, rip), rip, tl) + psum;
     sum = mt_cksum_add(sum, h, hl);          /* hl is even: chaining is exact */
     mt_wr16(h + 16, mt_cksum_fold(sum));
     s->stats.tcp_out++;
@@ -60,7 +64,7 @@ void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, ui
     uint16_t hl;
     if (s->cfg.addr == 0) return;
     if (flags & MT_TH_RST) s->stats.tcp_resets_out++;
-    hl = build_hdr(s, lport, rport, seq, ack, flags, 0, 0);
+    hl = build_hdr(s, rip, lport, rport, seq, ack, flags, 0, 0);
     finish(s, rip, hl, 0, 0, now);
 }
 
@@ -130,7 +134,7 @@ int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n
         flags |= MT_TH_URG;                           /* urgent pointer: offset just past the data */
         up = (uint16_t)(t->snd_up - seq);
     }
-    hl = build_hdr(s, t->lport, t->rport, seq, t->rcv_nxt, flags,
+    hl = build_hdr(s, t->rip, t->lport, t->rport, seq, t->rcv_nxt, flags,
                    (uint16_t)mt_tcp_rcv_window(t, 1), up);
     if (n) psum = copy_segs(t, off, mt_ip_payload(s) + hl, n);
     if (finish(s, t->rip, hl, (uint16_t)n, psum, now)) return 1;   /* refused: the ACK stays owed */

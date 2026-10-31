@@ -76,7 +76,10 @@ bad:
     reasm_drop(s);
 }
 
-void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
+/* lo = 1: the datagram comes from the loopback FIFO (mt_ip_lo_drain), the only place a datagram
+ * from or to one of our own addresses (cfg.addr, 127/8) is accepted; from the wire such a source is
+ * spoofed and dropped, and 127/8 never arrives as a destination. */
+static void ip_in(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now, int lo) {
     uint16_t ihl, tot, ff, why;
     mt_ip4 dst, src;
     if (len < MT_IP_HDR || (ip[0] >> 4) != 4) MT_DROP_GOTO(why);
@@ -86,15 +89,20 @@ void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
     if (tot < ihl || tot > len) MT_DROP_GOTO(why);
     if (mt_cksum_fold(mt_cksum_add(0, ip, ihl)) != 0) MT_DROP_GOTO(why);
     dst = mt_rd32(ip + 16);
-    if (s->cfg.addr == 0 ||
-        (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
-        MT_DROP_GOTO(why);
-    /* Source validation (RFC 1122 3.2.1.3, RFC 6890): never a multicast / class E / limited
-     * broadcast address, our own address or the directed broadcast, so no reply (RST, ICMP,
-     * SYN-ACK) is ever aimed at one. 0.0.0.0 stays legal (BOOTP-style UDP). */
     src = mt_rd32(ip + 12);
-    if (src >= 0xE0000000u || src == s->cfg.addr || src == (s->cfg.addr | ~s->cfg.mask))
-        MT_DROP_GOTO(why);
+    if (lo) {                         /* built by us, to and from a local address */
+        if (!mt_ip_is_local(s, dst) || !mt_ip_is_local(s, src)) MT_DROP_GOTO(why);
+    } else {
+        if (s->cfg.addr == 0 ||
+            (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
+            MT_DROP_GOTO(why);
+        /* Source validation (RFC 1122 3.2.1.3, RFC 6890): never a multicast / class E / limited
+         * broadcast address, our own address, 127/8 or the directed broadcast, so no reply (RST,
+         * ICMP, SYN-ACK) is ever aimed at one. 0.0.0.0 stays legal (BOOTP-style UDP). */
+        if (src >= 0xE0000000u || src == s->cfg.addr || mt_ip_is_127(src) ||
+            src == (s->cfg.addr | ~s->cfg.mask))
+            MT_DROP_GOTO(why);
+    }
     s->stats.ip_in++;
     ff = mt_rd16(ip + 6);
     if ((ff & 0x3FFFu) == 0) {                                      /* fast path: whole datagram */
@@ -110,6 +118,52 @@ drop:
     MT_LOG_DROPPED(s, MT_LOGL_IP, why);
 }
 
+void mt_ip_input(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now) {
+    ip_in(s, ip, len, now, 0);
+}
+
+/* ---- Loopback FIFO (see mt_int.h) ---- */
+
+/* Queue the datagram at txbuf + 14 (n bytes, header included). 1 = queued, 0 = refused. */
+static int lo_put(mt_stack *s, uint16_t n) {
+    mt_lo *q = s->lo;
+    mt_lo_slot *e;
+    if (q->n >= MT_LO_SLOTS) {
+        s->stats.ip_lo_drops++;
+        s->tx_refused = 1;                     /* like a refused link.tx: TCP stalls and retries */
+        MT_LOG_DROPPED(s, MT_LOGL_IP, __LINE__);
+        return 0;
+    }
+    e = &q->s[(q->head + q->n) % MT_LO_SLOTS];
+    memcpy(e->d, s->txbuf + MT_ETH_HDR, n);
+    e->len = n;
+    q->n++;
+    s->stats.ip_lo_out++;
+    return 1;
+}
+
+void mt_ip_lo_drain(mt_stack *s, uint32_t now) {
+    mt_lo *q = s->lo;
+    uint8_t k = q->n;                          /* frames queued meanwhile wait for the next tick */
+    while (k-- && q->n) {
+        mt_lo_slot *e = &q->s[q->head];
+        q->dlv = 1;                            /* slot head stays reserved during the dispatch */
+        ip_in(s, e->d, e->len, now, 1);
+        q->dlv = 0;
+        q->head = (uint8_t)((q->head + 1u) % MT_LO_SLOTS);
+        q->n--;
+    }
+}
+
+void mt_ip_lo_flush(mt_stack *s) {
+    mt_lo *q = s->lo;
+    uint8_t keep = q->dlv;                     /* the slot being delivered is released by the drain */
+    if (q->n <= keep) return;
+    s->stats.ip_lo_drops += (uint32_t)(q->n - keep);
+    MT_LOG_DROPPED(s, MT_LOGL_IP, __LINE__);
+    q->n = keep;
+}
+
 /* ---- Reassembly timer ---- */
 
 void mt_ip_timers(mt_stack *s, uint32_t now) {
@@ -120,6 +174,7 @@ void mt_ip_timers(mt_stack *s, uint32_t now) {
 uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now) {
     const mt_reasm *r = s->reasm;
     uint32_t due;
+    if (s->lo->n > s->lo->dlv) return 0;       /* loopback frames wait for mt_tick */
     if (!r->active) return MT_NO_DEADLINE;
     due = r->t_start + MT_REASM_TIMEOUT_MS;
     return mt_time_before(now, due) ? due - now : 0;
@@ -138,7 +193,7 @@ static void ip_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t id, uint16_t
     h[8] = 64;
     h[9] = proto;
     h[10] = 0; h[11] = 0;
-    mt_wr32(h + 12, s->cfg.addr);
+    mt_wr32(h + 12, mt_ip_src_for(s, dst));
     mt_wr32(h + 16, dst);
     mt_wr16(h + 10, mt_cksum_fold(mt_cksum_add(0, h, MT_IP_HDR)));
 }
@@ -163,15 +218,18 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     mt_ip4 nexthop;
     uint16_t id, mtu, chunk;
     uint32_t off, tot = (uint32_t)hlen + plen;
+    int lo;
     uint8_t *body = s->txbuf + MT_ETH_HDR + MT_IP_HDR;
 
     if (s->cfg.addr == 0) return MT_ERR_UNCONFIGURED;
-    if (dst == MT_ETH_BCAST_IP || dst == (s->cfg.addr | ~s->cfg.mask)) nexthop = MT_ETH_BCAST_IP;
+    lo = mt_ip_is_local(s, dst);
+    if (lo) nexthop = dst;                                          /* loopback FIFO */
+    else if (dst == MT_ETH_BCAST_IP || dst == (s->cfg.addr | ~s->cfg.mask)) nexthop = MT_ETH_BCAST_IP;
     else if (((dst ^ s->cfg.addr) & s->cfg.mask) == 0) nexthop = dst;
     else if (s->cfg.gateway) nexthop = s->cfg.gateway;
     else return MT_ERR_NOROUTE;
 
-    mtu = s->cfg.mtu;
+    mtu = lo ? (uint16_t)MT_LO_MTU : s->cfg.mtu;
     if (mtu > MT_TXBUF_SIZE - MT_ETH_HDR) mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
     if (tot > 65535u - MT_IP_HDR) return MT_ERR_INVAL;
     if (MT_IP_HDR + tot > mtu && mtu < MT_IP_HDR + 8u) return MT_ERR_INVAL;   /* cannot fragment */
@@ -181,7 +239,8 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     if (MT_IP_HDR + tot <= mtu) {                                    /* fast path */
         ip_gather(body, hdr, hlen, pl, 0, (uint16_t)tot);
         ip_hdr(s, dst, proto, id, 0, (uint16_t)tot);
-        mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + tot), now);
+        if (lo) lo_put(s, (uint16_t)(MT_IP_HDR + tot));
+        else mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + tot), now);
         return MT_OK;
     }
 
@@ -194,7 +253,8 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
         ip_hdr(s, dst, proto, id, ff, n);
         s->stats.ip_frag_out++;
         /* Fragments are too big to be held for ARP: stop once one was not sent. */
-        if (mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + n), now) != 1) break;
+        if (lo ? !lo_put(s, (uint16_t)(MT_IP_HDR + n))
+               : mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + n), now) != 1) break;
     }
     return MT_OK;
 }

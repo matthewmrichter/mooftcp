@@ -3,10 +3,12 @@
 
 /* ICMP (RFC 792): echo request/reply and error dispatch to TCP/UDP.
  *
- * Policy: the source of a received ICMP message is not validated by IP, so it is
- * checked here. Messages from zero, broadcast, multicast/class E, our own address
- * or the directed-broadcast address are dropped, and only messages addressed to
- * our unicast address are processed, so we never answer or send to such peers. */
+ * Policy: messages from zero, broadcast, multicast/class E or the directed-broadcast
+ * address are dropped, and only messages addressed to our unicast address (or 127/8) are
+ * processed, so we never answer or send to such peers. A source that is one of our own
+ * addresses can only come from the loopback FIFO (mt_ip_input drops it from the wire), so
+ * a ping to ourselves is answered; the reply (type 0) never provokes another message, and no
+ * error is ever originated toward our own address (mt_icmp_send_unreach). */
 
 #define ICMP_ECHO_REPLY 0
 #define ICMP_UNREACH    3
@@ -21,13 +23,15 @@
 #define ICMP_ONE_FRAME (MT_TXBUF_SIZE - MT_ETH_HDR - MT_IP_HDR)
 
 static int unicast_src(const mt_stack *s, mt_ip4 a) {
-    return a != 0 && a < 0xE0000000u && a != s->cfg.addr && a != (s->cfg.addr | ~s->cfg.mask);
+    return a != 0 && a < 0xE0000000u && a != (s->cfg.addr | ~s->cfg.mask);
 }
 
-/* icmp_out counts messages handed to the link: call after a successful mt_ip_output* (which
- * also reports MT_OK when the link refused the frame); err0 is eth_tx_err from before it. */
+/* icmp_out counts messages handed to the link or the loopback FIFO: call after a successful
+ * mt_ip_output* (which also reports MT_OK when the link or the FIFO refused the frame); err0 is
+ * tx_fails() from before it. */
+static uint32_t tx_fails(const mt_stack *s) { return s->stats.eth_tx_err + s->stats.ip_lo_drops; }
 static void icmp_counted(mt_stack *s, uint32_t err0) {
-    if (s->stats.eth_tx_err == err0) s->stats.icmp_out++;
+    if (tx_fails(s) == err0) s->stats.icmp_out++;
 }
 
 void mt_set_echo_cb(mt_stack *s, mt_echo_cb cb, void *user) {
@@ -59,7 +63,7 @@ static void icmp_echo_reply(mt_stack *s, mt_ip4 src, const uint8_t *pl, uint16_t
     t = (uint32_t)(uint16_t)~mt_rd16(out + 2) + 0xF7FFu;
     t = (t & 0xFFFFu) + (t >> 16);
     mt_wr16(out + 2, (uint16_t)~t);
-    err0 = s->stats.eth_tx_err;
+    err0 = tx_fails(s);
     if (out == mt_ip_payload(s) ? mt_ip_output(s, src, 1, len, now) == MT_OK
                                 : mt_ip_output_buf(s, src, 1, out, len, now) == MT_OK)
         icmp_counted(s, err0);
@@ -75,7 +79,7 @@ static void icmp_error_in(mt_stack *s, uint8_t type, uint8_t code, const uint8_t
     if (ql < MT_IP_HDR || (q[0] >> 4) != 4) return;
     ihl = (uint16_t)((q[0] & 15u) << 2);
     if (ihl < MT_IP_HDR || ql < (uint16_t)(ihl + 8u)) return;
-    if (mt_rd32(q + 12) != s->cfg.addr) return;           /* not a datagram we sent */
+    if (!mt_ip_is_local(s, mt_rd32(q + 12))) return;      /* not a datagram we sent */
     proto = q[9];
     if (proto != 6 && proto != 17) return;                /* ICMP-about-ICMP and unknown: ignore */
     odst = mt_rd32(q + 16);
@@ -88,7 +92,7 @@ static void icmp_error_in(mt_stack *s, uint8_t type, uint8_t code, const uint8_t
 void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len,
                    uint32_t now) {
     uint8_t type;
-    if (len < ICMP_HDR || dst != s->cfg.addr || !unicast_src(s, src)) {
+    if (len < ICMP_HDR || !mt_ip_is_local(s, dst) || !unicast_src(s, src)) {
         MT_DROP_IP(s);
         return;
     }
@@ -117,7 +121,7 @@ int mt_icmp_echo(mt_stack *s, mt_ip4 dst, uint16_t id, uint16_t seq, const uint8
                  uint16_t len, uint32_t now) {
     uint8_t *m = mt_ip_payload(s);
     uint32_t t;
-    uint32_t err0 = s->stats.eth_tx_err;
+    uint32_t err0 = tx_fails(s);
     int r;
     if (len > ICMP_ONE_FRAME - ICMP_HDR || (len && !data)) return MT_ERR_INVAL;
     m[0] = ICMP_ECHO; m[1] = 0; m[2] = 0; m[3] = 0;
@@ -137,7 +141,10 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
     uint8_t *h = m + ICMP_HDR;
     uint16_t q = len < 8 ? len : 8;
     uint32_t err0;
-    if (s->cfg.addr == 0 || dst != s->cfg.addr || !unicast_src(s, src) || proto == 1) return;
+    /* Never toward one of our own addresses: a loopback datagram to a closed port gets no error
+     * (no self-made feedback path, and the limiter below stays the wire's). */
+    if (!mt_ip_is_local(s, dst) || !unicast_src(s, src) || mt_ip_is_local(s, src) || proto == 1)
+        return;
     /* Error messages we originate: at most one per ICMP_ERR_GAP_MS per stack (RFC 1812 4.3.2.8). */
     /* Suppress only while 0 < next - now <= GAP: 0 (none yet) or an ancient `next` never blocks. */
     if (s->icmp_err_next && (uint32_t)(s->icmp_err_next - now - 1u) < ICMP_ERR_GAP_MS) return;
@@ -156,7 +163,7 @@ void mt_icmp_send_unreach(mt_stack *s, mt_ip4 src, mt_ip4 dst, uint8_t proto, co
     mt_wr16(h + 10, mt_cksum_fold(mt_cksum_add(0, h, MT_IP_HDR)));
     memcpy(h + MT_IP_HDR, pl, q);
     mt_wr16(m + 2, mt_cksum_fold(mt_cksum_add(0, m, ICMP_HDR + MT_IP_HDR + (uint32_t)q)));
-    err0 = s->stats.eth_tx_err;
+    err0 = tx_fails(s);
     if (mt_ip_output(s, src, 1, (uint16_t)(ICMP_HDR + MT_IP_HDR + q), now) == MT_OK)
         icmp_counted(s, err0);
 }

@@ -103,6 +103,10 @@ typedef struct {
     uint32_t tcp_conns_open;   /* connections established and not yet terminated (gauge) */
     uint32_t tcp_tx_stalls;    /* TCP segments the link refused (link.tx nonzero): each one ends its
                                 * output pass; refused data / FIN is retried, never marked sent */
+    uint32_t ip_lo_out;        /* datagrams/fragments queued to the loopback FIFO (to our own address
+                                * or 127/8; also in ip_out, never in eth_out) */
+    uint32_t ip_lo_drops;      /* loopback frames refused (FIFO full: a refusal like link.tx's) or
+                                * discarded by an address change */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
@@ -263,7 +267,8 @@ typedef void (*mt_tcp_cb)(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user);
  * buflen < 512 (MacTCP's TCPCreate minimum of 4096 is the glue's to enforce). Send data is not
  * buffered here: see mt_tcp_send_segs. The TCB starts CLOSED. */
 mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, void *user);
-/* Active open: sends the SYN before returning. lport 0 = ephemeral. MT_ERR_STATE unless CLOSED,
+/* Active open: sends the SYN before returning (to our own address: queued for the next mt_tick,
+ * see Loopback below). lport 0 = ephemeral. MT_ERR_STATE unless CLOSED,
  * MT_ERR_INUSE if the 4-tuple is taken, MT_ERR_NOROUTE / MT_ERR_UNCONFIGURED / MT_ERR_INVAL. */
 int  mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t now);
 /* Passive open (0 = any for rip_filter and rport_filter). lport 0 assigns an unused local port
@@ -284,8 +289,8 @@ typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
 
 /* Data transfer. Latency rules: a send with nothing unacked leaves before mt_tcp_send_segs
- * returns; in-order data is readable (and DATA fired) before the mt_input that delivered it
- * returns. */
+ * returns (a loopback send is queued for the next mt_tick); in-order data is readable (and DATA
+ * fired) before the mt_input (or the mt_tick, for loopback) that delivered it returns. */
 #define MT_SEGS_MAX 8     /* segments per send request (MacTCP WDS entries) */
 #define MT_SENDQ_MAX 2    /* send requests queued per connection (FIFO) */
 typedef struct { const uint8_t *p; uint16_t len; } mt_seg;   /* any alignment; len 0 = skipped */
@@ -310,6 +315,13 @@ void     mt_tcp_consume(mt_tcp *t, uint32_t n, uint32_t now);
 /* 1 if unread data precedes the urgent mark; *bytes_to_mark = bytes still to read up to it. */
 int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
 
+/* Loopback: datagrams to our own address or 127.0.0.0/8 never reach link.tx. They are queued
+ * (a FIFO of 3 datagrams of up to 576 bytes; a self connection uses MSS 536) and delivered by the
+ * next mt_tick, which mt_next_deadline asks for at once (0) while any is queued. One mt_tick
+ * delivers the datagrams queued when it started, so callbacks caused by loopback traffic fire
+ * inside mt_tick, and each hop of a self connection costs one tick. A full FIFO is a refusal
+ * (ip_lo_drops; TCP stalls and retries as for a refused link.tx). 127/8 traffic carries the
+ * 127 address as its source. Unconfigured stacks queue nothing. */
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);
 uint32_t  mt_next_deadline(const mt_stack *s, uint32_t now);   /* ms from now, or MT_NO_DEADLINE */

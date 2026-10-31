@@ -119,7 +119,7 @@ static void test_ip_header_fields(void) {
     T_EQ(mt_cksum_fold(mt_cksum_add(0, fl.f[1] + 14, 20)), 0);
     id0 = mt_rd16(fl.f[0] + 14 + 4);
     T_EQ(mt_rd16(fl.f[1] + 14 + 4), (uint16_t)(id0 + 1));
-    T_EQ(mt_ip_src_for(s), T_ME);
+    T_EQ(mt_ip_src_for(s, T_PEER), T_ME);
 }
 
 static void test_ip_fragment_out(void) {

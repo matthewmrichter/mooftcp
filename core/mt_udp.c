@@ -130,7 +130,7 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
         if (checked &&
             mt_cksum_fold(mt_cksum_add(pseudo_sum(src, dst, ulen), pl, ulen)) != 0) MT_DROP_GOTO(why);
         s->stats.udp_noport++;
-        if (dst == s->cfg.addr) mt_icmp_send_unreach(s, src, dst, UDP_PROTO, pl, ulen, 3, now);
+        if (mt_ip_is_local(s, dst)) mt_icmp_send_unreach(s, src, dst, UDP_PROTO, pl, ulen, 3, now);
         return;
     }
 
@@ -191,7 +191,7 @@ int mt_udp_send(mt_udp *u, mt_ip4 dst, uint16_t dport, const uint8_t *p, uint16_
     mt_wr16(h + 4, ulen);
     mt_wr16(h + 6, 0);
     if (checksum) {
-        sum = mt_cksum_add(pseudo_sum(s->cfg.addr, dst, ulen), h, UDP_HDR);
+        sum = mt_cksum_add(pseudo_sum(mt_ip_src_for(s, dst), dst, ulen), h, UDP_HDR);
         sum = big ? mt_cksum_add(sum, p, len) : mt_cksum_copy(sum, h + UDP_HDR, p, len);
         c = mt_cksum_fold(sum);
         if (c == 0) c = 0xFFFFu;

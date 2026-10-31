@@ -4,14 +4,14 @@
 #include "mt_int.h"
 
 static void test_stack_size_budget(void) {
-    static uint64_t mem[16384 / 8 + 8];
+    static uint64_t mem[18432 / 8 + 8];
     mt_limits l;
     mt_link link = {0, 0};
     uint32_t sz;
     mt_limits_default(&l);
     T_EQ(l.max_tcp, 16); T_EQ(l.max_udp, 8); T_EQ(l.arp_entries, 8); T_EQ(l.dns_cache, 8);
     sz = mt_stack_size(&l);
-    T_CHECK(sz <= 16384);
+    T_CHECK(sz <= 18432);   /* Plan 3 Task 3 ruling: 16384 + the loopback FIFO (1738 B), rounded */
     T_CHECK(mt_stack_init(mem, sz, &l, &link, 1) != NULL);
     T_CHECK(mt_stack_init(mem, sz - 1, &l, &link, 1) == NULL);
     T_CHECK(mt_stack_init((uint8_t *)mem + 2, sz, &l, &link, 1) == NULL);  /* misaligned */
@@ -229,7 +229,8 @@ static const char *const stat_names[] = {
     "ip_in", "ip_out", "ip_in_drops", "ip_frag_out", "ip_reasm_ok", "ip_reasm_fail",
     "icmp_in", "icmp_out", "udp_in", "udp_out", "udp_drops", "udp_noport",
     "tcp_in", "tcp_out", "tcp_in_drops", "tcp_rexmt", "tcp_fast_rexmt", "tcp_active_opens",
-    "tcp_passive_opens", "tcp_resets_in", "tcp_resets_out", "tcp_conns_open", "tcp_tx_stalls"
+    "tcp_passive_opens", "tcp_resets_in", "tcp_resets_out", "tcp_conns_open", "tcp_tx_stalls",
+    "ip_lo_out", "ip_lo_drops"
 };
 #define N_STATS (sizeof stat_names / sizeof stat_names[0])
 /* C99 compile-time check: the name table covers exactly the (all-uint32) fields of mt_stats. */
@@ -330,6 +331,10 @@ static void test_stats_all_counters_live(void) {
         T_EQ(dr.status, MT_DNS_TIMEOUT);
         n = mk_arp(f, 1, T_PEER_MAC, T_PEER, zero, T_ME);
         for (i = 0; i < 70; i++) mt_input(s, f, n, 100000);        /* the wire refuses after 64 */
+        for (i = 0; i < 4; i++)                                    /* loopback: 3 queued, 1 refused */
+            mt_icmp_echo(s, T_ME, 2, (uint16_t)i, pay, 8, 100000);
+        mt_tick(s, 100000);                                        /* 3 delivered; the first reply finds */
+        mt_tick(s, 100000);                                        /* the FIFO full, two replies go */
         ss = *mt_get_stats(s);
         stats_add(sum, s);
         k = mt_log_read(s, lr, MT_LOG_RECS);
@@ -364,6 +369,8 @@ static void test_stats_all_counters_live(void) {
     T_EQ(ss.arp_in, 70);                 /* 70 ARP requests injected */
     T_EQ(ss.arp_out, 64);                /* ARP frames the wire accepted (it takes 64 in all)... */
     T_EQ(ss.eth_tx_err, 8);              /* ...and those it refused after 64 frames */
+    T_EQ(ss.ip_lo_out, 5); T_EQ(ss.ip_lo_drops, 2);   /* 3 requests + 2 replies; request 4, reply 1 */
+    T_EQ(sa.ip_lo_out, 0); T_EQ(sb.ip_lo_out, 0);
     for (i = 0; i < N_STATS; i++) T_CHECK(stat_names[i] != NULL);
     for (i = 0; i < N_STATS; i++)
         if (i != STAT_GAUGE && sum[i] == 0) {
