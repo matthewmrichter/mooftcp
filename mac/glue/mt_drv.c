@@ -12,10 +12,9 @@
  * -> unit table. The first OpenDriver(".IPP") then opens .ENET0 (frames may arrive from there on),
  * applies the configuration and arms the timer (link_up: .ENET0 cannot run at INIT time).
  *
- * Result contract of the Control entry: mt_pb.h. The PB is taken off the driver queue first
- * (several PBs pending at once), then routed (mt_drv_logic.h): run now, queued (preempted owner)
- * or refused. inProgress -> the glue owns the PB, the entry returns noErr and never touches it
- * again; r <= 0 and != -28 -> ioCompletion runs once here, after the glue returned. */
+ * Control entry: the PB (and any PB queued behind it) is taken off the driver queue here; the
+ * rest (routing, queued and refused PBs, goodbye, KillIO, the mt_pb.h result contract) is
+ * mt_pb_entry.c, host-tested. */
 #include <string.h>
 #include "mt_pb.h"
 #include "mt_gate.h"
@@ -25,6 +24,7 @@
 #include "mt_cfg.h"
 #include "mt_drv.h"
 #include "mt_drv_logic.h"
+#include "mt_pb_entry.h"
 #include "mt_drv_mac.h"
 
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory globals */
@@ -44,30 +44,15 @@ MtRes *mt_drv_res(void) { return g_res; }
 
 /* ---- small helpers ---- */
 
-typedef uint16_t sr_t;
-static inline sr_t irq_off(void) {
-    sr_t sr;
-    __asm__ volatile("move.w %%sr,%0\n\tor.w #0x0700,%%sr" : "=d"(sr) : : "memory", "cc");
-    return sr;
-}
-static inline void irq_on(sr_t sr) { __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory", "cc"); }
 static inline int sr_irq(void) {
     uint16_t sr;
     __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
     return (sr & 0x0700u) != 0;
 }
 
-/* The A5 recorded at issue time lives in the PB's ioCmdAddr (bytes 8..11 of the Device
- * Manager's fill12), which the Device Manager does not use for a control call once the PB is
- * off its queue; the ICMPEcho notify block copies it with the header. */
-static void stash_a5(MtAnyPb *pb, uint32_t a5) { memcpy(&pb->hdr.fill12[8], &a5, 4); }
 static uint32_t stashed_a5(const MtAnyPb *pb) {
-    uint32_t a5;
-    memcpy(&a5, &pb->hdr.fill12[8], 4);
+    uint32_t a5 = mt_entry_stashed_a5(pb);
     return a5 ? a5 : LM_CURRENT_A5;
-}
-static uint16_t io_trap(const MtAnyPb *pb) {
-    return (uint16_t)((uint16_t)(uint8_t)pb->hdr.fill12[6] << 8 | (uint8_t)pb->hdr.fill12[7]);
 }
 
 /* ---- mt_os.h: calls into application code (glue side: mt_pb.c) ---- */
@@ -89,33 +74,6 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
         mt_drv_call_asr_tcp(a->proc, a5, a->stream, event, a->user, reason, icmp);
 }
 
-/* ---- the pending queue (PBs that arrived while a preempted owner held the core) ---- */
-
-static int pend_push(MtRes *r, MtAnyPb *pb) {
-    sr_t sr = irq_off();
-    int ok = mt_drv_pend_push(&r->pend, pb);
-    irq_on(sr);
-    return ok;
-}
-
-static MtAnyPb *pend_pop(MtRes *r) {
-    sr_t sr = irq_off();
-    MtAnyPb *pb = (MtAnyPb *)mt_drv_pend_pop(&r->pend);
-    irq_on(sr);
-    return pb;
-}
-
-/* Run the queued PBs. Called by the gate's owner (tick / after callbacks): the gate is held, so
- * a completion routine that calls the driver must nest, hence mt_pb_call_complete (depth). */
-static void run_pending(MtRes *r) {
-    MtAnyPb *pb;
-    while ((pb = pend_pop(r)) != NULL) {
-        int16_t res = mt_pb_control(r->d, pb);
-        r->n_pend_run++;
-        if (res != inProgress && res != MT_PB_NOTOPEN) mt_pb_call_complete(r->d, pb, res);
-    }
-}
-
 /* ---- gate callbacks (the owner runs them; see mt_gate.h) ---- */
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
@@ -124,13 +82,13 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    run_pending(r);
+    mt_entry_drain(&r->entry);
     mt_pb_tick(r->d);
 }
 
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    run_pending(r);
+    mt_entry_drain(&r->entry);
     mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d));
 }
 
@@ -183,6 +141,7 @@ static long boot(void *drvr) {
 
     g_res = r;
     mt_gate_init(&r->gate, r, rx_cb, tick_cb, after_cb);
+    mt_entry_init(&r->entry, r->d, &r->gate);
     mt_os_mac_set_gate(&r->gate);
     mt_timer_init(&r->timer, tm_cb, r);
 
@@ -253,49 +212,23 @@ int16_t mt_drv_status(void *vpb, void *dce) {
 int16_t mt_drv_control(void *vpb, void *dce) {
     MtAnyPb *pb = (MtAnyPb *)vpb;
     MtRes *r = g_res;
-    MtDrv *d;
-    int16_t cs = pb->hdr.csCode, res;
-    uint16_t trap = io_trap(pb);
-    int route;
+    void *extra[MT_DRV_PENDQ];
+    int n = 0, i;
+    int16_t res;
 
     /* contract 1: several PBs pending at once. Every queued call is taken off, whatever its
      * csCode (a PBControl with csCode 1 left queued kept drvrActive set and hung every later call:
-     * ApiProbe sweep 120.1, Task 10); an immediate call (KillIO) was never queued. */
-    if (!(trap & MT_DRV_TRAP_IMMED))
-        mt_mac_dequeue(pb, dce);
+     * ApiProbe sweep 120.1, Task 10); an immediate call (KillIO) was never queued. PBs the Device
+     * Manager queued behind ours while drvrActive was set are taken off as well and run after
+     * ours, as calls made at interrupt time (they can only have come from there). */
+    if (!(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
+        n = mt_mac_dequeue(pb, dce, extra, (int)MT_DRV_PENDQ);
     if (!r) { pb->hdr.ioResult = MT_PB_NOTOPEN; return MT_PB_NOTOPEN; }
-    d = r->d;
-    stash_a5(pb, LM_CURRENT_A5);
-    r->n_calls++;
-
-    if (cs == -1) {                              /* goodBye kiss: the app heap is going away */
-        if (r->gate.depth == 0 && d->depth == 0 && !d->in_core) { mt_pb_goodbye(d); r->n_goodbye++; }
-        pb->hdr.ioResult = 0;
-        return 0;
+    res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
+    for (i = 0; i < n; i++) {
+        MtAnyPb *x = (MtAnyPb *)extra[i];
+        r->entry.n_adopted++;
+        (void)mt_entry_control(&r->entry, x, mt_entry_trap(x), 1);
     }
-    if (cs == 1) {                               /* killCode (KillIO): nothing of ours is queued */
-        pb->hdr.ioResult = 0;                    /* in the Device Manager; MacTCP answers 0 (120.1) */
-        return 0;
-    }
-
-    route = mt_drv_route(r->gate.depth != 0, d->depth != 0, (trap & MT_DRV_TRAP_ASYNC) != 0,
-                         sr_irq(), cs);
-    if (route == MT_DRV_QUEUE) {
-        if (pend_push(r, pb)) {
-            pb->hdr.ioResult = inProgress;
-            r->gate.tick_pending = 1;            /* the owner loops once more before it lets go */
-            return 0;
-        }
-        route = MT_DRV_REFUSE;
-    }
-    if (route == MT_DRV_REFUSE) {
-        r->n_refused++;
-        mt_os_complete(pb, MT_DRV_REFUSED);
-        return MT_DRV_REFUSED;
-    }
-    res = mt_pb_control(d, pb);
-    if (res == inProgress) return 0;             /* contract 2: the PB is the glue's now */
-    if (res == MT_PB_NOTOPEN) return res;        /* contract 4: no completion */
-    mt_os_complete(pb, res);                     /* contract 3: once, after the glue returned */
     return res;
 }

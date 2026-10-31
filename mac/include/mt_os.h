@@ -90,6 +90,16 @@ void mt_os_irq_restore(int saved);
  * Mac reads the processor's interrupt mask (SR bits 8-10, nonzero = interrupt time). */
 int  mt_os_in_interrupt(void);
 
+/* A real interrupt mask (level 7) around a few instructions: the driver's PB rings, filled by
+ * preempting callers (mt_pb_entry.c). Never around a core call (see mt_gate.h). Nests. */
+int  mt_os_mask(void);
+void mt_os_unmask(int saved);
+
+/* Nonzero if the address lies in the current application's memory (ApplZone .. BufPtr): the
+ * goodbye kiss forgets only what belongs to the departing application (streams by receive
+ * buffer, echoes by notify routine, queued PBs by address). */
+int  mt_os_app_mem(MacPtr32 p);
+
 #ifdef MT_OS_MAC
 static inline void *mt_os_ptr(MacPtr32 a) { return (void *)a; }
 static inline MacPtr32 mt_os_addr(const void *p) { return (MacPtr32)p; }

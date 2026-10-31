@@ -41,8 +41,8 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
     $$read("MoofDrvr.flt")
 };
 
-/* System-heap bytes INIT 31 adds for us: 0x28000 = 163,840. The DRVR code (73,652), the resident
- * block (49,820: gate, Ethernet slots, MtDrv, core arena), the DCE, plus the .ENET0 driver the
+/* System-heap bytes INIT 31 adds for us: 0x28000 = 163,840. The DRVR code (74,694), the resident
+ * block (49,924: gate, Ethernet slots, MtDrv, core arena), the DCE, plus the .ENET0 driver the
  * first open loads (about 16.5K); 0x24000 boots but leaves too little for that open (-23000).
  * Derivation: docs/dev/MACTCP-INTERFACE.md "MoofTCP driver (Task 10)". */
 data 'sysz' (0) {

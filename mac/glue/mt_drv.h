@@ -18,7 +18,7 @@ typedef struct MtRes {
     MtGate         gate;         /* input ring + core ownership */
     MtEnet         enet;         /* .ENET0, transmit slots */
     MtTimer        timer;        /* Time Manager task */
-    MtDrvPend      pend;         /* PBs queued by preemption */
+    MtEntry        entry;        /* Control entry: queued / refused PBs, counters */
     struct MtDrv  *d;
     void          *raw;          /* the block as allocated (2-aligned) */
     uint32_t       size;         /* its size */
@@ -28,7 +28,6 @@ typedef struct MtRes {
     uint8_t        mode;         /* MCFG mode slot */
     uint8_t        pad;
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
-    uint32_t       n_calls, n_refused, n_pend_run, n_goodbye;
 } MtRes;
 
 /* mt_drv_boot results (the INIT draws its icon only for MT_BOOT_OK) */

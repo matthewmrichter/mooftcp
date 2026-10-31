@@ -25,8 +25,12 @@ int     mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum);
  * this, an address error inside the DaynaPORT driver right after its open). */
 void   *mt_mac_zone_sys(void);
 void    mt_mac_zone_restore(void *z);
-/* Take a PB off the driver's request queue (the DCE's dCtlQHdr) and clear drvrActive. */
-void    mt_mac_dequeue(void *pb, void *dce);
+/* Take a PB off the driver's request queue (the DCE's dCtlQHdr) and clear drvrActive, with
+ * interrupts masked. The Device Manager sets drvrActive before it calls Control; a PBControl made
+ * at interrupt time before we clear it is queued behind ours and would never be started (we
+ * never call IODone). Such PBs are taken off too and stored in extra[] (at most max; the rest
+ * stay queued for the next call). Returns how many. */
+int     mt_mac_dequeue(void *pb, void *dce, void **extra, int max);
 /* Entropy for mt_set_entropy: Ticks, Time, the mouse position, TickCount and the VIA timer. */
 void    mt_mac_entropy(uint32_t *a, uint32_t *b);
 

@@ -42,6 +42,8 @@ extern int pbf_nlog;
 extern int pbf_bad;               /* misuse seen by the fake (bad pointer, unknown routine, ...) */
 extern int pbf_irq, pbf_irq_max, pbf_irq_calls;
 extern int pbf_in_int;            /* what mt_os_in_interrupt reports */
+extern int pbf_mask, pbf_mask_max;      /* mt_os_mask depth (0 outside) and its maximum */
+extern MacPtr32 pbf_app_lo, pbf_app_hi; /* mt_os_app_mem range, [lo, hi) (default: all) */
 extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current application's" A5) */
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */

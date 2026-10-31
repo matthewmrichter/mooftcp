@@ -130,8 +130,12 @@ int main(void)
             P("config: addr %s mask %s gateway %s dns %s domain '%s' mtu %u\r", a1, a2, a3, a4,
               m->cfg.domain, m->cfg.mtu);
             P("entries: calls %lu refused %lu pending-run %lu queued %lu queue-full %lu goodbye %lu\r",
-              (unsigned long)m->n_calls, (unsigned long)m->n_refused, (unsigned long)m->n_pend_run,
-              (unsigned long)m->pend.queued, (unsigned long)m->pend.full, (unsigned long)m->n_goodbye);
+              (unsigned long)m->entry.n_calls, (unsigned long)m->entry.n_refused,
+              (unsigned long)m->entry.n_pend_run, (unsigned long)m->entry.pend.queued,
+              (unsigned long)m->entry.pend.full, (unsigned long)m->entry.n_goodbye);
+            P("entries: adopted %lu goodbye-forced %lu refusal-ioResult-only %lu dropped-at-goodbye %lu\r",
+              (unsigned long)m->entry.n_adopted, (unsigned long)m->entry.n_goodbye_forced,
+              (unsigned long)m->entry.n_compl_skipped, (unsigned long)m->entry.n_pend_dropped);
             P("gate: rx %lu deferred %lu ticks %lu (deferred %lu) after %lu drops %u max ring %lu max depth %lu\r",
               (unsigned long)m->gate.n_rx, (unsigned long)m->gate.n_deferred,
               (unsigned long)m->gate.n_tick, (unsigned long)m->gate.n_tick_deferred,

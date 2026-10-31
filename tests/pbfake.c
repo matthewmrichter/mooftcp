@@ -9,6 +9,8 @@ int pbf_nlog;
 int pbf_bad;
 int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
+int pbf_mask, pbf_mask_max;
+MacPtr32 pbf_app_lo, pbf_app_hi;
 MacPtr32 pbf_a5;
 
 static uint64_t g_mem[PBF_SIZE / 8];
@@ -28,6 +30,9 @@ void pbf_reset(void) {
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
     pbf_a5 = 0x00A50000u;
+    pbf_mask = pbf_mask_max = 0;
+    pbf_app_lo = 0;
+    pbf_app_hi = 0xFFFFFFFFu;
     pbf_now = 1000;
 }
 
@@ -129,6 +134,19 @@ void mt_os_irq_restore(int saved) {
 }
 
 int mt_os_in_interrupt(void) { return pbf_in_int > 0; }
+
+int mt_os_mask(void) {
+    int prev = pbf_mask++;
+    if (pbf_mask > pbf_mask_max) pbf_mask_max = pbf_mask;
+    return prev;
+}
+
+void mt_os_unmask(int saved) {
+    if (saved != pbf_mask - 1) pbf_bad++;       /* must nest */
+    pbf_mask = saved;
+}
+
+int mt_os_app_mem(MacPtr32 p) { return p >= pbf_app_lo && p < pbf_app_hi; }
 
 /* ---- harness ---- */
 

@@ -128,10 +128,20 @@ int mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum) {
     return 0;
 }
 
-void mt_mac_dequeue(void *pb, void *dce) {
+int mt_mac_dequeue(void *pb, void *dce, void **extra, int max) {
     uint8_t *d = (uint8_t *)dce;
-    (void)Dequeue((QElemPtr)pb, (QHdrPtr)(d + DCE_QHDR));
+    QHdrPtr q = (QHdrPtr)(d + DCE_QHDR);
+    int n = 0;
+    sr_t sr = irq_off();
+    (void)Dequeue((QElemPtr)pb, q);
+    while (n < max && q->qHead) {
+        QElemPtr p = q->qHead;
+        (void)Dequeue(p, q);
+        extra[n++] = p;
+    }
     d[DCE_FLAGS + 1] = (uint8_t)(d[DCE_FLAGS + 1] & ~F_ACTIVE);
+    irq_on(sr);
+    return n;
 }
 
 void mt_mac_entropy(uint32_t *a, uint32_t *b) {

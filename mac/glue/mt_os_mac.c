@@ -48,3 +48,28 @@ int mt_os_in_interrupt(void)
     __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
     return (sr & 0x0700u) != 0;
 }
+
+int mt_os_mask(void)
+{
+    uint16_t sr;
+    __asm__ volatile("move.w %%sr,%0\n\tor.w #0x0700,%%sr" : "=d"(sr) : : "memory", "cc");
+    return sr;
+}
+
+void mt_os_unmask(int saved)
+{
+    uint16_t sr = (uint16_t)saved;
+    __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory", "cc");
+}
+
+/* ApplZone (0x2AA) .. BufPtr (0x10C). 24-bit addressing (the Mac Classic): the high byte of a
+ * pointer may carry Memory Manager flags, so compare the low 24 bits. */
+int mt_os_app_mem(MacPtr32 p)
+{
+    uint32_t lo = *(volatile uint32_t *)0x2AA, hi = *(volatile uint32_t *)0x10C;
+    if (hi <= 0x00FFFFFFu) {
+        p &= 0x00FFFFFFu;
+        lo &= 0x00FFFFFFu;
+    }
+    return p >= lo && p < hi;
+}

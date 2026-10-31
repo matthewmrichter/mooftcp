@@ -152,22 +152,25 @@ void mt_pb_goodbye(MtDrv *d) {
         MtStream *s = &d->tcp[i];
         uint8_t gen = s->gen;
         uint16_t conn = (uint16_t)(s->conn + 1u);
-        if (!s->used) continue;
+        if (!s->used || !mt_os_app_mem(s->rbuf)) continue;   /* system-heap clients stay */
         if (s->t) mt_tcp_release(s->t);         /* no callbacks; a live connection gets an RST */
         memset(s, 0, sizeof *s);
         s->gen = gen;
         s->conn = conn;
+        d->rel_mask &= (uint16_t)~(1u << i);
     }
-    d->rel_mask = 0;
     for (i = 0; i < d->nudp; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
-        if (!u->used) continue;
+        if (!u->used || !mt_os_app_mem(u->rbuf)) continue;
         if (u->u) mt_udp_release(u->u);
         memset(u, 0, sizeof *u);
         u->gen = gen;
     }
-    for (i = 0; i < MT_PB_ECHOQ; i++) d->echo[i].state = 0;   /* a late reply is ignored */
+    for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
+        MtEcho *e = &d->echo[i];
+        if (!e->blk.ioCompletion || mt_os_app_mem(e->blk.ioCompletion)) e->state = 0;
+    }
     mt_os_irq_restore(sv);
 }
 

@@ -207,8 +207,9 @@ void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
 uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE */
 void     mt_pb_tick(MtDrv *d);
 /* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
- * forget every TCP and UDP stream and every ICMPEcho in flight WITHOUT calling any completion
- * routine or ASR (the application's code and buffers are going away). Core objects are
+ * forget every TCP and UDP stream whose receive buffer lies in the application's memory and
+ * every ICMPEcho whose notify routine does (mt_os_app_mem; system-heap clients keep theirs),
+ * WITHOUT calling any completion routine or ASR (the application's code and buffers are going away). Core objects are
  * released, so the core stops touching the app's buffers (a live connection gets an RST). Call
  * it at task time with no glue frame active (depth 0, not inside the core): the driver does. */
 void     mt_pb_goodbye(MtDrv *d);
