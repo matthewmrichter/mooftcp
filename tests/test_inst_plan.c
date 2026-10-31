@@ -11,6 +11,8 @@
 #define MTPP INST_FCC('m', 't', 'p', 'p')
 #define PREF INST_FCC('p', 'r', 'e', 'f')
 #define TEXT INST_FCC('T', 'E', 'X', 'T')
+#define MTMP INST_TMP_TYPE
+#define MTIN INST_TMP_CREATOR
 #define SF "System Folder"
 
 /* ---- simulated volume: files tagged with their folder ---- */
@@ -133,7 +135,9 @@ static int apply(Sim *s, const InstOp *ops, int n, const InstManifest *man) {
     for (i = 0; i < n; i++) bad |= apply1(s, &ops[i], man);
     return bad;
 }
-/* a half-done WRITE_* op (HFS has no ExchangeFiles; see the header for the 4 steps) */
+/* a half-done WRITE_* op (HFS has no ExchangeFiles; see the header for the 5 steps). Temps and a
+ * not-yet-retyped X are non-loadable (MTMP/mtin). variant 3 of WRITE_MOOF is the legacy state of
+ * earlier builds: a loadable cdev/ztcp MoofTCP.tmp beside the old MoofTCP. */
 static void partial(Sim *s, const InstOp *o, const InstManifest *man, int variant) {
     char b[3][64];
     int nb = parse_path(o->to, b), i;
@@ -144,19 +148,35 @@ static void partial(Sim *s, const InstOp *o, const InstManifest *man, int varian
         T_CHECK(len > 0);
         if (variant == 0 || variant == 1) {              /* tmp (partial / complete) beside the old X */
             i = sfind(s, b[1], INST_MANIFEST_TMP);
-            if (i < 0) { add(s, b[1], INST_MANIFEST_TMP, TEXT, ZTCP, 0); i = s->n - 1; }
+            if (i < 0) { add(s, b[1], INST_MANIFEST_TMP, MTMP, MTIN, 0); i = s->n - 1; }
             memcpy(s->f[i].content, buf, (size_t)len);
             s->f[i].clen = variant == 0 ? len / 2 : len;
             if (variant == 1 && xi >= 0) sdel(s, sfind(s, b[1], b[2]));   /* between steps 3 and 4 */
-        } else {                                         /* X itself truncated (outside the protocol) */
+        } else if (variant == 2) {                       /* X itself truncated (outside the protocol) */
             if (xi < 0) { add(s, b[1], b[2], TEXT, ZTCP, 0); xi = s->n - 1; }
             memcpy(s->f[xi].content, buf, (size_t)len);
             s->f[xi].clen = len / 2;
+        } else {                                         /* between 4 and 5: X complete, not yet retyped */
+            if (xi < 0) { add(s, b[1], b[2], MTMP, MTIN, 0); xi = s->n - 1; }
+            memcpy(s->f[xi].content, buf, (size_t)len);
+            s->f[xi].clen = len; s->f[xi].e.type = MTMP; s->f[xi].e.creator = MTIN;
+            i = sfind(s, b[1], INST_MANIFEST_TMP);
+            if (i >= 0) sdel(s, i);
         }
     } else {
+        int xi = sfind(s, b[0], b[1]);
         T_EQ(nb, 2);
-        if (sfind(s, b[0], INST_MOOF_TMP) < 0) addsys(s, INST_MOOF_TMP, CDEV, ZTCP);
-        if (variant == 1 && sfind(s, b[0], b[1]) >= 0) sdel(s, sfind(s, b[0], b[1]));
+        if (variant == 3) {
+            if (sfind(s, b[0], INST_MOOF_TMP) < 0) addsys(s, INST_MOOF_TMP, CDEV, ZTCP);
+        } else if (variant == 2) {                       /* between 4 and 5 */
+            if (xi >= 0) sdel(s, xi);
+            addsys(s, b[1], MTMP, MTIN);
+            i = sfind(s, b[0], INST_MOOF_TMP);
+            if (i >= 0) sdel(s, i);
+        } else {
+            if (sfind(s, b[0], INST_MOOF_TMP) < 0) addsys(s, INST_MOOF_TMP, MTMP, MTIN);
+            if (variant == 1 && xi >= 0) sdel(s, sfind(s, b[0], b[1]));
+        }
     }
 }
 
@@ -219,10 +239,16 @@ static void dump(const Sim *s) {
                                        (unsigned)s->f[i].e.type, (unsigned)s->f[i].e.creator, s->f[i].e.is_dir, s->f[i].e.locked);
     fprintf(stderr, "--\n");
 }
-static int bothlive(const Sim *s) {      /* a cdev/ztcp MacTCP and MoofTCP together in the System Folder */
-    int a = sfind(s, SF, "MacTCP"), b = sfind(s, SF, INST_MOOF_NAME);
-    return a >= 0 && b >= 0 && s->f[a].e.type == CDEV && s->f[a].e.creator == ZTCP &&
-           s->f[b].e.type == CDEV && s->f[b].e.creator == ZTCP;
+/* loadable control panels that provide .IPP: cdev/ztcp files named MacTCP, MoofTCP or MoofTCP.tmp in
+ * the System Folder (System 6 runs the INIT of every cdev there, whatever its name) */
+static int providers(const Sim *s) {
+    static const char *const nm[3] = { "MacTCP", "MoofTCP", "MoofTCP.tmp" };
+    int i, k, n = 0;
+    for (i = 0; i < s->n; i++) {
+        if (strcmp(s->f[i].folder, SF) || s->f[i].e.is_dir || s->f[i].e.type != CDEV || s->f[i].e.creator != ZTCP) continue;
+        for (k = 0; k < 3; k++) if (!strcmp(s->f[i].e.name, nm[k])) n++;
+    }
+    return n;
 }
 
 static void base(Sim *s) {              /* a plausible System Folder */
@@ -699,6 +725,67 @@ static void path_canary(void) {
     T_EQ(rm_man(&man, &s[5], ops, &m), INST_E_MANIFEST);
 }
 
+/* ---- Round 2: non-loadable temps, foreign objects, install pre-checks ---- */
+static void incomplete_and_temp_order(void) {
+    Sim s; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n, i, fm;
+    base(&s); addsys(&s, "MoofTCP", MTMP, MTIN); mkdis(&s);            /* crash between rename and retype */
+    n = do_install(&s, 2, ops, &m, &man);
+    T_EQ(m, INST_INSTALLED_NO_MACTCP); T_EQ(n, 1); T_EQ(ops[0].kind, INST_WRITE_MOOF);
+    for (i = 0; i < 3; i++) {
+        base(&s); mkdis(&s); adddis(&s, "MacTCP", CDEV, ZTCP); addman(&s, "MacTCP", 1);
+        if (i == 0) { addsys(&s, "MoofTCP", MTMP, MTIN); }
+        if (i == 1) { oldmoof(&s, 2); addsys(&s, INST_MOOF_TMP, MTMP, MTIN); }
+        if (i == 2) { oldmoof(&s, 2); addsys(&s, INST_MOOF_TMP, CDEV, ZTCP); }   /* earlier builds: loadable */
+        n = do_remove(&s, ops, &m);
+        T_EQ(m, INST_REMOVED_RESTORED);
+        for (fm = 0; fm < n && ops[fm].kind != INST_MOVE; fm++) {}
+        T_EQ(ops[0].kind, INST_DELETE_MOOF);
+        T_CHECK(fm > 0 && fm < n);
+        if (fm > 0 && fm < n) T_EQ(ops[fm - 1].kind, i ? INST_DELETE_TEMP : INST_DELETE_MOOF);
+        T_EQ(fm, i ? 2 : 1);                                         /* both deletions precede the restore */
+        T_EQ(apply(&s, ops, n, NULL), 0);
+        T_CHECK(providers(&s) == 1);
+    }
+    base(&s); addsys(&s, "MoofTCP", TEXT, TEXT);                      /* foreign MoofTCP still blocks install */
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_COLLISION);
+}
+static void foreign_objects(void) {
+    Sim s; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man;
+    static const char *const nm[2] = { INST_MANIFEST_NAME, INST_MANIFEST_TMP };
+    int k;
+    for (k = 0; k < 2; k++) {              /* a FOLDER in the Disabled folder named like the manifest / its temp */
+        base(&s); oldmoof(&s, 2); mkdis(&s); add(&s, INST_DISABLED, nm[k], 0, 0, 1);
+        T_EQ(do_remove(&s, ops, &m), 0); T_EQ(m, INST_BLOCKED_COLLISION); T_CHECK(!strcmp(blk, nm[k]));
+        base(&s); addsys(&s, "MacTCP", CDEV, ZTCP); mkdis(&s); add(&s, INST_DISABLED, nm[k], 0, 0, 1);
+        T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_COLLISION); T_CHECK(!strcmp(blk, nm[k]));
+    }
+    /* foreign-typed manifest temp */
+    base(&s); oldmoof(&s, 2); mkdis(&s); adddis(&s, INST_MANIFEST_TMP, PREF, PREF);
+    T_EQ(do_remove(&s, ops, &m), 0); T_EQ(m, INST_BLOCKED_COLLISION);
+    /* MoofTCP.tmp as a folder or with a foreign type */
+    base(&s); oldmoof(&s, 2); add(&s, SF, INST_MOOF_TMP, 0, 0, 1);
+    T_EQ(do_remove(&s, ops, &m), 0); T_EQ(m, INST_BLOCKED_COLLISION); T_CHECK(!strcmp(blk, INST_MOOF_TMP));
+    base(&s); oldmoof(&s, 2); addsys(&s, INST_MOOF_TMP, TEXT, TEXT);
+    T_EQ(do_remove(&s, ops, &m), 0); T_EQ(m, INST_BLOCKED_COLLISION);
+    base(&s); oldmoof(&s, 1); addsys(&s, INST_MOOF_TMP, TEXT, TEXT);   /* install would write it */
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_COLLISION);
+    /* nothing of ours present: a foreign MoofTCP.tmp is not our business */
+    base(&s); addsys(&s, INST_MOOF_TMP, TEXT, TEXT);
+    T_EQ(do_remove(&s, ops, &m), 0); T_EQ(m, INST_NOTHING_TO_REMOVE);
+}
+static void install_prechecks_before_parking(void) {
+    Sim s; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man;
+    base(&s); trio3(&s); addsys(&s, INST_MOOF_TMP, MTMP, MTIN); setlock(&s, SF, INST_MOOF_TMP);
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_LOCKED); T_CHECK(!strcmp(blk, INST_MOOF_TMP));
+    base(&s); trio3(&s); add(&s, SF, INST_MOOF_TMP, 0, 0, 1);
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_COLLISION); T_CHECK(!strcmp(blk, INST_MOOF_TMP));
+    base(&s); trio3(&s); mkdis(&s); adddis(&s, INST_MANIFEST_TMP, MTMP, MTIN); setlock(&s, INST_DISABLED, INST_MANIFEST_TMP);
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_LOCKED); T_CHECK(!strcmp(blk, INST_MANIFEST_TMP));
+    /* MoofTCP current: no WRITE_MOOF, so its temp does not matter */
+    base(&s); oldmoof(&s, 2); addsys(&s, "MacTCP", CDEV, ZTCP); addsys(&s, INST_MOOF_TMP, MTMP, MTIN); setlock(&s, SF, INST_MOOF_TMP);
+    T_CHECK(do_install(&s, 2, ops, &m, &man) > 0); T_EQ(m, INST_INSTALLED_PARKED_MACTCP);
+}
+
 /* ---- properties over random snapshots ---- */
 static uint32_t rng_state;
 static unsigned rnd(unsigned n) { rng_state = rng_state * 1664525u + 1013904223u; return (rng_state >> 8) % n; }
@@ -807,11 +894,14 @@ static void prop_install_prefixes(void) {
         for (k = 0; k <= n; k++) {
             Sim p = orig;
             T_EQ(apply(&p, ops, k, &man), 0);
+            T_CHECK(providers(&p) <= (providers(&orig) > 1 ? providers(&orig) : 1));   /* never MacTCP + MoofTCP because of us */
             checked += recover(&orig, &p, "prefix", it, k);
             if (k < n && (ops[k].kind == INST_WRITE_MANIFEST || ops[k].kind == INST_WRITE_MOOF)) {
-                for (v = 0; v < (ops[k].kind == INST_WRITE_MANIFEST ? 3 : 2); v++) {
+                for (v = 0; v < 4; v++) {
                     Sim h = p;
                     partial(&h, &ops[k], &man, v);
+                    if (!(ops[k].kind == INST_WRITE_MOOF && v == 3))     /* v3 is the legacy loadable-temp state */
+                        T_CHECK(providers(&h) <= (providers(&orig) > 1 ? providers(&orig) : 1));
                     checked += recover(&orig, &h, "half-op", it, k * 10 + v);
                     partials++;
                 }
@@ -823,31 +913,43 @@ static void prop_install_prefixes(void) {
 }
 
 static void prop_remove_prefixes(void) {
-    int it, k, checked = 0;
+    int it, k, v, checked = 0;
     rng_state = 4242;
     for (it = 0; it < 1500; it++) {
-        Sim s, orig; InstOp ops[INST_OPS_MAX], r[INST_OPS_MAX]; InstMsg m; InstManifest man; int n, rn;
-        gen(&s); orig = s;
-        n = do_install(&s, 2, ops, &m, &man);
+        Sim s0, orig; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n;
+        gen(&s0); orig = s0;
+        n = do_install(&s0, 2, ops, &m, &man);
         if (n <= 0 || m == INST_BLOCKED_COLLISION || m == INST_BLOCKED_LOCKED) continue;
-        T_EQ(apply(&s, ops, n, &man), 0);
-        rn = do_remove(&s, r, &m);
-        if (rn <= 0) continue;
-        for (k = 0; k <= rn; k++) {
-            Sim p = s; InstOp r2[INST_OPS_MAX]; InstMsg m2; InstManifest pm; int n2;
-            T_EQ(apply(&p, r, k, NULL), 0);
-            T_CHECK(!bothlive(&p));                  /* never two .IPP providers because of Remove */
-            n2 = do_remove(&p, r2, &m2);
-            T_CHECK(n2 >= 0);
-            if (m2 == INST_BLOCKED_LOCKED) continue;
-            T_EQ(apply(&p, r2, n2, NULL), 0);
-            if (!same(&orig, &p, read_man(&s, &pm) != 1 || k > 0)) {      /* after DELETE_MANIFEST the folder may stay */
-                fprintf(stderr, "remove it %d prefix %d\n", it, k); dump(&orig); dump(&p); T_CHECK(0); return;
+        T_EQ(apply(&s0, ops, n, &man), 0);
+        for (v = 0; v < 5; v++) {              /* start states: clean, and with leftovers of an interrupted write */
+            Sim s = s0; InstOp r[INST_OPS_MAX]; InstMsg mm; int rn, fm = -1, dm = -1, i;
+            if (v == 1) addsys(&s, INST_MOOF_TMP, MTMP, MTIN);
+            if (v == 2) addsys(&s, INST_MOOF_TMP, CDEV, ZTCP);                    /* loadable, earlier builds */
+            if (v == 3 && sfind(&s, SF, "MoofTCP") >= 0) { SimF *f = &s.f[sfind(&s, SF, "MoofTCP")]; f->e.type = MTMP; f->e.creator = MTIN; }
+            if (v == 4 && sfind(&s, INST_DISABLED, INST_MANIFEST_NAME) >= 0) adddis(&s, INST_MANIFEST_TMP, MTMP, MTIN);
+            rn = do_remove(&s, r, &mm);
+            if (rn <= 0) continue;
+            for (i = 0; i < rn; i++) {
+                if (r[i].kind == INST_MOVE && fm < 0) fm = i;
+                if (r[i].kind == INST_DELETE_MANIFEST) dm = i;
             }
-            checked++;
+            for (k = 0; k <= rn; k++) {
+                Sim p = s; InstOp r2[INST_OPS_MAX]; InstMsg m2; int n2;
+                T_EQ(apply(&p, r, k, NULL), 0);
+                if (fm >= 0 && k > fm) T_CHECK(providers(&p) <= 1);   /* never two providers once MacTCP is back */
+                n2 = do_remove(&p, r2, &m2);
+                T_CHECK(n2 >= 0);
+                if (m2 == INST_BLOCKED_LOCKED) continue;
+                T_EQ(apply(&p, r2, n2, NULL), 0);
+                /* an empty Disabled folder we made may stay only once the manifest (and its created flag) is gone */
+                if (!same(&orig, &p, dm >= 0 && k > dm)) {
+                    fprintf(stderr, "remove it %d variant %d prefix %d\n", it, v, k); dump(&orig); dump(&p); T_CHECK(0); return;
+                }
+                checked++;
+            }
         }
     }
-    T_CHECK(checked > 1000);
+    T_CHECK(checked > 3000);
 }
 
 T_MAIN(install_trio, install_mactcp_only, install_none_twice, upgrade_keeps_prefs,
@@ -856,4 +958,5 @@ T_MAIN(install_trio, install_mactcp_only, install_none_twice, upgrade_keeps_pref
        remove_no_mactcp_and_prefs_kept, remove_manifest_untrusted, created_marker,
        collision_remove_and_readd, reinstall_unreadable_manifest, manifest_dedupe_and_full,
        manifest_codec, manifest_decode_strict, arg_and_cap_errors, path_canary, prop_install_remove,
-       prop_install_prefixes, prop_remove_prefixes)
+       incomplete_and_temp_order, foreign_objects, install_prechecks_before_parking, prop_install_prefixes,
+       prop_remove_prefixes)

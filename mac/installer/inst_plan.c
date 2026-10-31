@@ -45,7 +45,18 @@ static int trio_by_name(const char *name) {
     return -1;
 }
 
+#define T_TMPT INST_TMP_TYPE
+#define T_TMPC INST_TMP_CREATOR
+#define T_TEXT INST_FCC('T', 'E', 'X', 'T')
+
+/* the complete, loadable MoofTCP file */
 static int moof_ok(const InstEntry *e) { return !e->is_dir && e->type == T_CDEV && e->creator == T_ZTCP; }
+/* a file named MoofTCP that a crash between rename and retype left behind: ours, incomplete */
+static int moof_incomplete(const InstEntry *e) { return !e->is_dir && e->type == T_TMPT && e->creator == T_TMPC; }
+/* a temp file of ours: the non-loadable type, or what earlier builds created (loadable cdev/ztcp, TEXT/ztcp) */
+static int tmp_ours(const InstEntry *e, uint32_t old_type) {
+    return !e->is_dir && ((e->type == T_TMPT && e->creator == T_TMPC) || (e->type == old_type && e->creator == T_ZTCP));
+}
 
 static int valid_field(const char *s) {
     size_t n = 0;
@@ -175,13 +186,25 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
     }
     mi = find(sys, nsys, INST_MOOF_NAME);
     if (mi >= 0) {
-        if (!moof_ok(&sys[mi])) { setblock(blocker, sys[mi].name); *msg = INST_BLOCKED_COLLISION; return 0; }
-        if (sys[mi].vers < moof_vers) { write = 1; upgrade = 1; }
+        if (moof_incomplete(&sys[mi])) write = 1;          /* a crash between rename and retype: redo */
+        else if (!moof_ok(&sys[mi])) { setblock(blocker, sys[mi].name); *msg = INST_BLOCKED_COLLISION; return 0; }
+        else if (sys[mi].vers < moof_vers) { write = 1; upgrade = 1; }
     } else {
         write = 1;
     }
-    mani_any = find(disabled, ndisabled, INST_MANIFEST_NAME) >= 0 ||
-               find(disabled, ndisabled, INST_MANIFEST_TMP) >= 0;
+    mani_any = 0;
+    for (t = 0; t < 2; t++) {                   /* a folder of the manifest's name is foreign, never read */
+        j = find(disabled, ndisabled, t ? INST_MANIFEST_TMP : INST_MANIFEST_NAME);
+        if (j >= 0 && !disabled[j].is_dir) mani_any = 1;
+        if (j >= 0 && nmv > 0 && (disabled[j].is_dir || (t && !tmp_ours(&disabled[j], T_TEXT)))) {
+            setblock(blocker, disabled[j].name); *msg = INST_BLOCKED_COLLISION; return 0;
+        }
+    }
+    if (write) {                                /* step 1 of the write protocol must be able to run (before parking) */
+        j = find(sys, nsys, INST_MOOF_TMP);
+        if (j >= 0 && !tmp_ours(&sys[j], T_CDEV)) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_COLLISION; return 0; }
+        if (j >= 0 && sys[j].locked) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_LOCKED; return 0; }
+    }
 
     if (nmv > 0) {
         if (!folder_exists) {
@@ -195,7 +218,7 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
     }
     for (i = 0; i < nmv; i++)
         if (sys[mv[i]].locked) { setblock(blocker, sys[mv[i]].name); *msg = INST_BLOCKED_LOCKED; return 0; }
-    if (upgrade && sys[mi].locked) { setblock(blocker, sys[mi].name); *msg = INST_BLOCKED_LOCKED; return 0; }
+    if (write && mi >= 0 && sys[mi].locked) { setblock(blocker, sys[mi].name); *msg = INST_BLOCKED_LOCKED; return 0; }
     if (nmv > 0) {
         for (t = 0; t < 2; t++) {
             j = find(disabled, ndisabled, t ? INST_MANIFEST_TMP : INST_MANIFEST_NAME);
@@ -244,7 +267,7 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
 
 int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, int ndisabled,
                      const InstManifest *man, InstOp *ops, int cap, InstMsg *msg, char *blocker) {
-    int mi, mx = -1, mt = -1, tm, mani_any, folder_exists, i, j, k, n = 0, nr = 0, need, rest, rc;
+    int mi, mx = -1, mt = -1, tm, tm_bad, bad = -1, dbad = -1, mani_any, folder_exists, i, j, k, n = 0, nr = 0, need, rest, rc;
     int rs[INST_MAN_MAX];
     if (!msg || !ops || nsys < 0 || (nsys && !sys) || (ndisabled > 0 && !disabled)) return INST_E_ARG;
     if (blocker) blocker[0] = 0;
@@ -252,15 +275,20 @@ int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, 
     if (!folder_exists) { ndisabled = 0; disabled = NULL; }
     if (!entries_ok(sys, nsys) || !entries_ok(disabled, ndisabled)) return INST_E_ARG;
     mi = find(sys, nsys, INST_MOOF_NAME);
-    if (mi >= 0 && !moof_ok(&sys[mi])) mi = -1;
+    if (mi >= 0 && !moof_ok(&sys[mi]) && !moof_incomplete(&sys[mi])) mi = -1;
     tm = find(sys, nsys, INST_MOOF_TMP);
-    if (tm >= 0 && sys[tm].is_dir) tm = -1;
+    tm_bad = tm >= 0 && !tmp_ours(&sys[tm], T_CDEV);      /* a folder or a foreign type of that name */
+    if (tm_bad) { bad = tm; tm = -1; }
     if (folder_exists) {
         mx = find(disabled, ndisabled, INST_MANIFEST_NAME);
         mt = find(disabled, ndisabled, INST_MANIFEST_TMP);
+        if (mx >= 0 && disabled[mx].is_dir) { dbad = mx; mx = -1; }
+        if (mt >= 0 && !tmp_ours(&disabled[mt], T_TEXT)) { dbad = mt; mt = -1; }
     }
     mani_any = mx >= 0 || mt >= 0;
     if (mi < 0 && tm < 0 && !mani_any) { *msg = INST_NOTHING_TO_REMOVE; return 0; }
+    if (tm_bad) { setblock(blocker, sys[bad].name); *msg = INST_BLOCKED_COLLISION; return 0; }
+    if (dbad >= 0) { setblock(blocker, disabled[dbad].name); *msg = INST_BLOCKED_COLLISION; return 0; }
 
     if (mani_any) {
         if (man) {
@@ -298,13 +326,13 @@ int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, 
         rc = emit(ops, &n, INST_DELETE_MOOF, INST_SYSFOLDER, sys[mi].name, NULL, NULL, NULL, NULL);
         if (rc < 0) return rc;
     }
+    if (tm >= 0) {                              /* a loadable leftover must go before MacTCP returns */
+        rc = emit(ops, &n, INST_DELETE_TEMP, INST_SYSFOLDER, sys[tm].name, NULL, NULL, NULL, NULL);
+        if (rc < 0) return rc;
+    }
     for (i = 0; i < nr; i++) {
         rc = emit(ops, &n, INST_MOVE, INST_SYSFOLDER, INST_DISABLED, disabled[rs[i]].name,
                   INST_SYSFOLDER, disabled[rs[i]].name, NULL);
-        if (rc < 0) return rc;
-    }
-    if (tm >= 0) {
-        rc = emit(ops, &n, INST_DELETE_TEMP, INST_SYSFOLDER, sys[tm].name, NULL, NULL, NULL, NULL);
         if (rc < 0) return rc;
     }
     if (mt >= 0) {

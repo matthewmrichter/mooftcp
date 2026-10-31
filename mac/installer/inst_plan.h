@@ -34,8 +34,9 @@
  *
  * OP LIST ORDER. Install: MKDIR (if the folder is missing), WRITE_MANIFEST, the MOVEs, WRITE_MOOF
  * last (so MacTCP and MoofTCP are never live together because of us). Remove: DELETE_MOOF first
- * (MoofTCP gone before MacTCP returns: never two .IPP providers after a power loss), the restoring
- * MOVEs, DELETE_TEMP of leftover temp files, DELETE_MANIFEST, and RMDIR last. The manifest exists
+ * (MoofTCP gone before MacTCP returns: never two .IPP providers after a power loss), DELETE_TEMP of
+ * a leftover System Folder MoofTCP.tmp (also before), the restoring MOVEs, DELETE_TEMP of the
+ * manifest temp, DELETE_MANIFEST, and RMDIR last. The manifest exists
  * from before the first move until after the last restore, so after a crash at ANY point (a
  * crash is a prefix of the op list, plus a half-done last op as described below) a fresh
  * inst_plan_remove returns the volume to its original state. Re-running install after a crash is
@@ -43,34 +44,43 @@
  *
  * ATOMICITY OF WRITE_MANIFEST / WRITE_MOOF (HFS on System 6.0.8 has no ExchangeFiles). Temp names:
  * INST_MANIFEST_TMP ("MoofTCP Manifest.tmp", in 'MacTCP (Disabled)') and INST_MOOF_TMP
- * ("MoofTCP.tmp", in the System Folder). The executor writes X as follows (X = the target):
+ * ("MoofTCP.tmp", in the System Folder). THE TEMP FILE MUST NOT BE LOADABLE: System 6 runs the INIT
+ * of every cdev in the System Folder whatever its name, so a complete cdev/ztcp temp would be a
+ * second MoofTCP (or a MoofTCP next to MacTCP) at boot. Temps and a not-yet-final X therefore carry
+ * type INST_TMP_TYPE ('MTMP') and creator INST_TMP_CREATOR ('mtin'); the type becomes cdev/ztcp
+ * (TEXT/ztcp for the manifest) only as the LAST step. The executor writes X (the target) as:
  *   1. (manifest only) if X does not exist but X.tmp does and decodes, rename X.tmp to X (promote);
- *   2. delete X.tmp if it exists, create X.tmp (data fork or resource fork complete, type/creator
- *      set, flushed to disk);
+ *   2. delete X.tmp if it exists, create X.tmp (all forks complete, type MTMP/mtin, Finder flags
+ *      as shipped, flushed to disk);
  *   3. delete X if it exists;
- *   4. rename X.tmp to X.
- * A crash leaves one of: X old and a partial X.tmp (harmless); X absent and a COMPLETE X.tmp
- * (between 3 and 4); or the new X. "The manifest exists" therefore means: X or X.tmp is in the
- * Disabled folder; the executor decodes X, else X.tmp, and passes that as `prev` / `man` (NULL
- * when neither decodes; the planner then knows the manifest file exists from the snapshot and
- * uses the known names). A leftover X.tmp is OURS: Remove deletes it (DELETE_TEMP); Install leaves
- * it to step 2 above. Policy: leftover temps never block anything.
+ *   4. rename X.tmp to X;
+ *   5. set X's type/creator to cdev/ztcp (manifest: TEXT/ztcp). Only now is the file "complete".
+ * What a crash leaves: before 3: X old (loadable) plus a partial or complete non-loadable X.tmp
+ * (harmless); between 3 and 4: X absent, X.tmp complete; between 4 and 5: X with type MTMP/mtin
+ * ("incomplete": the planner treats a file named MoofTCP of that type as ours, Install rewrites it,
+ * Remove deletes it); after 5: the new X. For the manifest "exists" means: X or X.tmp is in the
+ * Disabled folder (a FOLDER of that name is foreign and never read); the executor decodes X, else
+ * X.tmp, and passes that as `prev` / `man` (NULL when neither decodes; the planner then uses the
+ * known names). Temp files of ours (type MTMP/mtin, or what earlier builds made: cdev/ztcp for
+ * MoofTCP.tmp, TEXT/ztcp for the manifest temp) are deleted by Remove (DELETE_TEMP, and for the System
+ * Folder one BEFORE the restoring MOVEs) and replaced by step 2. A temp name that is a folder or has
+ * a foreign type is not ours: BLOCKED_COLLISION naming it (Install checks this, and the lock bit,
+ * BEFORE it parks any MacTCP file, so step 2 cannot fail after MacTCP is parked).
  * WRITE_MOOF's data: the executor (the installer application) holds the MoofTCP file as its own
- * resources plus data fork; it writes a file with the same resources, sets type 'cdev', creator
- * 'ztcp', and the Finder flags of the shipped file (hasBundle 0x2000), the 'BNDL'/'FREF'/icon
- * resources included, so Finder shows the icon. The installer's own version resource gives
- * `moof_vers`.
+ * resources plus data fork; it writes a file with the same resources and the Finder flags of the
+ * shipped file (hasBundle 0x2000), the 'BNDL'/'FREF'/icon resources included, so Finder shows the
+ * icon, and retypes it cdev/ztcp in step 5. The installer's own version resource gives `moof_vers`.
  *
  * Op semantics:
  *   INST_MKDIR           create folder `to`.
  *   INST_WRITE_MANIFEST  write file `to` (TEXT/ztcp, data fork) with inst_manifest_encode(*man_out),
- *                        using the 4 steps above.
+ *                        using the 5 steps above.
  *   INST_MOVE            move file `from` to `to` (same volume; forks, type/creator, Finder info and
  *                        dates preserved: a catalog move, never copy+delete).
- *   INST_WRITE_MOOF      create or replace the file `to` with the bundled MoofTCP, using the 4 steps.
- *   INST_DELETE_MOOF     delete file `from` (the MoofTCP file).
+ *   INST_WRITE_MOOF      create or replace the file `to` with the bundled MoofTCP, using the 5 steps.
+ *   INST_DELETE_MOOF     delete file `from` (the MoofTCP file, complete or incomplete).
  *   INST_DELETE_MANIFEST delete file `from`.
- *   INST_DELETE_TEMP     delete the leftover temp file `from`.
+ *   INST_DELETE_TEMP     delete the leftover temp file `from` (never anything but our temp types).
  *   INST_RMDIR           delete the empty folder `from`. Planned only for a folder this installer
  *                        created (manifest `created` flag) and only when it ends up empty.
  *
@@ -107,6 +117,8 @@
 #define INST_PREFS_NAME  "MoofTCP Prefs"
 #define INST_MANIFEST_NAME "MoofTCP Manifest"       /* inside 'MacTCP (Disabled)', TEXT/ztcp */
 #define INST_MANIFEST_TMP  "MoofTCP Manifest.tmp"
+#define INST_TMP_TYPE      INST_FCC('M', 'T', 'M', 'P')   /* non-loadable type of temps and of an incomplete MoofTCP */
+#define INST_TMP_CREATOR   INST_FCC('m', 't', 'i', 'n')
 
 #define INST_FCC(a, b, c, d) (((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(uint8_t)(b) << 16) | \
                               ((uint32_t)(uint8_t)(c) << 8) | (uint32_t)(uint8_t)(d))
