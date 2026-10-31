@@ -53,7 +53,9 @@ vol="$(hmount "$IMG" "$part" | sed -n 's/^Volume name is "\(.*\)"$/\1/p')"
 [ -n "$vol" ] || die "hmount failed on $IMG partition $part"
 case "$dest" in :*) path="$vol$dest";; *) path="$dest";; esac
 case "$path" in *:) ;; *) path="$path:";; esac
-if ! hls -d "$path" >/dev/null 2>&1; then
+# hls exits 0 even for a missing path, so look the folder name up in its parent's listing.
+p="${path%:}"; pname="${p##*:}"; parent="${p%:*}:"
+if [ "$parent" != "$path" ] && ! hls -1a "$parent" 2>/dev/null | grep -Fxq -- "$pname"; then
   hmkdir "$path" || die "destination $path missing and hmkdir failed"
   echo "created folder $path"
 fi
