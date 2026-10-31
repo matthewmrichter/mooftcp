@@ -40,6 +40,12 @@ if(MT_GLUE_SRC)
   set(MT_TEST_LIBS mtglue)
 endif()
 
+# Control panel field logic (mac/cdev/cfg_edit.c, portable), host-built.
+add_library(mtcdev STATIC ${CMAKE_SOURCE_DIR}/mac/cdev/cfg_edit.c)
+target_include_directories(mtcdev PUBLIC ${CMAKE_SOURCE_DIR}/mac/cdev ${CMAKE_SOURCE_DIR}/mac/glue)
+target_link_libraries(mtcdev PUBLIC ${MT_TEST_LIBS})
+set(MT_TEST_LIBS mtcdev)
+
 enable_testing()
 file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
 foreach(src ${MT_TEST_SRC})

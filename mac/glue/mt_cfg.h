@@ -16,8 +16,8 @@
  *                  reserved, kept by writers
  *     22+n   ...  unknown trailing bytes: ignored by the loader, kept by writers (mt_cfg_tail)
  *
- * Loader rulings (Task 6): an address that is 0.x.x.x, 127/8 or >= 224.0.0.0, or a mask that is not
- * one run of 1 bits, makes the resource unconfigured (address 0), everything else is kept. *
+ * Loader rulings (Task 6): an address that is 0.x.x.x, 127/8 or >= 224.0.0.0, host bits all 0 or all 1 (mask shorter than /31),
+ * or a mask that is not one run of 1 bits, makes the resource unconfigured (address 0), everything else is kept. *
  * mt_cfg_parse is pure (host-tested); mt_cfg_load (mt_cfg.c, Toolbox) reads
  * the file at boot. */
 #ifndef MT_CFG_H
@@ -50,14 +50,22 @@ static inline mt_ip4 mt_cfg_class_mask(mt_ip4 a) {
     return 0xFFFFFFFFu;
 }
 
-/* Address and mask checks the loader applies (Plan 3 Task 6; closes the Task 4 carried minor).
- * An address is usable as our own only if it is a unicast host address: not 0.x.x.x ("this
+/* Address and mask checks the loader and the control panel share (Plan 3 Tasks 6 and 7). An
+ * address is usable as our own only if it is a unicast host address: not 0.x.x.x ("this
  * network"), not 127/8 (the core loops 127/8 back and drops it as a wire source, so it can never
- * be the interface address) and not >= 224.0.0.0 (class D/E, 255.255.255.255 included: the core's
- * UDP queue marker relies on that value never being our address). A mask is usable if it is one
- * run of 1 bits from the top (0 = "class default" is resolved before the check). */
-static inline int mt_cfg_addr_valid(mt_ip4 a) {
-    return a >= 0x01000000u && a < 0xE0000000u && (a >> 24) != 127u;
+ * be the interface address), not >= 224.0.0.0 (class D/E, 255.255.255.255 included: the core's
+ * UDP queue marker relies on that value never being our address) and, when the mask is shorter
+ * than /31, not the network address or the directed broadcast of its own subnet (host bits all 0
+ * or all 1: such a configuration is a silently dead network). mask is the effective mask (0 =
+ * the class default). It is not checked for being contiguous here (mt_cfg_mask_valid). A mask is
+ * usable if it is one run of 1 bits from the top. */
+static inline int mt_cfg_addr_valid(mt_ip4 a, mt_ip4 mask) {
+    mt_ip4 host;
+    if (!(a >= 0x01000000u && a < 0xE0000000u && (a >> 24) != 127u)) return 0;
+    if (!mask) mask = mt_cfg_class_mask(a);
+    host = a & ~mask;
+    if (~mask > 1u && (host == 0 || host == ~mask)) return 0;
+    return 1;
 }
 static inline int mt_cfg_mask_valid(mt_ip4 m) {
     mt_ip4 inv = ~m;                         /* contiguous iff ~m is 2^k - 1 */
@@ -98,7 +106,7 @@ static inline int mt_cfg_parse_flags(const uint8_t *p, uint32_t n, mt_ifconfig *
     c->gateway = mt_cfg_rd32(b + 12);
     c->dns = mt_cfg_rd32(b + 16);
     if (c->addr && !c->mask) c->mask = mt_cfg_class_mask(c->addr);
-    if (c->addr && (!mt_cfg_addr_valid(c->addr) || !mt_cfg_mask_valid(c->mask))) c->addr = 0;
+    if (c->addr && (!mt_cfg_addr_valid(c->addr, c->mask) || !mt_cfg_mask_valid(c->mask))) c->addr = 0;
     if (!c->addr) c->mask = 0;
     c->mtu = 1500;
     if (n > 20) {

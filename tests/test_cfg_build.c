@@ -145,7 +145,8 @@ static uint32_t addr_of(uint32_t addr, uint32_t mask) {
 }
 
 static void addr_boundaries(void) {
-    T_EQ(addr_of(0xDFFFFFFFu, 0), 0xDFFFFFFFu);         /* 223.255.255.255: accepted */
+    T_EQ(addr_of(0xDFFFFFFEu, 0), 0xDFFFFFFEu);         /* 223.255.255.254: accepted */
+    T_EQ(addr_of(0xDFFFFFFFu, 0), 0);                   /* 223.255.255.255: class C broadcast */
     T_EQ(addr_of(0xE0000000u, 0), 0);                   /* 224.0.0.0: class D */
     T_EQ(addr_of(0xEFFFFFFFu, 0), 0);
     T_EQ(addr_of(0xF0000000u, 0), 0);                   /* class E */
@@ -157,7 +158,8 @@ static void addr_boundaries(void) {
     T_EQ(addr_of(0x80000001u, 0), 0x80000001u);         /* 128.0.0.1: fine */
     T_EQ(addr_of(0x00000001u, 0), 0);                   /* 0.0.0.1 */
     T_EQ(addr_of(0x00FFFFFFu, 0), 0);
-    T_EQ(addr_of(0x01000000u, 0), 0x01000000u);         /* 1.0.0.0 */
+    T_EQ(addr_of(0x01000001u, 0), 0x01000001u);         /* 1.0.0.1 */
+    T_EQ(addr_of(0x01000000u, 0), 0);                   /* 1.0.0.0: classful /8 network address */
     T_EQ(addr_of(0, 0), 0);
 }
 
@@ -172,8 +174,49 @@ static void mask_rulings(void) {
     T_EQ(addr_of(0x0A000002u, 0x7FFFFFFFu), 0);
     T_CHECK(!mt_cfg_mask_valid(0));
     T_CHECK(mt_cfg_mask_valid(0xFFFFFF00u));
-    T_CHECK(mt_cfg_addr_valid(0xDFFFFFFFu));
-    T_CHECK(!mt_cfg_addr_valid(0xE0000000u));
+    T_CHECK(mt_cfg_addr_valid(0xDFFFFFFEu, 0xFFFFFF00u));
+    T_CHECK(!mt_cfg_addr_valid(0xE0000000u, 0xFFFFFF00u));
+}
+
+static void host_bits_rule(void) {
+    uint8_t r[12];
+    mt_ifconfig c;
+    uint8_t mode;
+    /* shared validator: host bits all 0 or all 1 are never ours when the mask is shorter than /31 */
+    T_CHECK(!mt_cfg_addr_valid(0x0A000000u, 0xFFFFFF00u));   /* 10.0.0.0/24: network address */
+    T_CHECK(!mt_cfg_addr_valid(0x0A0000FFu, 0xFFFFFF00u));   /* 10.0.0.255/24: broadcast */
+    T_CHECK( mt_cfg_addr_valid(0x0A000001u, 0xFFFFFF00u));
+    T_CHECK( mt_cfg_addr_valid(0x0A0000FEu, 0xFFFFFF00u));
+    T_CHECK(!mt_cfg_addr_valid(0x0A000000u, 0xFF000000u));   /* 10.0.0.0/8 */
+    T_CHECK(!mt_cfg_addr_valid(0x0AFFFFFFu, 0xFF000000u));
+    T_CHECK(!mt_cfg_addr_valid(0x0A000000u, 0));             /* mask 0 = classful (/8) */
+    T_CHECK( mt_cfg_addr_valid(0x0A000100u, 0xFF000000u));
+    T_CHECK(!mt_cfg_addr_valid(0x0A000000u, 0xFFFFFFFCu));   /* /30: network */
+    T_CHECK(!mt_cfg_addr_valid(0x0A000003u, 0xFFFFFFFCu));   /* /30: broadcast */
+    T_CHECK( mt_cfg_addr_valid(0x0A000001u, 0xFFFFFFFCu));
+    T_CHECK( mt_cfg_addr_valid(0x0A000000u, 0xFFFFFFFEu));   /* /31: both ends are hosts */
+    T_CHECK( mt_cfg_addr_valid(0x0A000001u, 0xFFFFFFFEu));
+    T_CHECK( mt_cfg_addr_valid(0x0A000000u, 0xFFFFFFFFu));   /* /32 */
+    T_CHECK(!mt_cfg_addr_valid(0x7F000001u, 0xFF000000u));   /* the old rules still hold */
+    T_CHECK(!mt_cfg_addr_valid(0x00000001u, 0xFF000000u));
+    /* the loader applies it: unconfigured, never a silently dead network */
+    r[0] = 0; r[1] = 1; r[2] = r[3] = 0; r[4] = 10; r[5] = r[6] = 0; r[7] = 255;
+    r[8] = 255; r[9] = 255; r[10] = 255; r[11] = 0;
+    T_EQ(mt_cfg_parse(r, sizeof r, &c, &mode), 0);
+    T_EQ(c.addr, 0); T_EQ(c.mask, 0);
+    r[7] = 0;
+    T_EQ(mt_cfg_parse(r, sizeof r, &c, &mode), 0);
+    T_EQ(c.addr, 0);
+    r[7] = 1;
+    T_EQ(mt_cfg_parse(r, sizeof r, &c, &mode), 0);
+    T_EQ(c.addr, 0x0A000001u);
+    r[8] = r[9] = r[10] = r[11] = 0;                          /* classful /8: 10.0.0.255 is fine */
+    r[7] = 255;
+    T_EQ(mt_cfg_parse(r, sizeof r, &c, &mode), 0);
+    T_EQ(c.addr, 0x0A0000FFu);
+    r[5] = r[6] = r[7] = 0;                                   /* 10.0.0.0 classful /8: network */
+    T_EQ(mt_cfg_parse(r, sizeof r, &c, &mode), 0);
+    T_EQ(c.addr, 0);
 }
 
 static void rewrite_preserves_unknowns(void) {
@@ -199,4 +242,4 @@ static void rewrite_preserves_unknowns(void) {
 
 T_MAIN(build_parse_round_trip, parse_truncated_at_every_length, parse_foreign_version_is_unconfigured,
        parse_trailing_unknown_fields_ignored, parse_flags_byte, build_cap_too_small, addr_boundaries,
-       mask_rulings, rewrite_preserves_unknowns)
+       mask_rulings, rewrite_preserves_unknowns, host_bits_rule)
