@@ -127,7 +127,9 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
 /* flags2 */
 #define MT_T2_ACKHALF  0x01u   /* one full-size segment received and not yet ACKed (ack every 2nd) */
-/* 0x02, 0x04: free */
+#define MT_T2_INPUT    0x02u   /* inside in_sync for this TCB (mt_input): its own post-callback output
+                                * decides the ACK; rcv_freed must not send the delayed one */
+/* 0x04: free */
 #define MT_T2_SNDURG   0x08u   /* snd_up is live: segments before it carry URG */
 #define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
 #define MT_T2_RTTING   0x20u   /* rtt_seq/rtt_t0 hold a timed (never retransmitted) segment */
@@ -140,6 +142,7 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TH_ACK 0x10u
 #define MT_TH_URG 0x20u
 #define MT_TCP_DELACK_MS 100u
+#define MT_TCP_QUICKACK  4u    /* the first data segments of a connection are ACKed at once */
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
 #define MT_TCP_RTO_MIN  200u
@@ -176,6 +179,7 @@ struct mt_tcp {
     uint16_t rcv_mss;         /* largest payload received in one segment (clamped to the local MSS) */
     uint8_t state, flags, flags2, tmask, used, dupacks;
     uint8_t gen;              /* bumped on create/release/terminate/abort: stale deferred events are dropped */
+    uint8_t qack;             /* data segments received on this connection, saturating at MT_TCP_QUICKACK */
 };
 
 

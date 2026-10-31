@@ -99,6 +99,7 @@ static void test_delayed_ack_carried_by_send(void) {
     memset(&r, 0, sizeof r);
     {
         SETUP(8192, 5000, rec_cb, &r);
+        c.t->qack = MT_TCP_QUICKACK;                   /* past the quick-ACK phase */
         inject_data(&c, 0, 1460, 0, 1000);              /* full segment: ACK delayed */
         T_EQ(fl.n, 0);
         T_EQ(tsend(c.t, (const uint8_t *)"q", 1, 1, 0, 1020), 1);
@@ -698,6 +699,101 @@ static void test_ack_done_abort_nested_relisten(void) {
     }
 }
 
+/* ---- Task 12: quick-ACK and the drained-queue ACK (a sender's Nagle tail must not wait for
+ * our delayed-ACK timer; Wikipedia Reader stopped reading early) ---- */
+
+/* The first MT_TCP_QUICKACK (4) data segments of a connection are ACKed at once; after that full
+ * segments go back to ack-every-second with the 100 ms timer (bulk unchanged). */
+static void test_quickack_first_four_then_delayed(void) {
+    rec r; tcpv v;
+    uint32_t i;
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(16384, 5000, rec_cb, &r);
+        for (i = 0; i < MT_TCP_QUICKACK; i++) {
+            inject_data(&c, i * 1460u, 1460, 0, 10 + i);
+            T_EQ(fl.n, (int)i + 1);                     /* each one ACKed before mt_input returns */
+            T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + (i + 1u) * 1460u); T_EQ(v.flags, TF_ACK);
+            T_CHECK(!(c.t->tmask & (1u << MT_TT_DELACK)));
+        }
+        T_EQ(c.t->qack, MT_TCP_QUICKACK);
+        inject_data(&c, 4 * 1460u, 1460, 0, 20);        /* 5th: delayed */
+        T_EQ(fl.n, 4);
+        T_EQ(mt_next_deadline(c.s, 20), 100);
+        inject_data(&c, 5 * 1460u, 1460, 0, 21);        /* 6th: ACK both */
+        T_EQ(fl.n, 5);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 6u * 1460u);
+        inject_data(&c, 6 * 1460u, 1460, 0, 30);        /* bulk keeps every second */
+        T_EQ(fl.n, 5);
+        inject_data(&c, 7 * 1460u, 1460, 0, 31);
+        T_EQ(fl.n, 6);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 8u * 1460u);
+        T_EQ(count_ev(&r, MT_TCP_EV_DATA), 8);
+    }
+}
+
+/* The app empties the receive queue (outside mt_input) while an ACK is delayed: it goes out at
+ * once and the timer is cancelled; a read that leaves data queued does not send it. */
+static void test_drained_queue_sends_delayed_ack(void) {
+    rec r; tcpv v;
+    static uint8_t got[3000];
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        c.t->qack = MT_TCP_QUICKACK;                   /* past the quick-ACK phase */
+        inject_data(&c, 0, 1460, 0, 1000);              /* delayed */
+        T_EQ(fl.n, 0);
+        T_EQ(mt_tcp_recv(c.t, got, 1000, 1005), 1000);  /* 460 left: still delayed */
+        T_EQ(fl.n, 0);
+        T_CHECK(c.t->tmask & (1u << MT_TT_DELACK));
+        T_EQ(mt_tcp_recv(c.t, got + 1000, 1000, 1010), 460);   /* queue empty: ACK now */
+        T_EQ(fl.n, 1);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 1460); T_EQ(v.flags, TF_ACK);
+        T_EQ(v.win, 8192);
+        T_CHECK(!(c.t->tmask & (1u << MT_TT_DELACK)));
+        mt_tick(c.s, 1100);
+        T_EQ(fl.n, 1);                                  /* nothing left for the timer */
+        inject_data(&c, 1460, 1460, 0, 2000);           /* consume() path too */
+        T_EQ(fl.n, 1);
+        mt_tcp_consume(c.t, 1460, 2001);
+        T_EQ(fl.n, 2);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 2920);
+    }
+}
+
+/* A blocking reader served from the DATA callback (inside mt_input) keeps ack-every-second:
+ * the drained-queue ACK is not sent from inside the TCB's own input dispatch. */
+static int g_rd_cb;
+static void read_all_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
+    static uint8_t sink[1500];
+    (void)arg; (void)user;
+    if (ev == MT_TCP_EV_DATA) {
+        while (mt_tcp_recv(t, sink, sizeof sink, t->tnow) > 0) {}
+        g_rd_cb++;
+    }
+}
+static void test_no_drain_ack_inside_input(void) {
+    tcpv v;
+    g_rd_cb = 0;
+    {
+        SETUP(8192, 5000, read_all_cb, NULL);
+        c.t->qack = MT_TCP_QUICKACK;
+        inject_data(&c, 0, 1460, 0, 1000);
+        T_EQ(g_rd_cb, 1);
+        T_EQ(c.t->rcvq.used, 0);                        /* drained inside the callback ... */
+        T_EQ(fl.n, 0);                                  /* ... and the ACK is still delayed */
+        T_CHECK(c.t->tmask & (1u << MT_TT_DELACK));
+        T_CHECK(!(c.t->flags2 & MT_T2_INPUT));          /* flag only lives during dispatch */
+        inject_data(&c, 1460, 1460, 0, 1010);
+        T_EQ(fl.n, 1);                                  /* every second segment */
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 2920);
+        inject_data(&c, 2920, 1460, 0, 2000);
+        T_EQ(fl.n, 1);
+        mt_tick(c.s, 2100);
+        T_EQ(fl.n, 2);                                  /* the timer still sends a lone one */
+    }
+}
+
 T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_psh_full_segment_acked_now, test_send_state_and_no_events_after_terminate,
        test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight,
@@ -707,4 +803,5 @@ T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_done_order_matches_request_order, test_abort_with_send_pending_fires_done_with_abort,
        test_send_zero_len_seg_skipped, test_recv_window_equals_buflen, test_push_per_request,
        test_term_done_relisten_both_dones_fire, test_term_done_relisten_no_terminate_on_new_conn,
-       test_ack_done_abort_nested_relisten)
+       test_ack_done_abort_nested_relisten, test_quickack_first_four_then_delayed,
+       test_drained_queue_sends_delayed_ack, test_no_drain_ack_inside_input)

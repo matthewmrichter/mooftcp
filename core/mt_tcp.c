@@ -131,6 +131,7 @@ static void conn_reset(mt_tcp *t) {
     t->rcv_adv = t->rcv_up = t->snd_up = 0;
     t->mss = TCP_MSS_DEFAULT;
     t->rcv_mss = 0;
+    t->qack = 0;
 }
 
 /* ISN = base + 250 per ms + (once mt_set_entropy has keyed it) a mix of the 4-tuple, so ISNs of
@@ -406,6 +407,15 @@ static void rcv_freed(mt_tcp *t, uint32_t now) {
     if (t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_FIN_WAIT_1 &&
         t->state != MT_TCP_FIN_WAIT_2)
         return;
+    /* The app emptied the queue while an ACK is being delayed: send it now, so a sender waiting
+     * for it (Nagle tail, window) is not held up by our timer (Task 12, Wikipedia Reader). Not
+     * inside this TCB's own mt_input dispatch: there the post-callback output decides, and a
+     * blocking reader served from the DATA callback keeps ack-every-second-segment. */
+    if ((t->tmask & (1u << MT_TT_DELACK)) && t->rcvq.used == 0 && !(t->flags2 & MT_T2_INPUT)) {
+        t->flags |= MT_TF_ACKNOW;
+        mt_tcp_output(t, now);
+        return;
+    }
     cur = t->rcv_adv - t->rcv_nxt;
     if (cur & 0x80000000u) cur = 0;
     win = mt_tcp_rcv_window(t, 0);                         /* receiver SWS already applied */
@@ -765,6 +775,7 @@ static void established(mt_tcp *t) {
     mt_tcp_set_state(t, MT_TCP_ESTABLISHED);
     t->flags |= MT_TF_EST;
     t->rcv_mss = t->mss < 536u ? t->mss : 536u;     /* grows to the largest segment received */
+    t->qack = 0;                                     /* quick-ACK the first data segments again */
     t->st->stats.tcp_conns_open++;
     t->flags &= (uint8_t)~MT_TF_PASSIVE;
 }
@@ -987,15 +998,21 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                 ev |= EV_DATA;
                 dacc = g->acc_n;
                 /* ACK policy: sub-MSS, PSH or FIN -> ACK before mt_input returns (output below,
-                 * after the callbacks, so a reply sent by the app carries it); a full segment is
-                 * ACKed with every second one, else by the 100 ms timer; while MT_T2_GAP is set (a hole is
-                 * being repaired) every in-order segment is ACKed at once. */
+                 * after the callbacks, so a reply sent by the app carries it); the first
+                 * MT_TCP_QUICKACK data segments of a connection likewise (a sender's Nagle holds a
+                 * sub-MSS tail until it sees an ACK, so a short response would otherwise stall on our
+                 * delayed ACK, Task 12); later full segments are ACKed with every second one, else by
+                 * the 100 ms timer or when the app empties the queue (rcv_freed); while MT_T2_GAP is
+                 * set (a hole is being repaired) every in-order segment is ACKed at once. */
                 if (g->acc_n > t->rcv_mss) {               /* largest segment seen, <= local MSS */
                     uint16_t lm = mt_tcp_local_mss(t->st);
                     t->rcv_mss = g->acc_n < lm ? (uint16_t)g->acc_n : lm;
                 }
-                if (g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
-                    !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
+                if (t->qack < MT_TCP_QUICKACK) {
+                    t->qack++;
+                    t->flags |= MT_TF_ACKNOW;
+                } else if (g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
+                           !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
                     t->flags2 |= MT_T2_ACKHALF;
                     if (!(t->tmask & (1u << MT_TT_DELACK)))
                         tmr_set(t, MT_TT_DELACK, now + MT_TCP_DELACK_MS);
@@ -1120,7 +1137,11 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     switch (t->state) {
     case MT_TCP_LISTEN:   in_listen(t, src, sport, dport, &g, now); break;
     case MT_TCP_SYN_SENT: in_syn_sent(t, &g, now); break;
-    default:              in_sync(t, &g, now); break;
+    default:
+        t->flags2 |= MT_T2_INPUT;
+        in_sync(t, &g, now);
+        t->flags2 &= (uint8_t)~MT_T2_INPUT;   /* harmless if a callback released/re-created t */
+        break;
     }
     return;
 drop:

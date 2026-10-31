@@ -464,6 +464,7 @@ static void test_deadline_reflects_timers(void) {
     mt_input(s, f, n, 120);
     T_EQ(t4->state, MT_TCP_TIME_WAIT);
     T_EQ(mt_next_deadline(s, 120), 980);                         /* t1 RTO beats TIME_WAIT */
+    t2->qack = MT_TCP_QUICKACK;                                  /* past the quick-ACK phase */
     n = mk_tcp(f, T_PEER, 23, T_ME, i2.lport, p2, m2, TF_ACK, 8192, NULL, 0, d, 1460);
     mt_input(s, f, n, 200);                                      /* t2: delayed ACK at 300 */
     T_EQ(mt_next_deadline(s, 200), 100);

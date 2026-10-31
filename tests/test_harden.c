@@ -415,6 +415,7 @@ static void test_rcv_mss_tracks_largest_segment(void) {
     memset(data, 0x41, sizeof data);
     t = tconn_established(s, &fl, &r, &ps, &ms);
     T_CHECK(t->rcv_mss <= t->mss);
+    t->qack = MT_TCP_QUICKACK;                       /* past the quick-ACK phase */
     /* a peer behind MSS clamping sends 700-byte segments: ACK every second, not every one */
     inject(s, 23, t->lport, ps, ms, TF_ACK, data, 700, now);
     T_EQ(fl.n, 0);

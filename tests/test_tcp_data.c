@@ -138,6 +138,7 @@ static void test_full_segment_ack_every_second(void) {
     memset(&r, 0, sizeof r);
     {
         SETUP(8192, 5000, rec_cb, &r);
+        c.t->qack = MT_TCP_QUICKACK;                   /* past the quick-ACK phase */
         inject_data(&c, 0, 1460, 0, 1000);
         T_EQ(fl.n, 0);                                  /* first full segment: delayed */
         T_EQ(mt_next_deadline(c.s, 1000), 100);
@@ -246,6 +247,7 @@ static void test_recv_peek_consume_window(void) {
     memset(&r, 0, sizeof r);
     {
         SETUP(3072, 5000, rec_cb, &r);                  /* receive ring 3072 */
+        c.t->qack = MT_TCP_QUICKACK;                   /* past the quick-ACK phase */
         inject_data(&c, 0, 1460, 0, 10);
         inject_data(&c, 1460, 1460, 0, 11);
         T_CHECK(last_tcp(&fl, &v)); T_EQ(v.win, 3072 - 2920);
