@@ -148,8 +148,11 @@ int main(void)
               (unsigned long)m->enet.tx_drop_len, (unsigned long)m->enet.tx_drop_closed,
               (unsigned long)m->enet.tx_err, m->enet.last_err);
             P("timer: fired %lu armed %u\r", (unsigned long)m->timer.fired, m->timer.armed);
-            P("stack: low %08lx entry %08lx used %lu painted %lu episodes %lu (interrupt-time depth below the outermost entry; mt_stackmark.h)\r",
-              (unsigned long)s24((const void *)m->stk.low), (unsigned long)s24((const void *)m->stk.entry),
+            if (!(m->stk.flags & 1))
+                P("stack: not built with marks (rebuild with MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096)\r");
+            else
+            P("stack: marks %u paint %u low %08lx entry %08lx used %lu painted %lu episodes %lu (interrupt-time depth below the outermost entry; mt_stackmark.h)\r",
+              (unsigned)(m->stk.flags & 1), (unsigned)(m->stk.flags >> 1 & 1), (unsigned long)s24((const void *)m->stk.low), (unsigned long)s24((const void *)m->stk.entry),
               (unsigned long)m->stk.used, (unsigned long)m->stk.deep, (unsigned long)m->stk.n_enter);
             memcpy(&s, m->d, sizeof s);                  /* MtDrv's first member: mt_stack *s */
             st = mt_get_stats(s);

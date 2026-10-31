@@ -2,7 +2,8 @@
 # Retro68 compile gate (Plan 3 Task 1; PLAN3-CARRYOVER 4.3 item H).
 #   gate-check.sh
 # 1. Every Mac target (mac/, which includes the core as mtcore68k) must build with
-#    -m68000 -O2 -Wall -Wextra -Werror in a separate tree build-gate/ (build-mac/ is not touched).
+#    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint}/ (build-mac/ is not touched): the
+#    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, and MARK=1 + -DMT_STACK_PAINT=4096.
 #    Any warning or error fails the gate (exit 1). Log: build-gate.log.
 # 2. Probe: core/*.c compiled alone with -mshort (16-bit int). Hazards (warnings) are listed;
 #    this step is report-only and never changes the exit status.
@@ -14,18 +15,23 @@ R68_TOOLCHAIN=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.
 FLAGS="-m68000 -O2 -Wall -Wextra -Werror"
 log="$ROOT/build-gate.log"
 
-echo "== gate: all Mac targets, $FLAGS"
-if ! scripts/r68 cmake -S mac -B build-gate -DCMAKE_TOOLCHAIN_FILE="$R68_TOOLCHAIN" \
-    -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_ASM_FLAGS=-m68000 >"$log" 2>&1; then
-  tail -20 "$log"; echo "GATE FAIL (configure)"; exit 1
-fi
-if ! scripts/r68 cmake --build build-gate -- -k >>"$log" 2>&1; then
-  grep -E "error|warning" "$log" | head -30
-  echo "GATE FAIL (build; full log $log)"
-  exit 1
-fi
-if grep -q "warning:" "$log"; then grep "warning:" "$log" | head -30; echo "GATE FAIL (warnings)"; exit 1; fi
-echo "gate: PASS"
+# Three configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds).
+for cfg in "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096"; do
+  name="${cfg%%:*}"; extra="${cfg#*:}"
+  dir="build-gate-$name"
+  echo "== gate [$name]: all Mac targets, $FLAGS $extra"
+  if ! scripts/r68 cmake -S mac -B "$dir" -DCMAKE_TOOLCHAIN_FILE="$R68_TOOLCHAIN" \
+      "-DCMAKE_C_FLAGS=$FLAGS $extra" -DCMAKE_ASM_FLAGS=-m68000 >"$log" 2>&1; then
+    tail -20 "$log"; echo "GATE FAIL [$name] (configure)"; exit 1
+  fi
+  if ! scripts/r68 cmake --build "$dir" -- -k >>"$log" 2>&1; then
+    grep -E "error|warning" "$log" | head -30
+    echo "GATE FAIL [$name] (build; full log $log)"
+    exit 1
+  fi
+  if grep -q "warning:" "$log"; then grep "warning:" "$log" | head -30; echo "GATE FAIL [$name] (warnings)"; exit 1; fi
+  echo "gate [$name]: PASS"
+done
 
 echo "== probe: core/*.c with -mshort (report only)"
 n=0

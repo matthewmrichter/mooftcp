@@ -145,6 +145,7 @@ static long boot(void *drvr) {
     mt_gate_init(&r->gate, r, rx_cb, tick_cb, after_cb);
     mt_entry_init(&r->entry, r->d, &r->gate);
     mt_os_mac_set_gate(&r->gate);
+    r->stk.flags = (uint16_t)((MT_STACK_MARK ? 1 : 0) | (MT_STACK_PAINT ? 2 : 0));
     mt_os_mac_set_stack(&r->stk);
     mt_timer_init(&r->timer, tm_cb, r);
 

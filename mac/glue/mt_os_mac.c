@@ -18,12 +18,13 @@
 #pragma GCC diagnostic ignored "-Warray-bounds"
 
 static MtGate *g_gate;
+
+/* Stack depth marks (mt_stackmark.h). Built only with -DMT_STACK_MARK=1. */
+#if MT_STACK_MARK
 static MtStackMark *g_stk;
 
 void mt_os_mac_set_stack(MtStackMark *m) { g_stk = m; }
 
-/* Stack depth marks (mt_stackmark.h). Compiled out with -DMT_STACK_MARK=0. */
-#if MT_STACK_MARK
 static inline uint32_t cur_sp(void)
 {
     uint32_t s;
@@ -50,7 +51,10 @@ static void paint(MtStackMark *m)
 {
     volatile uint16_t *top = (volatile uint16_t *)(cur_sp() - 16u), *p;
     volatile uint16_t *lo = (volatile uint16_t *)((uint32_t)top - (MT_STACK_PAINT));
-    int saved = mt_os_mask();
+    int saved;
+    m->paint_lo = 0;
+    if ((uint32_t)lo <= *(volatile const uint32_t *)0x114u + 256u) return;   /* HeapEnd: not enough free stack */
+    saved = mt_os_mask();
     for (p = lo; p < top; p++) *p = PAINT_WORD;
     mt_os_unmask(saved);
     m->paint_lo = (uint32_t)lo;

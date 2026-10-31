@@ -19,14 +19,19 @@
  * scans for the lowest overwritten word and `deep` keeps the largest (entry - lowest) seen. The marks
  * above only see the stack pointer at their call sites, `deep` also sees the leaf frames between them.
  *
- * Host builds, and MT_STACK_MARK=0 builds, get empty inline functions. */
+ * Host builds, and MT_STACK_MARK=0 (default) builds, get empty inline functions.
+ * The marks and the paint are diagnostics: a read-compare-write on `low` is not atomic against a nested interrupt,
+ * which at worst loses one update.
+ * Paint precondition: the 4096 bytes below the entry must be free stack. The paint is skipped (deep stays 0) when it
+ * would reach within 256 bytes of HeapEnd (0x114). */
 #ifndef MT_STACKMARK_H
 #define MT_STACKMARK_H
 
 #include <stdint.h>
 
+/* Default OFF (release): diagnostic builds pass -DMT_STACK_MARK=1 (scripts/mem-check.sh does). */
 #ifndef MT_STACK_MARK
-#define MT_STACK_MARK 1
+#define MT_STACK_MARK 0
 #endif
 #ifndef MT_STACK_PAINT
 #define MT_STACK_PAINT 0
@@ -41,8 +46,8 @@ typedef struct MtStackMark {
     volatile uint32_t deep;      /* MT_STACK_PAINT builds: deepest stack word touched below the entry (bytes) */
     volatile uint32_t paint_lo;  /* lowest painted address of the current episode (0 = not painted) */
     volatile uint16_t nest;
-    uint16_t          pad;
-} MtStackMark;
+    uint16_t          flags;     /* set at boot by the driver build: 1 = marks built, 2 = paint built (MoofDiag reads it) */
+} MtStackMark;   /* 32 bytes; the fields exist in every build so MoofDiag and the driver agree on MtRes */
 
 #if MT_STACK_MARK && defined(MT_OS_MAC)
 #ifdef __cplusplus
@@ -59,6 +64,7 @@ void mt_os_mac_set_stack(MtStackMark *m);   /* NULL unregisters */
 static inline void mt_os_stack_mark(void) {}
 static inline void mt_os_stack_enter(void) {}
 static inline void mt_os_stack_leave(void) {}
+static inline void mt_os_mac_set_stack(MtStackMark *m) { (void)m; }
 #endif
 
 #endif

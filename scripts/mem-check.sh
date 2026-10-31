@@ -2,15 +2,15 @@
 # MoofTCP resident-memory cap check (Task 13; rules in docs/dev/EMULATOR.md "The cap").
 #   mem-check.sh [--keep-disk] [--no-build]
 # One Snow boot on a fresh work.hda with MoofTCP installed (scripts/install-moof.sh), then in order:
-#   HeapInfo (idle), HeapInfoOpen (driver open), ApiProbe groups 2+3 (real TCP traffic: the "network
-#   operation"), HeapInfo again, HeapInfoDNR twice. Each app appends exact byte figures to
+#   HeapInfo (idle), HeapInfoOpen (driver open), ApiProbe groups 2 3 4 5 (real TCP traffic: the "network
+#   operation"; group 4 has the deepest stack path, case 509, the chained reader; group 5 the burst), HeapInfo again, HeapInfoDNR twice. Each app appends exact byte figures to
 #   :MoofTCP Test:HeapInfo.out (the alerts stay; they are clicked away). The figures are read back
 #   with Snow stopped and the three rules are printed as PASS/FAIL:
 #     1. occupied (zone size - FreeMem) over the no-network baseline 149,248, after the driver open
 #        and after the network operation, <= 195,046
 #     2. system-zone growth over the no-network baseline 162,100 <= 273,672
 #     3. HeapInfoDNR (second run): app heap taken <= 29,150 and system heap taken <= 0
-#     4. interrupt-time stack depth <= STACK_BUDGET (MACTCP-INTERFACE.md "Stack budget"): MoofDiag runs
+#     4. (case 509 must have chained to depth 3, else FAIL) interrupt-time stack depth <= STACK_BUDGET (MACTCP-INTERFACE.md "Stack budget"): MoofDiag runs
 #        after the network operation and its "stack:" line (mt_stackmark.h) gives `used`, the stack the
 #        driver took below the outermost entry (call-out frames and nested driver calls included),
 #        and `painted`, the deepest word the painted-stack scan of the measurement build saw (the build
@@ -42,8 +42,8 @@ diag="$out_dir/MoofDiag.out"
 rm -f "$res" "$diag" "$out_dir/MemCheck.out"
 
 if [ -n "$build" ]; then
-  echo "== build (stack-paint measurement build: MT_EXTRA_CFLAGS=-DMT_STACK_PAINT=4096 unless set)"
-  export MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS--DMT_STACK_PAINT=4096}"
+  echo "== build (stack measurement build: MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096 unless set)"
+  export MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS--DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096}"
   for t in HeapInfo HeapInfoOpen HeapInfoDNR ApiProbe MoofDiag MoofTCP; do scripts/build-mac.sh "$t" >/dev/null; done
 fi
 for f in build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
@@ -51,14 +51,21 @@ for f in build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin bui
   [ -f "$f" ] || die "missing $f"
 done
 
-started_testnet=""
+started_testnet=""; started_extra=""
 if ! (exec 3<>/dev/tcp/127.0.0.1/17007) 2>/dev/null; then
   scripts/testnet.py > "$out_dir/testnet.log" 2>&1 &
   started_testnet=$!
   sleep 1
 fi
+# Another session's older testnet.py may hold 17007/17009/17023 without the oneshot/burst/reset ports
+# (17013/17019/17037) that groups 4 and 5 need: serve just those, never touch theirs.
+if ! (exec 3<>/dev/tcp/127.0.0.1/17019) 2>/dev/null; then
+  scripts/testnet.py --only 13,19,37 > "$out_dir/testnet-extra.log" 2>&1 &
+  started_extra=$!
+  sleep 1
+fi
 snow_stop() { scripts/snow.sh stop >/dev/null 2>&1 || true; }
-cleanup() { snow_stop; if [ -n "$started_testnet" ]; then kill "$started_testnet" 2>/dev/null || true; fi; }
+cleanup() { snow_stop; for p in $started_testnet $started_extra; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 hfs_part() {
@@ -87,13 +94,13 @@ with_volume() {
 }
 # The files the apps write are created up front (empty) so the Finder's icon grid does not shift during the run.
 put_cfg() {
-  printf '23' > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
+  printf '2345' > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
   hcopy -t "$out_dir/ApiProbe.cfg" ":MoofTCP Test:ApiProbe.cfg"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:ApiProbe.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:HeapInfo.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:MoofDiag.out"
 }
-fetch_res() { hcopy -t ":MoofTCP Test:HeapInfo.out" "$res" && hcopy -t ":MoofTCP Test:MoofDiag.out" "$diag"; }
+fetch_res() { hcopy -t ":MoofTCP Test:HeapInfo.out" "$res" && hcopy -t ":MoofTCP Test:MoofDiag.out" "$diag" && hcopy -t ":MoofTCP Test:ApiProbe.out" "$out_dir/ApiProbe.out"; }
 
 click() {  # click x y [dbl]
   local x=$1 y=$2 w i
@@ -170,7 +177,7 @@ sleep 25
 open_folder
 run_alert_app HeapInfo 1          # idle, driver not yet opened
 run_alert_app HeapInfoOpen 1      # OpenDriver(.IPP)
-echo "  ApiProbe (groups 2 3: network operation)"
+echo "  ApiProbe (groups 2 3 4 5: network operation, chained readers, burst)"
 click ${ICON[ApiProbe]} dbl; sleep 4
 [ "$(screen_state)" = finder ] && click ${ICON[ApiProbe]} dbl
 wait_state done 600 || die "ApiProbe did not finish"
@@ -184,9 +191,9 @@ sleep 2
 snow_stop
 with_volume fetch_res || die "HeapInfo.out missing on the image"
 echo "== figures"
-python3 -I - "$res" "$out_dir/MemCheck.out" "$diag" <<'PY'
+python3 -I - "$res" "$out_dir/MemCheck.out" "$diag" "$out_dir/ApiProbe.out" <<'PY'
 import sys, re
-STACK_BUDGET = 4096   # MACTCP-INTERFACE.md "Stack budget": worst measured 2724 x 1.5
+STACK_BUDGET = 4352   # MACTCP-INTERFACE.md "Stack budget": (worst painted 2724 + 130 unpainted top) x 1.5 = 4281, rounded up
 BASE_OCC, BASE_ZONE = 149248, 162100
 CAP1, CAP2, CAP3_APP, CAP3_SYS = 195046, 273672, 29150, 0
 rows = [l.split() for l in open(sys.argv[1]).read().replace("\r", "\n").split("\n") if l.strip()]
@@ -227,11 +234,17 @@ if int(d[1]) != 0 or int(d[2]) != 0: ok = False; P("FAIL resolver open/lookup di
 chk("rule 3  DNR app heap taken, open after lookup (2nd run)", int(d[6]), CAP3_APP)
 chk("rule 3  DNR system heap taken, open after lookup (2nd run)", int(d[5]), CAP3_SYS)
 chk("rule 3  DNR heap not returned at close (leak), app", int(d[8]), 0)
-# rule 4: the last "stack:" line of MoofDiag.out
+# rule 4: the last "stack:" line of MoofDiag.out, and proof that the deepest path ran (case 509 chained to depth 3)
+probe = open(sys.argv[4]).read()
+c509 = [l for l in probe.replace("\r", "\n").split("\n") if l.startswith("509 ") and " A " in l]
+if not c509 or "maxDepth=3" not in c509[0] or "n=5000" not in c509[0]:
+    ok = False; P("FAIL rule 4  case 509 (chained reader, async) did not reach maxDepth=3 with n=5000: %s" % (c509[0][:120] if c509 else "missing"))
 stk = [l for l in open(sys.argv[3]).read().replace("\r", "\n").split("\n") if l.startswith("stack:")]
-m = re.search(r"used (\d+) painted (\d+)", stk[-1]) if stk else None
+m = re.search(r"marks 1 paint 1 .* used (\d+) painted (\d+)", stk[-1]) if stk else None
 if not m:
-    ok = False; P("FAIL rule 4  no 'stack:' line in MoofDiag.out")
+    ok = False; P("FAIL rule 4  MoofDiag has no measurement 'stack:' line (built without marks/paint?): %s" % (stk[-1][:100] if stk else "none"))
+elif int(m.group(2)) == 0:
+    ok = False; P("FAIL rule 4  painted == 0 (paint did not run)")
 else:
     P("%s" % stk[-1].split(" (")[0])
     chk("rule 4  interrupt-time stack depth (max of used, painted)", max(int(m.group(1)), int(m.group(2))), STACK_BUDGET)

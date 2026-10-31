@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Host-side TCP test services for MoofTCP (Python 3 stdlib only).
 
-    scripts/testnet.py [--bind 0.0.0.0] [--base 17000]
+    scripts/testnet.py [--bind 0.0.0.0] [--base 17000] [--only 13,19,37]
 
     base+7   echo     returns every byte it receives
     base+9   discard  reads and drops everything
@@ -157,17 +157,23 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bind", default="0.0.0.0", help="address to listen on (default 0.0.0.0)")
     ap.add_argument("--base", type=int, default=17000, help="base port (default 17000)")
+    ap.add_argument("--only", default="", help="comma list of port offsets to serve (e.g. 13,19,37); default all")
     args = ap.parse_args()
+    only = {int(x) for x in args.only.split(",") if x}
 
     servers = []
     for offset, handler in ((7, Echo), (9, Discard), (23, Banner), (13, Oneshot),
                             (19, Burst), (37, Reset)):
+        if only and offset not in only:
+            continue
         srv = Server((args.bind, args.base + offset), handler)
         servers.append(srv)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         log(f"{handler.name} listening on {args.bind}:{args.base + offset}")
 
     for offset, echo in ((7, True), (9, False)):
+        if only and offset not in only:
+            continue
         servers.append(udp_service(args.bind, args.base + offset, echo))
         log(f"udp {'echo' if echo else 'discard'} listening on {args.bind}:{args.base + offset}")
 
