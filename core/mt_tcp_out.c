@@ -37,16 +37,22 @@ static uint16_t build_hdr(mt_stack *s, uint16_t lport, uint16_t rport, uint32_t 
     return hl;
 }
 
-/* Checksum header + `psum` (payload sum already folded in by the caller) and send. */
-static void finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t psum,
-                   uint32_t now) {
+/* Checksum header + `psum` (payload sum already folded in by the caller) and send. Returns
+ * nonzero if the link refused the frame (counted once here, in tcp_tx_stalls). A frame held for
+ * ARP or dropped for another reason is not a refusal (ARP resolution / the RTO recover it). */
+static int finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t psum,
+                  uint32_t now) {
     uint8_t *h = mt_ip_payload(s);
     uint16_t tl = (uint16_t)(hl + plen);
     uint32_t sum = mt_tcp_pseudo(s->cfg.addr, rip, tl) + psum;
     sum = mt_cksum_add(sum, h, hl);          /* hl is even: chaining is exact */
     mt_wr16(h + 16, mt_cksum_fold(sum));
     s->stats.tcp_out++;
+    s->tx_refused = 0;
     mt_ip_output(s, rip, 6, tl, now);
+    if (!s->tx_refused) return 0;
+    s->stats.tcp_tx_stalls++;
+    return 1;
 }
 
 void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
@@ -114,11 +120,11 @@ uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit) {
     return win;
 }
 
-void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now) {
+int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now) {
     mt_stack *s = t->st;
     uint32_t psum = 0;
     uint16_t hl, up = 0;
-    if (s->cfg.addr == 0) return;
+    if (s->cfg.addr == 0) return 0;
     if (flags & MT_TH_RST) s->stats.tcp_resets_out++;
     if ((t->flags2 & MT_T2_SNDURG) && mt_seq_lt(seq, t->snd_up) && t->snd_up - seq <= 65535u) {
         flags |= MT_TH_URG;                           /* urgent pointer: offset just past the data */
@@ -127,12 +133,13 @@ void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t 
     hl = build_hdr(s, t->lport, t->rport, seq, t->rcv_nxt, flags,
                    (uint16_t)mt_tcp_rcv_window(t, 1), up);
     if (n) psum = copy_segs(t, off, mt_ip_payload(s) + hl, n);
+    if (finish(s, t->rip, hl, (uint16_t)n, psum, now)) return 1;   /* refused: the ACK stays owed */
     if (flags & MT_TH_ACK) {
         t->flags &= (uint8_t)~MT_TF_ACKNOW;
         t->flags2 &= (uint8_t)~MT_T2_ACKHALF;
         t->tmask &= (uint8_t)~(1u << MT_TT_DELACK);
     }
-    finish(s, t->rip, hl, (uint16_t)n, psum, now);
+    return 0;
 }
 
 static void arm_rto(mt_tcp *t, uint32_t now) {
@@ -158,8 +165,23 @@ static void arm_persist(mt_tcp *t, uint32_t now) {
 void mt_tcp_probe(mt_tcp *t, uint32_t now) {
     uint32_t sent = t->snd_nxt - t->snd_una;
     if (sent >= mt_tcp_sq_total(t)) return;
-    mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, sent, 1, now);
+    if (mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, sent, 1, now)) return;   /* refused: next persist tick */
     if (mt_seq_le(t->snd_max, t->snd_nxt)) t->snd_max = t->snd_nxt + 1u;
+}
+
+/* The link refused a data/FIN segment of this pass: nothing of it counts as sent. Flag the TCB and
+ * arm the stack's one stall timer (an earlier pending retry time is kept). With no RTO/PERSIST
+ * armed (nothing outstanding), ulp_dl is started at the first stall of a run so a link that never
+ * takes the frame still reaches the ULP timeout (mt_tcp_timers checks it at each retry). */
+static void stall(mt_tcp *t, int idle, int again, uint32_t now) {
+    mt_stack *s = t->st;
+    if (!again && !(t->tmask & ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST)))) t->ulp_dl = now + t->ulp_ms;
+    t->flags2 |= MT_T2_STALL;
+    if (idle) t->flags |= MT_TF_STALLIDLE;
+    if (!s->stall_on) {
+        s->stall_on = 1;
+        s->stall_at = now + MT_TCP_STALL_MS;
+    }
 }
 
 /* Recovery model (go-back-N): after an RTO or an ARP resolution the caller pulls snd_nxt back
@@ -168,8 +190,12 @@ void mt_tcp_probe(mt_tcp *t, uint32_t now) {
  * with seq < snd_max is a retransmission: it bypasses Nagle and is never timed (Karn). */
 void mt_tcp_output(mt_tcp *t, uint32_t now) {
     uint32_t sent, unsent, inflight, wnd, n, lim, total, pe;
-    int any = 0, idle;
+    int any = 0, idle, refused = 0;
+    int again = (t->flags2 & MT_T2_STALL) != 0;          /* this pass retries a stalled one */
+    int was_idle = (t->flags & MT_TF_STALLIDLE) != 0;
     t->tnow = now;
+    t->flags2 &= (uint8_t)~MT_T2_STALL;                   /* set again below if this pass stalls too */
+    t->flags &= (uint8_t)~MT_TF_STALLIDLE;
     switch (t->state) {
     case MT_TCP_SYN_SENT:
     case MT_TCP_SYN_RCVD:
@@ -192,7 +218,8 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         break;
     }
     inflight = t->snd_nxt - t->snd_una;
-    idle = t->snd_max == t->snd_una;                      /* nothing unacked at all (Nagle) */
+    /* nothing unacked at all (Nagle), or a retry of a pass that started that way */
+    idle = t->snd_max == t->snd_una || was_idle;
     total = mt_tcp_sq_total(t);
     sent = inflight > total ? total : inflight;           /* data bytes; a FIN is not queued data */
     unsent = total - sent;
@@ -214,7 +241,11 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         if (!ok) break;
         if (n == unsent || pushed) fl |= MT_TH_PSH;
         if (n == unsent && (t->flags & MT_TF_FINQ)) fl |= MT_TH_FIN;
-        mt_tcp_xmit(t, t->snd_nxt, fl, sent, n, now);
+        if (mt_tcp_xmit(t, t->snd_nxt, fl, sent, n, now)) {
+            refused = 1;                                  /* link busy: not sent, retry later */
+            stall(t, idle, again, now);
+            break;
+        }
         if (retx) {
             t->st->stats.tcp_rexmt++;
             mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
@@ -239,17 +270,21 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
     if (!unsent && (t->flags & MT_TF_FINQ) && t->snd_nxt - t->snd_una <= total &&
         !((t->flags & MT_TF_FINSENT) && t->snd_una == t->snd_max)) {
         int retx = mt_seq_lt(t->snd_nxt, t->snd_max);     /* FIN not in snd_nxt nor acked: (re)send it */
-        mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK | MT_TH_FIN, 0, 0, now);
-        if (retx) {
-            t->st->stats.tcp_rexmt++;
-            mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
-            t->flags2 &= (uint8_t)~MT_T2_RTTING;
+        if (mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK | MT_TH_FIN, 0, 0, now)) {
+            refused = 1;
+            stall(t, idle, again, now);
+        } else {
+            if (retx) {
+                t->st->stats.tcp_rexmt++;
+                mt_log(t->st, MT_LOG_TCP_REXMT, 0, t->lport);
+                t->flags2 &= (uint8_t)~MT_T2_RTTING;
+            }
+            t->snd_nxt++;
+            t->flags |= MT_TF_FINSENT;
+            if (mt_seq_gt(t->snd_nxt, t->snd_max)) t->snd_max = t->snd_nxt;
+            any = 1;
+            arm_rto(t, now);
         }
-        t->snd_nxt++;
-        t->flags |= MT_TF_FINSENT;
-        if (mt_seq_gt(t->snd_nxt, t->snd_max)) t->snd_max = t->snd_nxt;
-        any = 1;
-        arm_rto(t, now);
     }
     if (t->snd_wnd == 0 && unsent && t->snd_nxt == t->snd_una) {
         arm_persist(t, now);
@@ -259,7 +294,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
     }
     if (t->snd_max != t->snd_una && !(t->tmask & ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST))))
         arm_rto(t, now);                                  /* anything outstanding has a timer */
-    if (!any && (t->flags & MT_TF_ACKNOW)) mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, 0, 0, now);
+    if (!any && !refused && (t->flags & MT_TF_ACKNOW)) mt_tcp_xmit(t, t->snd_nxt, MT_TH_ACK, 0, 0, now);
 }
 
 /* Retransmit the first unacked segment (SYN, SYN-ACK, data from the send queue, or FIN). */

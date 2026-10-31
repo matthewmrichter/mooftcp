@@ -229,12 +229,13 @@ static const char *const stat_names[] = {
     "ip_in", "ip_out", "ip_in_drops", "ip_frag_out", "ip_reasm_ok", "ip_reasm_fail",
     "icmp_in", "icmp_out", "udp_in", "udp_out", "udp_drops", "udp_noport",
     "tcp_in", "tcp_out", "tcp_in_drops", "tcp_rexmt", "tcp_fast_rexmt", "tcp_active_opens",
-    "tcp_passive_opens", "tcp_resets_in", "tcp_resets_out", "tcp_conns_open"
+    "tcp_passive_opens", "tcp_resets_in", "tcp_resets_out", "tcp_conns_open", "tcp_tx_stalls"
 };
 #define N_STATS (sizeof stat_names / sizeof stat_names[0])
 /* C99 compile-time check: the name table covers exactly the (all-uint32) fields of mt_stats. */
 typedef char stat_names_cover_struct[(sizeof(mt_stats) == N_STATS * sizeof(uint32_t)) ? 1 : -1];
-#define STAT_GAUGE (N_STATS - 1)   /* tcp_conns_open: a gauge, so it is checked (back to 0) instead */
+#define STAT_GAUGE 27u            /* tcp_conns_open: a gauge, so it is checked (back to 0) instead */
+typedef char stat_gauge_index[(offsetof(mt_stats, tcp_conns_open) == STAT_GAUGE * sizeof(uint32_t)) ? 1 : -1];
 
 static void stats_add(uint32_t *sum, const mt_stack *s) {
     uint32_t v[N_STATS];
@@ -247,7 +248,9 @@ static int drop_nth_data(void *user, int from, const uint8_t *f, uint16_t len) {
     tcpv v;
     int *cnt = (int *)user;
     if (from != 0 || !view_tcp(f, len, &v) || v.dlen == 0) return 0;
-    return ++*cnt == 12;                               /* lose one segment of a long flight */
+    ++*cnt;
+    if (*cnt == 20) return -1;                         /* the link refuses one (tcp_tx_stalls) */
+    return *cnt == 12;                                 /* lose one segment of a long flight */
 }
 
 static void test_stats_all_counters_live(void) {
@@ -354,6 +357,7 @@ static void test_stats_all_counters_live(void) {
     T_CHECK(sa.tcp_fast_rexmt >= 1);
     T_CHECK(sa.tcp_rexmt >= sa.tcp_fast_rexmt);
     T_EQ(sb.tcp_fast_rexmt, 0);
+    T_EQ(sa.tcp_tx_stalls, 1); T_EQ(sb.tcp_tx_stalls, 0);   /* the one refused data frame */
     T_EQ(ss.tcp_in_drops, 1);            /* the one corrupted segment */
     T_EQ(ss.ip_in_drops, 1);             /* the one corrupted IP header */
     T_EQ(ss.udp_drops, 1); T_EQ(ss.ip_reasm_fail, 1); T_EQ(ss.ip_reasm_ok, 0);

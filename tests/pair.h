@@ -32,7 +32,9 @@ mt_stack *pair_b(pair *p);
 void     pair_run(pair *p, uint32_t ms);
 uint32_t pair_now(const pair *p);
 /* Directed-fault hook, consulted for every transmitted frame before the random faults:
- * returning nonzero drops the frame (from: 0 = sent by A, 1 = sent by B). NULL clears it. */
+ * returning a positive value drops the frame (the link accepted it, the wire lost it), a
+ * negative value makes the link refuse it (link.tx returns nonzero: "tx busy"); from: 0 = sent
+ * by A, 1 = sent by B. NULL clears it. */
 typedef int (*pair_filter_fn)(void *user, int from, const uint8_t *frame, uint16_t len);
 void     pair_set_filter(pair *p, pair_filter_fn fn, void *user);
 /* Number of times mt_tick left a stack with an already-expired deadline (contract
@@ -41,6 +43,7 @@ uint32_t pair_stuck(const pair *p);
 /* Frames put on the wire / dropped by the link model / delivered corrupted. */
 uint32_t pair_sent(const pair *p);
 uint32_t pair_dropped(const pair *p);
+uint32_t pair_refused(const pair *p);   /* frames link.tx refused (filter < 0) */
 uint32_t pair_corrupted(const pair *p);
 
 #endif

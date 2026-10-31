@@ -529,8 +529,29 @@ static void rto_fire(mt_tcp *t, uint32_t now) {
     if (t->tmask & (1u << MT_TT_RTO)) tmr_set(t, MT_TT_RTO, now + t->rto);
 }
 
+/* Stall retry (one stack-wide timer, armed by mt_tcp_output when the link refused a data/FIN
+ * segment): every stalled TCB runs its output pass again, which re-arms the timer if the link
+ * still refuses. A stalled TCB with nothing outstanding has no RTO, so its ULP deadline (started
+ * at the first stall) is checked here. */
+static void stall_retry(mt_stack *s, uint32_t now) {
+    uint16_t i;
+    s->stall_on = 0;
+    for (i = 0; i < s->lim.max_tcp; i++) {
+        mt_tcp *t = &s->tcp[i];
+        if (!t->used || !(t->flags2 & MT_T2_STALL)) continue;
+        t->tnow = now;
+        if (!(t->tmask & TM_RTO_PERSIST) && t->ulp_ms && !mt_time_before(now, t->ulp_dl)) {
+            uint8_t g0 = t->gen;
+            ulp_expired(t, now);                             /* may fire, abort or release */
+            if (t->gen != g0 || !t->used) continue;
+        }
+        mt_tcp_output(t, now);                               /* retry (also after a report-only ULP event) */
+    }
+}
+
 void mt_tcp_timers(mt_stack *s, uint32_t now) {
     uint16_t i;
+    if (s->stall_on && !mt_time_before(now, s->stall_at)) stall_retry(s, now);
     for (i = 0; i < s->lim.max_tcp; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !t->tmask) continue;
@@ -571,7 +592,7 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
 }
 
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now) {
-    uint32_t best = MT_NO_DEADLINE;
+    uint32_t best = s->stall_on ? rel(s->stall_at, now) : MT_NO_DEADLINE;
     uint16_t i;
     for (i = 0; i < s->lim.max_tcp; i++) {
         const mt_tcp *t = &s->tcp[i];

@@ -5,8 +5,9 @@
 #include "mt.h"
 
 /* Fake wire: tx() copies every transmitted frame into f[]/len[] (drops, and
- * returns nonzero, once 64 are queued). */
-typedef struct { uint8_t f[64][1514]; uint16_t len[64]; int n; } fake_link;
+ * returns nonzero, once 64 are queued). While `refuse` > 0 each frame is refused (tx returns
+ * nonzero, nothing recorded) and `refuse` counts down; -1 refuses forever. fake_init sets it 0. */
+typedef struct { uint8_t f[64][1514]; uint16_t len[64]; int n; int refuse; } fake_link;
 void fake_init(fake_link *fl, mt_link *link);
 /* Called at the start of every frame the stack transmits (NULL = none): a test's "interrupt". */
 extern void (*fake_tx_hook)(void);

@@ -2,10 +2,12 @@
 #include "net.h"
 #include "mt_int.h"
 #include "mt_util.h"
+#include "pair.h"
 
 /* TCP data transfer, part 2: receiver SWS, delayed-ACK cancellation, PSH on full segments,
  * send state errors, events after TERMINATE, data+FIN, and the send queue (mt_tcp_send_segs:
- * caller memory, done on ACK, FIFO of MT_SENDQ_MAX requests). Every test uses its own connection
+ * caller memory, done on ACK, FIFO of MT_SENDQ_MAX requests) and link refusal (Plan 3 Task 2: a
+ * refused segment is retried, never counted as sent). Every test uses its own connection
  * (established at now=0, peer MSS 1460, peer window 8192; the whole buffer is the receive ring). */
 
 static const uint8_t MSS1460[4] = {2, 4, 0x05, 0xB4};
@@ -794,7 +796,232 @@ static void test_no_drain_ack_inside_input(void) {
     }
 }
 
-T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
+/* ---- Link refusal (Plan 3 Task 2): a refused data/FIN segment is not sent, snd_nxt stays, and
+ * the TCB retries after MT_TCP_STALL_MS or on the next ACK. ---- */
+
+typedef struct { int n, live; uint32_t hi; } rf_state;
+/* Refuse every 5th TCP frame A sends; track the highest sequence end the link accepted. */
+static int refuse_every_5th(void *user, int from, const uint8_t *f, uint16_t len) {
+    rf_state *r = (rf_state *)user;
+    tcpv v;
+    uint32_t end;
+    if (from != 0 || !view_tcp(f, len, &v)) return 0;
+    if (++r->n % 5 == 0) return -1;
+    end = v.seq + v.dlen + ((v.flags & (TF_SYN | TF_FIN)) ? 1u : 0u);
+    if (!r->live || mt_seq_gt(end, r->hi)) { r->hi = end; r->live = 1; }
+    return 0;
+}
+typedef struct { pair *p; uint32_t got; int bad; } rf_sink;
+static void rf_sink_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
+    rf_sink *k = (rf_sink *)user;
+    uint8_t tmp[4096], want[4096];
+    uint32_t n;
+    (void)arg;
+    if (ev != MT_TCP_EV_DATA && ev != MT_TCP_EV_CLOSING) return;
+    while ((n = mt_tcp_recv(t, tmp, sizeof tmp, pair_now(k->p))) > 0) {
+        pattern(want, k->got, n);
+        if (memcmp(tmp, want, n) != 0) k->bad = 1;
+        k->got += n;
+    }
+}
+
+static void test_tx_refusal_does_not_lose_data(void) {
+    static uint8_t d[40000], abuf[8192], bbuf[16384];
+    static rf_state rf;
+    rf_sink k;
+    pair *p = pair_new(&(pair_faults){0, 0, 0, 0, 5, 1}, 0);
+    mt_stack *a, *b;
+    mt_tcp *ta, *tb;
+    int step, over = 0;
+    T_CHECK(p != NULL);
+    if (!p) return;
+    a = pair_a(p);
+    b = pair_b(p);
+    memset(&rf, 0, sizeof rf);
+    memset(&k, 0, sizeof k);
+    k.p = p;
+    pattern(d, 0, sizeof d);
+    pair_set_filter(p, refuse_every_5th, &rf);
+    tb = mt_tcp_create(b, bbuf, sizeof bbuf, rf_sink_cb, &k);   /* 16 KB peer window */
+    ta = mt_tcp_create(a, abuf, sizeof abuf, NULL, NULL);
+    T_EQ(mt_tcp_listen(tb, 0, 0, 7000), MT_OK);
+    T_EQ(mt_tcp_open(ta, PAIR_B_IP, 7000, 0, pair_now(p)), MT_OK);
+    pair_run(p, 100);
+    T_EQ(ta->state, MT_TCP_ESTABLISHED);
+    T_EQ(tsend(ta, d, sizeof d, 1, 0, pair_now(p)), (int32_t)sizeof d);
+    for (step = 0; step < 20000 && k.got < sizeof d; step++) {
+        pair_run(p, 1);
+        /* nothing the link refused is ever counted as sent */
+        if (mt_seq_gt(ta->snd_nxt, rf.hi) || mt_seq_gt(ta->snd_max, rf.hi)) over++;
+    }
+    T_EQ(k.got, (uint32_t)sizeof d);
+    T_EQ(k.bad, 0);
+    T_EQ(over, 0);
+    T_EQ(mt_get_stats(a)->tcp_rexmt, 0);
+    T_CHECK(mt_get_stats(a)->tcp_tx_stalls > 0);
+    T_EQ(mt_get_stats(a)->tcp_tx_stalls, pair_refused(p));     /* every refusal was A's TCP */
+    T_EQ(mt_get_stats(a)->eth_tx_err, pair_refused(p));
+    T_EQ(mt_get_stats(b)->tcp_tx_stalls, 0);
+    mt_tcp_release(ta);
+    mt_tcp_release(tb);
+    pair_free(p);
+}
+
+/* An accepting link sends at once (only the RTO is armed); a refused segment is not sent, arms no
+ * RTO, and leaves exactly when the 10 ms stall deadline is serviced. */
+static void test_tx_refused_segment_retried_at_stall_deadline(void) {
+    rec r; tcpv v; static uint8_t d[100];
+    memset(&r, 0, sizeof r);
+    pattern(d, 0, sizeof d);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        T_EQ(tsend(c.t, (const uint8_t *)"x", 1, 1, 0, 10), 1);
+        T_EQ(fl.n, 1);                                  /* latency: on the wire inside the call */
+        T_CHECK(mt_next_deadline(c.s, 10) > MT_TCP_STALL_MS);
+        T_CHECK(!c.s->stall_on);
+        inject(&c, c.ps, c.ms + 1, TF_ACK, NULL, 0, 20);
+        fake_clear(&fl);
+        fl.refuse = 1;
+        T_EQ(tsend(c.t, d, sizeof d, 1, 0, 30), (int32_t)sizeof d);
+        T_EQ(fl.n, 0);
+        T_EQ(mt_get_stats(c.s)->tcp_tx_stalls, 1);
+        T_EQ(c.t->snd_nxt, c.ms + 1);
+        T_EQ(c.t->snd_max, c.ms + 1);
+        T_CHECK(!(c.t->tmask & (1u << MT_TT_RTO)));     /* no RTO for bytes never sent */
+        T_EQ(mt_next_deadline(c.s, 30), MT_TCP_STALL_MS);
+        mt_tick(c.s, 39);                               /* not due yet: nothing */
+        T_EQ(fl.n, 0);
+        T_EQ(mt_next_deadline(c.s, 39), 1);
+        mt_tick(c.s, 40);
+        T_EQ(fl.n, 1);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.seq, c.ms + 1); T_EQ(v.dlen, 100);
+        T_MEMEQ(v.data, d, 100);
+        T_EQ(c.t->snd_nxt, c.ms + 101);
+        T_CHECK(c.t->tmask & (1u << MT_TT_RTO));
+        T_CHECK(!c.s->stall_on);
+        T_CHECK(mt_next_deadline(c.s, 40) > MT_TCP_STALL_MS);
+        T_EQ(mt_get_stats(c.s)->tcp_rexmt, 0);
+    }
+}
+
+/* An ACK arriving before the stall deadline retries the pass at once. */
+static void test_tx_refused_segment_retried_on_ack(void) {
+    rec r; tcpv v; static uint8_t d[3000];
+    memset(&r, 0, sizeof r);
+    pattern(d, 0, sizeof d);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        T_EQ(tsend(c.t, d, 1460, 1, 0, 10), 1460);
+        T_EQ(fl.n, 1);
+        fl.refuse = 1;
+        T_EQ(tsend(c.t, d + 1460, 1540, 1, 0, 11), 1540);
+        T_EQ(fl.n, 1);                                  /* first segment of the request refused */
+        T_EQ(c.t->snd_nxt, c.ms + 1460);
+        inject(&c, c.ps, c.ms + 1460, TF_ACK, NULL, 0, 13);
+        T_EQ(fl.n, 3);
+        T_CHECK(view_tcp(fl.f[1], fl.len[1], &v)); T_EQ(v.seq, c.ms + 1460); T_EQ(v.dlen, 1460);
+        T_CHECK(view_tcp(fl.f[2], fl.len[2], &v)); T_EQ(v.seq, c.ms + 2920); T_EQ(v.dlen, 80);
+        mt_tick(c.s, 21);                               /* the stall timer finds nothing to do */
+        T_EQ(fl.n, 3);
+        T_EQ(mt_get_stats(c.s)->tcp_rexmt, 0);
+        T_EQ(mt_get_stats(c.s)->tcp_tx_stalls, 1);
+    }
+}
+
+/* A refused FIN is not marked sent; the stall retry sends it. */
+static void test_tx_refused_fin_retried(void) {
+    rec r; tcpv v;
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        fl.refuse = 1;
+        T_EQ(mt_tcp_close(c.t, 10), MT_OK);
+        T_EQ(fl.n, 0);
+        T_CHECK(!(c.t->flags & MT_TF_FINSENT));
+        T_EQ(c.t->snd_nxt, c.ms); T_EQ(c.t->snd_max, c.ms);
+        T_EQ(mt_next_deadline(c.s, 10), MT_TCP_STALL_MS);
+        mt_tick(c.s, 20);
+        T_EQ(fl.n, 1);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.seq, c.ms); T_CHECK(v.flags & TF_FIN);
+        T_CHECK(c.t->flags & MT_TF_FINSENT);
+        T_EQ(c.t->snd_max, c.ms + 1);
+        T_EQ(mt_get_stats(c.s)->tcp_rexmt, 0);
+    }
+}
+
+/* A refused pure ACK is only counted (no stall timer); the ACK stays owed and the next segment
+ * carries it. */
+static void test_tx_refused_pure_ack_counted_and_owed(void) {
+    rec r; tcpv v;
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        fl.refuse = 1;
+        inject_data(&c, 0, 10, TF_PSH, 10);             /* quick ACK, refused */
+        T_EQ(fl.n, 0);
+        T_EQ(mt_get_stats(c.s)->tcp_tx_stalls, 1);
+        T_CHECK(!c.s->stall_on);
+        T_CHECK(!(c.t->flags2 & MT_T2_STALL));
+        T_CHECK(c.t->flags & MT_TF_ACKNOW);
+        T_EQ(tsend(c.t, (const uint8_t *)"y", 1, 1, 0, 20), 1);
+        T_EQ(fl.n, 1);
+        T_CHECK(last_tcp(&fl, &v)); T_EQ(v.ack, c.ps + 10); T_EQ(v.dlen, 1);
+        T_CHECK(!(c.t->flags & MT_TF_ACKNOW));
+    }
+}
+
+/* A link that never accepts: the stall retries every 10 ms, and the ULP timeout (no RTO is armed,
+ * nothing is outstanding) still ends the connection. */
+static void test_tx_stall_forever_reaches_ulp_timeout(void) {
+    rec r; uint32_t now = 100, d;
+    int guard;
+    memset(&r, 0, sizeof r);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        mt_tcp_set_ulp_timeout(c.t, 2, 1);
+        fl.refuse = -1;
+        T_EQ(tsend(c.t, (const uint8_t *)"0123456789", 10, 1, 0, now), 10);
+        for (guard = 0; guard < 1000 && c.t->state != MT_TCP_CLOSED; guard++) {
+            d = mt_next_deadline(c.s, now);
+            if (d == MT_NO_DEADLINE) break;
+            T_CHECK(d <= MT_TCP_STALL_MS);
+            now += d;
+            mt_tick(c.s, now);
+        }
+        T_EQ(c.t->state, MT_TCP_CLOSED);
+        T_CHECK(now >= 2100 && now <= 2100 + MT_TCP_STALL_MS);
+        T_EQ(count_ev(&r, MT_TCP_EV_ULP_TIMEOUT), 1);
+        T_EQ(r.e[r.n - 1].ev, MT_TCP_EV_TERMINATE); T_EQ(r.e[r.n - 1].arg, MT_TERM_ULP_TIMEOUT);
+        T_CHECK(mt_get_stats(c.s)->tcp_tx_stalls >= 200);
+        T_EQ(mt_get_stats(c.s)->tcp_rexmt, 0);
+        T_EQ(fl.n, 0);
+        fl.refuse = 0;
+    }
+}
+
+/* Nagle: a bulk write from idle goes out whole even when the link cuts the pass short. */
+static fake_link *g_rf_fl;
+static int g_rf_n;
+static void refuse_second(void) { if (++g_rf_n == 2) g_rf_fl->refuse = 1; }
+static void test_tx_stall_retry_keeps_idle_bulk_whole(void) {
+    rec r; tcpv v; static uint8_t d[3000];
+    memset(&r, 0, sizeof r);
+    pattern(d, 0, sizeof d);
+    {
+        SETUP(8192, 5000, rec_cb, &r);
+        g_rf_fl = &fl;
+        g_rf_n = 0;
+        fake_tx_hook = refuse_second;
+        T_EQ(tsend(c.t, d, sizeof d, 0, 0, 10), (int32_t)sizeof d);   /* no push */
+        fake_tx_hook = NULL;
+        T_EQ(fl.n, 1);
+        mt_tick(c.s, 20);
+        T_EQ(fl.n, 3);                                  /* 1460 + the 80-byte tail, nothing held */
+        T_CHECK(view_tcp(fl.f[2], fl.len[2], &v)); T_EQ(v.seq, c.ms + 2920); T_EQ(v.dlen, 80);
+    }
+}
+
+T_MAIN(test_sws_no_small_window_updates,test_delayed_ack_carried_by_send,
        test_psh_full_segment_acked_now, test_send_state_and_no_events_after_terminate,
        test_data_with_fin_single_segment, test_nagle_holds_tail_in_flight,
        test_gap_acks_every_fill_segment, test_gap_high_mark_wraps, test_send_segs_no_copy,
@@ -804,4 +1031,8 @@ T_MAIN(test_sws_no_small_window_updates, test_delayed_ack_carried_by_send,
        test_send_zero_len_seg_skipped, test_recv_window_equals_buflen, test_push_per_request,
        test_term_done_relisten_both_dones_fire, test_term_done_relisten_no_terminate_on_new_conn,
        test_ack_done_abort_nested_relisten, test_quickack_first_four_then_delayed,
-       test_drained_queue_sends_delayed_ack, test_no_drain_ack_inside_input)
+       test_drained_queue_sends_delayed_ack, test_no_drain_ack_inside_input,
+       test_tx_refusal_does_not_lose_data, test_tx_refused_segment_retried_at_stall_deadline,
+       test_tx_refused_segment_retried_on_ack, test_tx_refused_fin_retried,
+       test_tx_refused_pure_ack_counted_and_owed, test_tx_stall_forever_reaches_ulp_timeout,
+       test_tx_stall_retry_keeps_idle_bulk_whole)

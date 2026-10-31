@@ -47,7 +47,13 @@ enum { MT_OK = 0, MT_ERR_NOROUTE = -1, MT_ERR_NOMEM = -2, MT_ERR_INVAL = -3,
        MT_ERR_STATE = -4, MT_ERR_INUSE = -5, MT_ERR_UNCONFIGURED = -6, MT_ERR_BUSY = -7,
        MT_ERR_ABORTED = -8 };
 
-/* tx must finish with `frame` before returning (see the embedder contract); nonzero = dropped */
+/* tx must finish with `frame` before returning (see the embedder contract); nonzero = dropped
+ * (refused). A refusal is treated as "the link is busy right now": a refused TCP data or FIN
+ * segment from the output loop (new data or go-back-N resend) is not counted as sent (snd_nxt
+ * stays put, no RTO armed for it) and the connection retries after 10 ms (MT_TCP_STALL_MS, via
+ * mt_next_deadline) or on the next ACK. A refused pure ACK, SYN / SYN-ACK, RST, single-segment
+ * retransmission (fast retransmit, partial ACK) or window probe is only counted (tcp_tx_stalls);
+ * the normal timers or the peer repair it. An accepted frame never waits for anything. */
 typedef struct { void *ctx; int (*tx)(void *ctx, const uint8_t *frame, uint16_t len); } mt_link;
 
 typedef struct {
@@ -62,7 +68,7 @@ typedef struct {
 typedef struct { uint8_t max_tcp, max_udp, arp_entries, dns_cache; } mt_limits;
 
 /* Counters (all uint32_t, in this order; tests index the struct as an array). tcp_conns_open is
- * a gauge, the rest only count up (wrapping at 2^32). */
+ * a gauge, the rest only count up (wrapping at 2^32). New counters are appended. */
 typedef struct {
     uint32_t eth_in;      /* frames >= 14 bytes addressed to us or broadcast */
     uint32_t eth_out;     /* frames handed to link.tx successfully */
@@ -95,6 +101,8 @@ typedef struct {
     uint32_t tcp_resets_in;    /* RSTs that tore a connection down */
     uint32_t tcp_resets_out;   /* RSTs transmitted */
     uint32_t tcp_conns_open;   /* connections established and not yet terminated (gauge) */
+    uint32_t tcp_tx_stalls;    /* TCP segments the link refused (link.tx nonzero): each one ends its
+                                * output pass; refused data / FIN is retried, never marked sent */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */

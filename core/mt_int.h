@@ -125,11 +125,13 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TF_PASSIVE  0x08u   /* SYN_RCVD reached from LISTEN: RST/timeout re-listens */
 #define MT_TF_EST      0x10u   /* counted in stats.tcp_conns_open */
 #define MT_TF_ULPABORT 0x20u   /* ULP timeout aborts (else only fires the event) */
+#define MT_TF_STALLIDLE 0x40u  /* the output pass cut short by a refusal started idle (Nagle) */
 /* flags2 */
 #define MT_T2_ACKHALF  0x01u   /* one full-size segment received and not yet ACKed (ack every 2nd) */
 #define MT_T2_INPUT    0x02u   /* inside in_sync for this TCB (mt_input): its own post-callback output
                                 * decides the ACK; rcv_freed must not send the delayed one */
-/* 0x04: free */
+#define MT_T2_STALL    0x04u   /* the last output pass ended on a refused data/FIN segment: the
+                                * stack's stall timer (s->stall_at) retries it */
 #define MT_T2_SNDURG   0x08u   /* snd_up is live: segments before it carry URG */
 #define MT_T2_RCVURG   0x10u   /* rcv_up is live: unread urgent data may remain */
 #define MT_T2_RTTING   0x20u   /* rtt_seq/rtt_t0 hold a timed (never retransmitted) segment */
@@ -142,6 +144,7 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TH_ACK 0x10u
 #define MT_TH_URG 0x20u
 #define MT_TCP_DELACK_MS 100u
+#define MT_TCP_STALL_MS  10u   /* retry delay after the link refused a data/FIN segment */
 #define MT_TCP_QUICKACK  4u    /* the first data segments of a connection are ACKed at once */
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
@@ -247,6 +250,10 @@ struct mt_stack {
      * code. Assumption: exactly one writer context (log_wr) and one reader context (log_rd). */
     volatile uint16_t log_wr, log_rd;
     uint8_t log_on;
+    uint8_t tx_refused;      /* set by mt_eth_send when the link refused the frame; senders that care
+                              * (TCP) clear it before building a frame and read it afterwards */
+    uint8_t stall_on;        /* stall_at is armed: some TCB has MT_T2_STALL */
+    uint32_t stall_at;       /* absolute ms of the next stall retry (one timer for all TCBs) */
     uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */
     uint16_t lis_eph;        /* next candidate for a port-0 listen (1024..2047) */
@@ -308,7 +315,11 @@ uint32_t mt_arp_deadline(const mt_stack *s, uint32_t now);
  * a frame over MT_PEND_MAX is not held (arp_drops++, ARP request still sent) and also
  * returns 0 so the caller's retransmission logic recovers it,
  * -1 = dropped (unconfigured, oversize, or link error). nexthop
- * 255.255.255.255 goes to the Ethernet broadcast address. */
+ * 255.255.255.255 goes to the Ethernet broadcast address.
+ * Refusal: when link.tx refuses this frame, s->tx_refused is also set (only for the frame
+ * itself, never for an ARP request sent on its behalf). Any other path that cannot take the
+ * frame right now (e.g. a full loopback slot) must set it the same way, so TCP stalls and
+ * retries instead of counting the frame as sent. */
 int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payload_len,
                 uint32_t now);
 
@@ -382,8 +393,9 @@ void mt_tcp_output(mt_tcp *t, uint32_t now);
 uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit);
 /* Build and send one segment of t: seq, flags (ACK is added/ack filled from rcv_nxt when the
  * MT_TH_ACK bit is set), n payload bytes copied (and checksummed in the same pass) from the send
- * queue, starting off bytes past snd_una. */
-void mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);
+ * queue, starting off bytes past snd_una. Returns nonzero if the link refused the frame (counted
+ * in tcp_tx_stalls; an owed ACK then stays owed). */
+int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now);
 /* Retransmit the first unacked segment (SYN, SYN-ACK, data from the send queue, or FIN). */
 void mt_tcp_rexmit(mt_tcp *t, uint32_t now);
 /* Zero-window probe: one byte of the first unsent data (does not advance snd_nxt). */

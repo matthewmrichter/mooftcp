@@ -161,11 +161,12 @@ int main(void)
               (unsigned long)st->arp_in, (unsigned long)st->arp_out, (unsigned long)st->ip_in,
               (unsigned long)st->ip_out, (unsigned long)st->tcp_in, (unsigned long)st->tcp_out,
               (unsigned long)st->tcp_rexmt, (unsigned long)st->udp_in, (unsigned long)st->udp_out);
-            P("core drops: arp %lu ip_in %lu reasm_fail %lu udp %lu noport %lu tcp_in %lu fast_rexmt %lu rst_in %lu rst_out %lu; conns_open %lu active_opens %lu passive_opens %lu\r",
+            P("core drops: arp %lu ip_in %lu reasm_fail %lu udp %lu noport %lu tcp_in %lu fast_rexmt %lu rst_in %lu rst_out %lu; conns_open %lu active_opens %lu passive_opens %lu tx_stalls %lu\r",
               (unsigned long)st->arp_drops, (unsigned long)st->ip_in_drops, (unsigned long)st->ip_reasm_fail,
               (unsigned long)st->udp_drops, (unsigned long)st->udp_noport, (unsigned long)st->tcp_in_drops,
               (unsigned long)st->tcp_fast_rexmt, (unsigned long)st->tcp_resets_in, (unsigned long)st->tcp_resets_out,
-              (unsigned long)st->tcp_conns_open, (unsigned long)st->tcp_active_opens, (unsigned long)st->tcp_passive_opens);
+              (unsigned long)st->tcp_conns_open, (unsigned long)st->tcp_active_opens, (unsigned long)st->tcp_passive_opens,
+              (unsigned long)st->tcp_tx_stalls);
             P("sizes: MtRes %lu MtGate %lu MtEnet %lu MtTimer %lu\r", (unsigned long)sizeof(MtRes),
               (unsigned long)sizeof(MtGate), (unsigned long)sizeof(MtEnet), (unsigned long)sizeof(MtTimer));
             pass = ref == -49;

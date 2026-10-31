@@ -27,7 +27,11 @@
  *    and the bytes left per request add up, no completed request is left un-notified between calls,
  *    RTO and PERSIST never both armed, unacked data always has a timer;
  *  - a tick that mt_next_deadline said was not due transmits nothing, and a tick that was due
- *    leaves no expired deadline behind. */
+ *    leaves no expired deadline behind;
+ *  - link refusals (2% at random plus bursts of 1..8 refused frames): tcp_tx_stalls equals the
+ *    TCP frames the link refused, a stalled TCB always has the stall timer armed, and a refused
+ *    new data/FIN segment never counts as sent (snd_max does not pass its sequence number until
+ *    the link accepts a frame covering it). */
 
 #define NT 16                 /* TCBs the fuzzer creates (= default max_tcp) */
 #define NU 4
@@ -57,6 +61,10 @@ typedef struct {
     int lastn;
     long ev[9];               /* TCP events seen, by mt_tcp_event */
     long done_ok, done_abort, busy, two_queued, inval, reopen_in_done;
+    long tcp_refused, stalls_seen, rf_checked;   /* TCP frames the link refused; stalled TCBs seen */
+    int refuse_burst;                            /* frames still to refuse in the current burst */
+    uint8_t rf_live[NT];                         /* per stack TCB: a refused new segment pending */
+    uint32_t rf_seq[NT], rf_iss[NT];
 } fz;
 
 /* Send request records: three per fuzzer TCB slot (at most MT_SENDQ_MAX are queued, so one is
@@ -146,7 +154,21 @@ static void verify_out(const uint8_t *f, uint16_t len) {
     if ((ff & 0x3FFFu) == 0) verify_l4(ip, tot, src, dst);   /* first fragment or unfragmented */
 }
 
+/* The stack TCB that sent TCP frame f (NULL if none matches). */
+static int tcb_of_frame(const uint8_t *f, uint16_t len) {
+    uint16_t i;
+    if (len < 54 || mt_rd16(f + 12) != 0x0800 || f[23] != 6) return -1;
+    for (i = 0; i < g.s->lim.max_tcp && i < NT; i++) {
+        const mt_tcp *t = &g.s->tcp[i];
+        if (t->used && t->lport == mt_rd16(f + 34) && t->rport == mt_rd16(f + 36) &&
+            t->rip == mt_rd32(f + 30))
+            return (int)i;
+    }
+    return -1;
+}
+
 static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
+    int refuse, k;
     (void)ctx;
     g.ntx++;
     if (g.checking_early) bad("transmit from a tick that was not due");
@@ -154,7 +176,35 @@ static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
     memcpy(g.lastout[g.lastn & 7], f, len);
     g.lastlen[g.lastn & 7] = len;
     g.lastn++;
-    return rn(50) == 0;                                     /* 2% link errors */
+    if (g.refuse_burst) {                                   /* tx slots all busy for a while */
+        g.refuse_burst--;
+        refuse = 1;
+    } else {
+        refuse = rn(50) == 0;                               /* 2% link errors */
+        if (!refuse && rn(300) == 0) g.refuse_burst = (int)rn(8);
+    }
+    if (len >= 54 && mt_rd16(f + 12) == 0x0800 && f[23] == 6) {
+        const uint8_t *th = f + 14 + ((f[14] & 15u) << 2);
+        uint32_t seq = mt_rd32(th + 4);
+        uint32_t space = (uint32_t)(mt_rd16(f + 16) - ((f[14] & 15u) << 2) - ((th[12] >> 4) << 2)) +
+                         ((th[13] & 3u) ? 1u : 0u);        /* payload + SYN/FIN */
+        int held = f == g.s->pend->frame;                   /* released from the ARP slot */
+        if (refuse && !held) g.tcp_refused++;               /* refusals TCP itself sees */
+        k = tcb_of_frame(f, len);
+        if (k >= 0 && space && !(held && refuse)) {
+            const mt_tcp *t = &g.s->tcp[k];
+            if (refuse && !(th[13] & 2u) && seq == t->snd_max && t->state >= MT_TCP_ESTABLISHED &&
+                !g.rf_live[k]) {                            /* new data / FIN refused */
+                g.rf_live[k] = 1;
+                g.rf_seq[k] = seq;
+                g.rf_iss[k] = t->iss;
+            } else if (!refuse && g.rf_live[k] && mt_seq_le(seq, g.rf_seq[k]) &&
+                       mt_seq_lt(g.rf_seq[k], seq + space)) {
+                g.rf_live[k] = 0;                           /* accepted at last */
+            }
+        }
+    }
+    return refuse;
 }
 
 /* ---- callbacks and the actions they take ---- */
@@ -467,6 +517,15 @@ static void check_sendq(const mt_tcp *t) {
     if (t->sq_n == 0 && (t->sq_idx || t->sq_off)) bad("send cursor not reset");
 }
 
+/* 1 if frames to rip could have been held or dropped for ARP (no resolved entry for its next hop). */
+static int arp_unresolved(mt_ip4 rip) {
+    mt_ip4 nh = ((rip ^ g.s->cfg.addr) & g.s->cfg.mask) == 0 ? rip : g.s->cfg.gateway;
+    uint16_t i;
+    for (i = 0; i < g.s->lim.arp_entries; i++)
+        if (g.s->arp[i].ip == nh && g.s->arp[i].state == MT_ARP_RESOLVED) return 0;
+    return 1;
+}
+
 static void check_invariants(void) {
     const uint8_t rp = (1u << MT_TT_RTO) | (1u << MT_TT_PERSIST);
     uint16_t i;
@@ -496,7 +555,22 @@ static void check_invariants(void) {
             t->state != MT_TCP_FIN_WAIT_2 && t->snd_max != t->snd_una && !(t->tmask & rp))
             bad("unacked data without a timer");
         if ((t->flags2 & MT_T2_GAP) && t->state < MT_TCP_ESTABLISHED) bad("gap flag outside a connection");
+        if (t->flags2 & MT_T2_STALL) {
+            g.stalls_seen++;
+            if (!g.s->stall_on) bad("stalled TCB without the stall timer");
+            else if (mt_next_deadline(g.s, g.now) > MT_TCP_STALL_MS) bad("stall retry later than 10 ms");
+        }
+        if (i < NT && g.rf_live[i]) {
+            if (t->iss != g.rf_iss[i] || t->state < MT_TCP_ESTABLISHED || t->state == MT_TCP_TIME_WAIT) {
+                g.rf_live[i] = 0;                           /* another connection now */
+            } else if (mt_seq_gt(t->snd_max, g.rf_seq[i]) && !arp_unresolved(t->rip)) {
+                bad("a refused segment was counted as sent");
+            } else {
+                g.rf_checked++;
+            }
+        }
     }
+    if (g.s->stats.tcp_tx_stalls != (uint32_t)g.tcp_refused) bad("tcp_tx_stalls differs from refused TCP frames");
 }
 
 /* Calling mt_tick whenever the deadline reads 0 must clear it. */
@@ -834,9 +908,13 @@ static void fuzz_seed(uint32_t seed) {
 static void test_fuzz_seeds(void) {
     uint32_t seed;
     long est = 0, data = 0, term = 0, tx = 0, dok = 0, dab = 0, busy = 0, two = 0, inval = 0;
-    long reopen = 0;
-    for (seed = 1; seed <= NSEEDS; seed++) {
+    long reopen = 0, refused = 0, stalled = 0, rfc = 0;
+    /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n (default NSEEDS) */
+    uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
+    uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : NSEEDS;
+    for (seed = first; seed <= last; seed++) {
         fuzz_seed(seed);
+        refused += g.tcp_refused; stalled += g.stalls_seen; rfc += g.rf_checked;
         est += g.ev[MT_TCP_EV_ESTABLISHED]; data += g.ev[MT_TCP_EV_DATA];
         term += g.ev[MT_TCP_EV_TERMINATE]; tx += g.ntx;
         dok += g.done_ok; dab += g.done_abort; busy += g.busy; two += g.two_queued;
@@ -845,7 +923,8 @@ static void test_fuzz_seeds(void) {
     }
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "est %ld data %ld term %ld tx %ld done ok %ld abort %ld busy %ld two %ld inval %ld"
-                " reopen %ld\n", est, data, term, tx, dok, dab, busy, two, inval, reopen);
+                " reopen %ld; tcp refused %ld stalled-TCB checks %ld refused-segment checks %ld\n",
+                est, data, term, tx, dok, dab, busy, two, inval, reopen, refused, stalled, rfc);
     /* The fuzzer must actually exercise the stack: connections come up, carry data and die;
      * sends complete and abort, the queue fills to two and refuses a third. */
     T_CHECK(est > 0);
@@ -858,6 +937,9 @@ static void test_fuzz_seeds(void) {
     T_CHECK(busy > 0);
     T_CHECK(inval > 0);
     T_CHECK(reopen > 0);
+    T_CHECK(refused > 0);       /* the link refused TCP frames, TCBs stalled and were checked */
+    T_CHECK(stalled > 0);
+    T_CHECK(rfc > 0);
 }
 
 /* A long run whose clock starts just below the 32-bit wrap (the seed picks near-wrap starts for

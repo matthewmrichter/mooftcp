@@ -14,7 +14,7 @@ typedef struct { struct pair *p; int who; } txctx;
 
 struct pair {
     pair_faults f;
-    uint32_t rng, now, seq, stuck, nsent, ndrop, ncorrupt;
+    uint32_t rng, now, seq, stuck, nsent, ndrop, ncorrupt, nrefused;
     mt_stack *s[2];
     void *arena[2], *raw[2];
     txctx ctx[2];
@@ -48,8 +48,10 @@ static int pair_tx(void *vctx, const uint8_t *frame, uint16_t len) {
     int to = !c->who;
     uint8_t tmp[1514];
     uint32_t extra = 0;
-    int corrupt = 0;
+    int corrupt = 0, fr;
     if (len > 1514) return 1;
+    fr = p->filter ? p->filter(p->filter_user, c->who, frame, len) : 0;
+    if (fr < 0) { p->nrefused++; return 1; }              /* refused: never on the wire */
     p->nsent++;
     if (getenv("PAIR_TRACE")) {          /* debug aid: one line per transmitted frame */
         tcpv v;
@@ -60,7 +62,7 @@ static int pair_tx(void *vctx, const uint8_t *frame, uint16_t len) {
             fprintf(stderr, "%8u %c->%c non-tcp len %u\n", p->now, c->who ? 'B' : 'A',
                     c->who ? 'A' : 'B', len);
     }
-    if (p->filter && p->filter(p->filter_user, c->who, frame, len)) { p->ndrop++; return 0; }
+    if (fr > 0) { p->ndrop++; return 0; }
     if (chance(p, p->f.drop_ppm)) { p->ndrop++; return 0; }
     memcpy(tmp, frame, len);
     if (chance(p, p->f.corrupt_ppm)) {
@@ -132,6 +134,7 @@ uint32_t pair_stuck(const pair *p) { return p->stuck; }
 uint32_t pair_sent(const pair *p) { return p->nsent; }
 uint32_t pair_dropped(const pair *p) { return p->ndrop; }
 uint32_t pair_corrupted(const pair *p) { return p->ncorrupt; }
+uint32_t pair_refused(const pair *p) { return p->nrefused; }
 
 /* Deliver the oldest frame due now. Returns 1 if one was delivered. */
 static int deliver_one(pair *p) {

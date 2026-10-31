@@ -229,7 +229,9 @@ int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payloa
     memcpy(s->txbuf, mac, 6);
     memcpy(s->txbuf + 6, s->cfg.mac, 6);
     mt_wr16(s->txbuf + 12, ethertype);
-    return mt_eth_tx(s, s->txbuf, (uint16_t)(MT_ETH_HDR + payload_len)) == 0 ? 1 : -1;
+    if (mt_eth_tx(s, s->txbuf, (uint16_t)(MT_ETH_HDR + payload_len)) == 0) return 1;
+    s->tx_refused = 1;                         /* the link is busy: TCP stalls and retries */
+    return -1;
 }
 
 /* ---- Timers: plain call chain; see the module checklist in mt_int.h ---- */

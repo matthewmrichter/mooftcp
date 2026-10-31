@@ -12,6 +12,10 @@ void (*fake_tx_hook)(void);
 static int fake_tx(void *ctx, const uint8_t *frame, uint16_t len) {
     fake_link *fl = (fake_link *)ctx;
     if (fake_tx_hook) fake_tx_hook();
+    if (fl->refuse) {
+        if (fl->refuse > 0) fl->refuse--;
+        return 1;
+    }
     if (fl->n >= 64 || len > 1514) return 1;
     memcpy(fl->f[fl->n], frame, len);
     fl->len[fl->n] = len;
@@ -21,6 +25,7 @@ static int fake_tx(void *ctx, const uint8_t *frame, uint16_t len) {
 
 void fake_init(fake_link *fl, mt_link *link) {
     fake_clear(fl);
+    fl->refuse = 0;
     link->ctx = fl;
     link->tx = fake_tx;
 }

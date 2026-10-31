@@ -130,7 +130,7 @@ void mt_arp_insert(mt_stack *s, mt_ip4 ip, const uint8_t mac[6], uint32_t now) {
         memcpy(p->frame, mac, 6);
         p->len = 0;                       /* release the slot before tx */
         mt_tcp_note_released(s, p->frame + MT_ETH_HDR);   /* so TCP does not resend it */
-        mt_eth_tx(s, p->frame, n);
+        if (mt_eth_tx(s, p->frame, n) != 0) s->arp_rel.live = 0;   /* refused: TCP resends it */
     }
     if (was_pending) mt_tcp_arp_resolved(s, ip, now);
     s->arp_rel.live = 0;
