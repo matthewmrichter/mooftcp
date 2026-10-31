@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # MoofTCP soak in Snow (Task 13): one boot, long-lived Flynn sessions plus UDP/ICMP/DNS churn, with
 # MoofDiag/HeapInfo snapshots between the phases so counters and heap can be checked for drift.
-#   soak-run.sh [--cycles N] [--type-secs S] [--no-build] [--keep-disk]
+#   soak-run.sh [--cycles N] [--type-secs S] [--probe-groups G] [--no-build] [--keep-disk]
+#     --probe-groups G  ApiProbe groups of step 3 (default "67D"; "345" = bulk send/receive/burst for the tx-slot check)
 # One cycle (about 7 minutes with the defaults):
 #   1. MoofDiag            (appends the driver/Ethernet/core counters to MoofDiag.out)
 #   2. Flynn               odd cycles: echo server 17007; even cycles: scripts/floodsrv.py on 17041 (60 s of bulk receive,
@@ -22,14 +23,15 @@ IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 die() { echo "soak-run.sh: $*" >&2; exit 1; }
 
-cycles=5; typesecs=200; build=1; keepdisk=""
+cycles=5; typesecs=200; build=1; keepdisk=""; groups="67D"
 while [ $# -gt 0 ]; do
   case "$1" in
     --cycles) cycles="$2"; shift 2;;
     --type-secs) typesecs="$2"; shift 2;;
+    --probe-groups) groups="$2"; shift 2;;
     --no-build) build=""; shift;;
     --keep-disk) keepdisk=1; shift;;
-    *) echo "usage: soak-run.sh [--cycles N] [--type-secs S] [--no-build] [--keep-disk]" >&2; exit 2;;
+    *) echo "usage: soak-run.sh [--cycles N] [--type-secs S] [--probe-groups G] [--no-build] [--keep-disk]" >&2; exit 2;;
   esac
 done
 cd "$ROOT"
@@ -82,7 +84,7 @@ with_volume() {
 }
 # The files the apps write exist up front (empty) so the Finder's icon grid does not shift during the run.
 put_files() {
-  printf '67D' > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
+  printf '%s' "$groups" > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
   hcopy -t "$out_dir/ApiProbe.cfg" ":MoofTCP Test:ApiProbe.cfg"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:ApiProbe.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:HeapInfo.out"
