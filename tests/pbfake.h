@@ -48,6 +48,10 @@ extern void (*pbf_leave_hook)(void);   /* run at every outermost irq restore (ga
 extern struct MtGate *pbf_gate;           /* set: irq_save/restore move its depth (the Mac gate) */
 extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current application's" A5) */
 
+extern int pbf_kill_calls;        /* mt_os_enet_kill calls and the last arguments */
+extern int16_t pbf_kill_ref;
+extern void *pbf_kill_pb;
+
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */
 MacPtr32 pbf_compl(pbf_compl_fn f);

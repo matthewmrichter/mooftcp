@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <string.h>
 #include "mt_enet.h"
+/* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
+int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 
 enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
 
@@ -102,23 +104,13 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
 int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
 {
     MtEnet *e = (MtEnet *)ctx;
-    MtEnetTx *s = 0;
-    unsigned i;
+    MtEnetTx *s;
     uint16_t n;
     int16_t r;
 
     if (!e->opened) { e->tx_drop_closed++; return 1; }
     if (!mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
-    for (i = 0; i < MT_ENET_TXSLOTS; i++) {
-        MtEnetTx *c = &e->tx[(e->tx_next + i) % MT_ENET_TXSLOTS];
-        if (c->pb.ioResult <= 0) {
-            if (c->started && c->pb.ioResult < 0) { e->tx_err++; e->last_err = c->pb.ioResult; }
-            c->started = 0;
-            s = c;
-            e->tx_next = (uint8_t)((e->tx_next + i + 1u) % MT_ENET_TXSLOTS);
-            break;
-        }
-    }
+    s = mt_enet_tx_claim(e);
     if (!s) { e->tx_drop_busy++; return 1; }
 
     memcpy(s->frame, frame, len);
@@ -140,16 +132,66 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
         return 1;
     }
     s->started = 1;
+    if (!e->tx_started++) e->wd_fresh = 1;
     e->tx_ok++;
     return 0;
 }
 
-int mt_enet_tx_busy(const MtEnet *e)
+/* mt_os.h: KillIO for the stuck write (the driver completes it with an error, or does not). */
+int16_t mt_os_enet_kill(int16_t refnum, void *pb)
 {
-    unsigned i;
-    int n = 0;
-    for (i = 0; i < MT_ENET_TXSLOTS; i++) if (e->tx[i].pb.ioResult > 0) n++;
-    return n;
+    MtEnetPB k;
+    (void)pb;
+    zero(&k, sizeof k);
+    k.ioRefNum = refnum;
+    return (int16_t)PBKillIOSync((ParmBlkPtr)&k);
+}
+
+/* Detach, close the driver, open it again and attach again (task time, gate owned by the
+ * caller). The transmit slots are not touched: PBs still in flight stay allocated and quarantined.
+ * Failure leaves opened = 0 (frames are refused with tx_drop_closed); up to three attempts. */
+int mt_enet_reattach(MtEnet *e)
+{
+    static const unsigned char *const names[2] = { (const unsigned char *)"\p.ENET0",
+                                                   (const unsigned char *)"\p.ENET" };
+    short ref = 0;
+    int16_t r = MT_ENET_E_NODRIVER;
+    int i;
+
+    if (!e->reattach_req || !e->gate) return 0;
+    if (e->attached & 2) detach(e, 0x0800);
+    if (e->attached & 1) detach(e, 0x0806);
+    e->attached = 0;
+    e->opened = 0;
+    mt_enet_ph_set_ctx(0);
+    (void)CloseDriver(e->refnum);
+    for (i = 0; i < 2 && r != 0; i++) r = (int16_t)OpenDriver(names[i], &ref);
+    if (r == 0) {
+        e->refnum = ref;
+        mt_enet_ph_set_ctx(e->gate);
+        e->gate->open = 1;
+        r = attach(e, 0x0806);
+        if (r == 0) {
+            e->attached |= 1;
+            r = attach(e, 0x0800);
+            if (r == 0) e->attached |= 2;
+        }
+    }
+    if (r) {
+        e->last_err = r;
+        e->reattach_fail++;
+        if (e->attached & 2) detach(e, 0x0800);
+        if (e->attached & 1) detach(e, 0x0806);
+        e->attached = 0;
+        mt_enet_ph_set_ctx(0);
+        if (++e->reattach_tries >= 3) e->reattach_req = 0;   /* give up; the link stays closed */
+        return r;
+    }
+    e->opened = 1;
+    e->reattach++;
+    e->reattach_req = 0;
+    e->reattach_tries = 0;
+    return 0;
 }
 
 void mt_enet_close(MtEnet *e)

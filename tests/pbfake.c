@@ -29,6 +29,7 @@ void pbf_reset(void) {
     g_used = 0;
     g_ncompl = g_nasr = 0;
     pbf_nlog = 0;
+    pbf_kill_calls = 0;
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
@@ -159,6 +160,16 @@ void mt_os_unmask(int saved) {
 int mt_os_gate_depth(void) { return pbf_gate ? pbf_gate->depth : pbf_irq; }
 
 int mt_os_app_mem(MacPtr32 p) { return p >= pbf_app_lo && p < pbf_app_hi; }
+
+int pbf_kill_calls;
+int16_t pbf_kill_ref;
+void *pbf_kill_pb;
+int16_t mt_os_enet_kill(int16_t refnum, void *pb) {
+    pbf_kill_calls++;
+    pbf_kill_ref = refnum;
+    pbf_kill_pb = pb;
+    return 0;
+}
 
 /* ---- harness ---- */
 

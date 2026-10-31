@@ -58,7 +58,10 @@ typedef struct MtEnetWDS { uint16_t len; uint32_t ptr; } MtEnetWDS;   /* 6 bytes
 typedef struct MtEnetTx {
     MtEnetPB  pb;
     uint8_t   started;           /* pb was handed to the driver and its result not yet checked */
+    uint8_t   wd_stage;          /* watchdog: 0 none, 1 KillIO sent, 2 quarantined (reattach asked) */
+    uint8_t   wd_seen;           /* wd_t0 is valid */
     uint8_t   pad;
+    uint32_t  wd_t0;             /* ms: first watchdog look in flight (stage 0), then KillIO time */
     MtEnetWDS wds[2];
     uint8_t   frame[MT_ENET_MAXFRAME + 2];
 } MtEnetTx;
@@ -72,6 +75,12 @@ typedef struct MtEnet {
     uint8_t   tx_next;           /* round-robin search start */
     int16_t   last_err;          /* last nonzero Device Manager result */
     uint32_t  tx_ok, tx_pad, tx_drop_busy, tx_drop_len, tx_drop_closed, tx_err;
+    uint32_t  tx_stuck, tx_killed, reattach, reattach_fail;   /* watchdog (Plan 3 Task 5) */
+    uint32_t  wd_next;           /* ms: next scan */
+    uint8_t   tx_started;        /* slots with started != 0 (0: the watchdog returns at once) */
+    uint8_t   wd_fresh;          /* a write started: scan at the next call */
+    uint8_t   reattach_req;      /* tick asked; mt_enet_reattach runs at task time */
+    uint8_t   reattach_tries;    /* consecutive failed reattaches */
     MtEnetTx  tx[MT_ENET_TXSLOTS];
 } MtEnet;
 
@@ -89,6 +98,30 @@ int  mt_enet_open(MtEnet *e, MtGate *gate);
  * watchdog (KillIO, or detach/close/reopen) is Plan 3's. Never
  * waits, never blocks, callable from any context including the protocol handler. */
 int  mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len);
+
+/* ---- stuck-write watchdog (mt_enet_wd.c, plain C, host-tested: tests/test_enet_watchdog.c) ----
+ * A slot whose ioResult stays 1 belongs to the driver (it owns PB, WDS and buffer) and is NEVER
+ * reused until ioResult <= 0. mt_enet_watchdog(e, now) runs inside the core gate (the driver calls
+ * it from its `after` callback, i.e. after every tick, input pass and API call; interrupt time
+ * is possible, so it makes no Memory Manager call): a slot first seen in flight is timed; after
+ * MT_ENET_TX_STUCK_MS it is counted (tx_stuck) and KillIO'd once (tx_killed); if still in flight
+ * after another MT_ENET_TX_STUCK_MS it is quarantined and a reattach is requested
+ * (reattach_req). The reattach (EDetachPH, CloseDriver, OpenDriver, EAttachPH: mt_enet_reattach)
+ * needs task time and runs from the next driver entry; the core, streams and connections stay.
+ * Idle cost: tx_started == 0 -> one compare and return. */
+#define MT_ENET_TX_STUCK_MS 2000u
+#define MT_ENET_WD_SCAN_MS  100u       /* scan period while a slot is started */
+void mt_enet_watchdog(MtEnet *e, uint32_t now_ms);
+/* Deadline (ms, MT_NO_DEADLINE allowed) to arm the timer with: capped to the scan period while a
+ * slot is started so the watchdog keeps getting ticks. */
+uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d);
+/* Choose a free slot (reaps finished ones, counts their errors); NULL = all in flight/quarantined. */
+MtEnetTx *mt_enet_tx_claim(MtEnet *e);
+/* Task time only, gate owned by the caller: perform a requested reattach. Returns 0 (nothing to do
+ * or done) or the Device Manager error. Keeps the slots, the counters and the gate. */
+int  mt_enet_reattach(MtEnet *e);
+/* Slots whose PB is still in flight after a reattach was asked (quarantined). */
+int  mt_enet_tx_quarantined(const MtEnet *e);
 
 /* Detach the handlers and close. Transmits in flight finish on their own; the MtEnet must stay
  * allocated until their ioResult is not 1 (mt_enet_tx_busy() == 0). */

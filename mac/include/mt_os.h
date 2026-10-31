@@ -113,6 +113,11 @@ void mt_os_unmask(int saved);
  * buffer, echoes by notify routine, queued PBs by address). */
 int  mt_os_app_mem(MacPtr32 p);
 
+/* KillIO on the Ethernet driver (PBKillIO with ioRefNum = refnum) for a transmit PB that stayed
+ * in flight; `pb` is that PB (the Mac ignores it, the host fake records it). Returns the OSErr.
+ * May be called from the Time Manager tick / protocol handler (the watchdog runs in the gate). */
+int16_t mt_os_enet_kill(int16_t refnum, void *pb);
+
 #ifdef MT_OS_MAC
 static inline void *mt_os_ptr(MacPtr32 a) { return (void *)a; }
 static inline MacPtr32 mt_os_addr(const void *p) { return (MacPtr32)p; }

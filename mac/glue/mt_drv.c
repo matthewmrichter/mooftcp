@@ -91,7 +91,8 @@ static void tick_cb(void *ctx) {
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
     mt_entry_drain(&r->entry);
-    mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d));
+    mt_enet_watchdog(&r->enet, mt_os_ms());      /* idle: one compare */
+    mt_timer_arm_deadline(&r->timer, mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d)));
 }
 
 static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
@@ -183,6 +184,20 @@ static int16_t link_up(MtRes *r) {
     return 0;
 }
 
+/* Ethernet reattach after a write stayed stuck through KillIO (mt_enet_wd.c asks from the tick,
+ * which runs at interrupt level: the Memory Manager and the driver's close/open need task time).
+ * Runs from the first Control entry at task time with the gate free; the gate is owned meanwhile
+ * so rx and ticks wait in the ring and link.tx is not called while opened is 0. */
+static void enet_reattach(MtRes *r) {
+    void *z;
+    if (sr_irq() || mt_os_gate_depth() != 0) return;   /* retried at the next entry */
+    z = mt_mac_zone_sys();
+    MT_GATE_ENTER(&r->gate);
+    (void)mt_enet_reattach(&r->enet);
+    MT_GATE_LEAVE(&r->gate);                     /* after_cb re-arms the timer */
+    mt_mac_zone_restore(z);
+}
+
 /* ---- Device Manager entries (from mt_drv_stubs.s: A0 = PB, A1 = DCE) ---- */
 
 int16_t mt_drv_open(void *pb, void *dce) {
@@ -229,6 +244,7 @@ int16_t mt_drv_control(void *vpb, void *dce) {
     if (!(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
         n = mt_mac_dequeue(pb, dce, extra, (int)MT_DRV_PENDQ);
     if (!r) { pb->hdr.ioResult = MT_PB_NOTOPEN; return MT_PB_NOTOPEN; }
+    if (r->enet.reattach_req) enet_reattach(r);   /* watchdog asked; needs task time (Ruling) */
     res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
     for (i = 0; i < n; i++) {
         MtAnyPb *x = (MtAnyPb *)extra[i];
