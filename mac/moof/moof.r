@@ -41,6 +41,10 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
     $$read("MoofDrvr.flt")
 };
 
+/* The resolver, `dnrp` 0 (Task 11, mac/dnr): apps load it from the file "MacTCP DNR" (dnrfile.r
+ * builds that file with the same resource); the cdev carries a copy as the real MacTCP file does. */
+#include "dnrp.r"
+
 /* System-heap bytes INIT 31 adds for us: 0x28000 = 163,840. The DRVR code (74,694), the resident
  * block (49,924: gate, Ethernet slots, MtDrv, core arena), the DCE, plus the .ENET0 driver the
  * first open loads (about 16.5K); 0x24000 boots but leaves too little for that open (-23000).

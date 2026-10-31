@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 #include "mt_mactcp.h"
+#include "mt_dnr_abi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,7 @@ typedef union MtAnyPb {
     GetAddrParamBlock addr;
     ICMPParamBlock    icmp;
     IPParamBlock      ip;
+    MtDnrPb           dnr;          /* private DNR call (MT_CS_DNR), mt_pb_dns.c */
 } MtAnyPb;
 
 /* What an ASR call needs: the notify routine, the stream handle and the userDataPtr given at

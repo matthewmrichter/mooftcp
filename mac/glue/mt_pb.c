@@ -81,6 +81,8 @@ int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
         r = mt_pb_udp_control(d, pb);
     else if (cs == ipctlGetAddr || cs == ipctlEchoICMP || cs == ipctlLAPStats)
         r = mt_pb_ip_control(d, pb);
+    else if (cs == MT_CS_DNR)
+        r = mt_pb_dns_control(d, pb);           /* private: dnrp's lookups (not a MacTCP code) */
     else if (answers_zero(cs))
         r = 0;
     else
@@ -167,6 +169,7 @@ void mt_pb_goodbye(MtDrv *d) {
         memset(u, 0, sizeof *u);
         u->gen = gen;
     }
+    mt_pb_dns_goodbye(d);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];
         if (!e->blk.ioCompletion || mt_os_app_mem(e->blk.ioCompletion)) e->state = 0;

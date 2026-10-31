@@ -10,7 +10,9 @@
 #                     link Down (MT_ETH_LINK=Down) so no address is obtainable; the app then
 #                     runs its unconfigured suite
 #     --keep-disk     do not run fresh-disk.sh (use the current work.hda as is)
-#     --groups        case groups to run (default "1 2 3 4 5 6 7 8 9 0"; 0 = group 10, see apiprobe.c)
+#     --groups        case groups to run (default "1 2 3 4 5 6 7 8 9 0"; 0 = group 10, see apiprobe.c;
+#                     D = the DNR suite (apiprobe_dnr.inc, needs the file "MacTCP DNR"); Q = the app quits
+#                     with a DNR lookup pending and the run checks that the machine is still alive)
 # One Snow boot per group: Snow's NAT stops accepting new guest TCP connections after
 # about 16 (it never closes the host side), so the groups run in separate boots on the same
 # work.hda and the per-boot outputs are concatenated in order. An unconfigured run needs a
@@ -156,6 +158,7 @@ launch_app() {
     click 341 290 dbl; sleep 3     # open the "MoofTCP Test" folder
     click 238 322 dbl; sleep 4     # launch ApiProbe (the first double click may only select)
     click 238 322 dbl; sleep 3
+    [ "${g:-}" = Q ] && return 0     # group Q's app quits at once: the main loop checks the aftermath
     [ "$(screen_state)" != finder ] && return 0
     echo "launch attempt $n did not start the app; retrying"
   done
@@ -189,6 +192,12 @@ for g in $groups; do
     sleep 5; t=$((t+5))
     scripts/snow.sh status >/dev/null 2>&1 || die "Snow died"
     st="$(screen_state)"
+    if [ "$g" = Q ] && [ "$st" = finder ]; then      # group Q: the app quits by itself, with a lookup pending
+      sleep 25                                       # the answer arrives meanwhile; the driver must have forgotten the PB
+      st="$(screen_state)"
+      if [ "$st" = finder ]; then done_flag=1; else done_flag=crash; fi
+      break
+    fi
     if [ "$st" = done ]; then done_flag=1; break; fi
     if [ "$st" = crash ]; then done_flag=crash; break; fi
   done

@@ -25,7 +25,7 @@ target_compile_options(mtglue68k PRIVATE
 # clash). The driver's entry dispatcher mt_drv_stubs.s defines `_start`, so it is linked straight
 # into the flat DRVR code (mac/moof), not kept in this library.
 add_library(mtdrv68k STATIC
-  mt_pb.c mt_pb_tcp.c mt_pb_udp.c mt_pb_ip.c mt_pb_entry.c mt_drv.c mt_drv_mac.c mt_cfg.c)
+  mt_pb.c mt_pb_tcp.c mt_pb_udp.c mt_pb_ip.c mt_pb_dns.c mt_pb_entry.c mt_drv.c mt_drv_mac.c mt_cfg.c)
 target_include_directories(mtdrv68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_definitions(mtdrv68k PUBLIC MT_OS_MAC)
 target_link_libraries(mtdrv68k PUBLIC mtcore68k)

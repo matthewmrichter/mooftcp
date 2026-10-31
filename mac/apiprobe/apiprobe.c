@@ -1497,9 +1497,11 @@ static void c_driver_close(void)
     emit(0, e);
 }
 
+#include "apiprobe_dnr.inc"
+
 static void both(void (*f)(int)) { f(0); f(1); }
 
-static unsigned grp_mask = 0x7FF;
+static unsigned grp_mask = 0x7FF;   /* groups D (11, DNR) and Q (12, quit with a lookup pending) only when named in ApiProbe.cfg */
 static int grp(int g) { return (grp_mask >> g) & 1; }
 
 int main(void)
@@ -1517,12 +1519,14 @@ int main(void)
             grp_mask = 0;
             for (k = 0; k < n; k++) if (cfg[k] >= '1' && cfg[k] <= '9') grp_mask |= 1u << (cfg[k] - '0');
             else if (cfg[k] == '0') grp_mask |= 1u << 10;
+            else if (cfg[k] == 'D') grp_mask |= 1u << 11;
+            else if (cfg[k] == 'Q') grp_mask |= 1u << 12;
         }
     }
     r = os_out_open("\pApiProbe.out");
     if (r) { os_done_alert(); return 0; }
     note("0", "ApiProbe 1: format id name S|A cs= res= extras | events (A=ASR C=completion P=poll)");
-    { char m[16]; int k, n = 0; for (k = 1; k <= 10; k++) if (grp(k)) m[n++] = (char)('0' + (k % 10)); m[n] = 0; note("0", m); }
+    { char m[16]; int k, n = 0; for (k = 1; k <= 12; k++) if (grp(k)) m[n++] = (char)(k == 12 ? 'Q' : k == 11 ? 'D' : '0' + (k % 10)); m[n] = 0; note("0", m); }
     note("0", "values written =@N are tick counts (timing dependent)");
 
     c_driver_open();
@@ -1624,6 +1628,16 @@ int main(void)
         note("G10", "null rcv buffer: sync, then async (a crash here leaves the file as is)");
         c_create_null(0);
         c_create_null(1);
+    }
+    if (grp(11)) {
+        note("GD", "DNR (dnrp of MacTCP DNR)");
+        c_dnr();
+    }
+    if (grp(12)) {
+        note("GQ", "DNR: quit with a lookup pending (no alert)");
+        c_dnr_quit();
+        os_out_close();
+        return 0;
     }
     os_out_close();
     os_done_alert();

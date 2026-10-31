@@ -51,6 +51,7 @@
 #define MT_PB_ECHO_DATA   64     /* echoed bytes kept for the notify block */
 #define MT_PB_ECHO_TMO_S  3      /* ICMPEcho timeout when the PB gives none (matrix A00..A03 used 3) */
 #define MT_PB_UDP_MTU_OFFNET 548 /* UDPMaxMTUSize towards a host off our subnet (matrix 910) */
+#define MT_PB_DNS         4      /* DNR lookups in flight (private csCode, mt_pb_dns.c); the core has 4 query slots */
 
 /* Results that are not .IPP codes: notOpenErr (Device Manager: driver not open, matrix
  * "Unconfigured run") and the -4 MacTCP returns for csCodes it does not implement (matrix 120). */
@@ -166,6 +167,19 @@ typedef struct MtEcho {
     uint8_t  state;             /* 0 free, 1 waiting, 2 notifying (slot not reusable yet) */
 } MtEcho;
 
+/* One DNR lookup (mt_pb_dns.c). The result memory is here, in the resident block, never in the
+ * application's heap: the core writes into `res`, and the driver copies it to the caller's hostInfo /
+ * returnRec only while the PB is pending (the goodbye kiss cancels pending lookups first). */
+typedef struct MtDnsSlot {
+    MtAnyPb    *pb;             /* the pending lookup PB */
+    MtDrv      *d;
+    mt_dns_result res;          /* A / HINFO / MX answer; a PTR answer is res.cname */
+    MacPtr32    out;            /* the caller's hostInfo / returnRec */
+    uint32_t    addr;           /* PTR: the address */
+    uint8_t     state;          /* 0 free, 1 query in the core, 2 PTR waiting for the reverse-lookup scratch */
+    uint8_t     op;             /* MT_DNR_A / PTR / HINFO / MX */
+} MtDnsSlot;
+
 struct MtDrv {
     mt_stack *s;
     uint8_t   configured;       /* an address is set: otherwise every call gets notOpenErr */
@@ -186,6 +200,7 @@ struct MtDrv {
     ICMPReport icmp;            /* TCP/UDP ICMPReceived report, valid during the ASR */
     MtUdpStream udp[MT_PB_MAX_UDP];
     MtEcho    echo[MT_PB_ECHOQ];
+    MtDnsSlot dns[MT_PB_DNS];
     uint8_t   echo_data[MT_PB_ECHO_DATA];   /* reply payload lent to the notify block */
     uint8_t   ubuf[MT_PB_UDP_GATHER];       /* gathers a multi-entry UDPWrite */
     uint8_t   lap_mac[8];       /* LAPStats.ifPhysicalAddress */
@@ -231,6 +246,8 @@ int16_t  mt_pb_udp_control(MtDrv *d, MtAnyPb *pb);   /* csCodes 20..29 (mt_pb_ud
 void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
 uint32_t mt_pb_udp_deadline(MtDrv *d);
 int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
+int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
+void     mt_pb_dns_goodbye(MtDrv *d);          /* cancel the lookups whose PB lies in the application heap */
 void     mt_pb_ip_init(MtDrv *d);              /* echo callback, constant strings */
 void     mt_pb_ip_timers(MtDrv *d);            /* expire ICMPEcho timeouts */
 uint32_t mt_pb_ip_deadline(MtDrv *d);

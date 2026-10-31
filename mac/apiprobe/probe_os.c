@@ -10,6 +10,7 @@
 #include <OSUtils.h>
 #include <Files.h>
 #include <Devices.h>
+#include <Resources.h>
 #include "probe_os.h"
 
 QDGlobals qd;
@@ -75,4 +76,42 @@ int os_read_cfg(const char *pname, char *buf, int max)
     if (FSRead(ref, &cnt, buf) && cnt == 0) { FSClose(ref); return 0; }
     FSClose(ref);
     return (int)cnt;
+}
+
+static Handle dnr_h;
+
+void *os_load_dnr(short *err)
+{
+    SysEnvRec world;
+    short ref;
+    Handle code = 0;
+    *err = 0;
+    SysEnvirons(1, &world);
+    ref = OpenRFPerm("\pMacTCP DNR", world.sysVRefNum, fsRdPerm);
+    if (ref == -1) { *err = (short)ResError(); if (!*err) *err = -1; return 0; }
+    code = Get1IndResource('dnrp', 1);
+    if (code) DetachResource(code); else *err = -2;
+    CloseResFile(ref);
+    if (!code) return 0;
+    HLock(code);
+    dnr_h = code;
+    return *code;
+}
+
+void os_free_dnr(void *code)
+{
+    (void)code;
+    if (dnr_h) { HUnlock(dnr_h); DisposeHandle(dnr_h); dnr_h = 0; }
+}
+
+unsigned long os_app_free(void)
+{
+    THz saved = GetZone(); long f;
+    SetZone(ApplicationZone()); f = FreeMem(); SetZone(saved); return (unsigned long)f;
+}
+
+unsigned long os_sys_free(void)
+{
+    THz saved = GetZone(); long f;
+    SetZone(*(THz *)0x2A6); f = FreeMem(); SetZone(saved); return (unsigned long)f;
 }

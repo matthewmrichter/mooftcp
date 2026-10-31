@@ -16,10 +16,18 @@ target_link_options(MoofDrvr PRIVATE -Wl,--mac-flat)
 
 add_custom_command(
     OUTPUT MacTCP.bin MacTCP.dsk
-    COMMAND ${REZ} -I${REZ_INCLUDE_PATH}
+    COMMAND ${REZ} -I${REZ_INCLUDE_PATH} -I${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/moof.r
             -o MacTCP.bin --cc MacTCP.dsk
             -t cdev -c ztcp
-    DEPENDS MoofInit MoofDrvr moof.r)
+    DEPENDS MoofInit MoofDrvr MoofDnr moof.r dnrp.r)
+# "MacTCP DNR" (Task 11): the file apps find the resolver in, type cdev creator mtcp (the real file's).
+add_custom_command(
+    OUTPUT "MacTCP DNR.bin" "MacTCP DNR.dsk"
+    COMMAND ${REZ} -I${REZ_INCLUDE_PATH} -I${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/dnrfile.r
+            -o "MacTCP DNR.bin" --cc "MacTCP DNR.dsk"
+            -t cdev -c mtcp
+    DEPENDS MoofDnr dnrfile.r dnrp.r)
 # Named *_APPL so scripts/build-mac.sh builds the MacBinary for `MoofTCP`.
-add_custom_target(MoofTCP_APPL ALL DEPENDS MacTCP.bin)
+add_custom_target(MoofTCP_APPL ALL DEPENDS MacTCP.bin "MacTCP DNR.bin")

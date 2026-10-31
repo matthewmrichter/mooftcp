@@ -456,10 +456,16 @@ typedef struct hostInfo {
 
 #pragma pack(pop)
 
-/* ---- DNR selectors (obs) ----
- * 1-3 are exercised by HeapInfoDNR and the 'dnrp' jump table has exactly
- * eight entries (1-8). Names for 4-8 are OPEN (docs/dev/MACTCP-INTERFACE.md). */
-enum { OPENRESOLVER = 1, CLOSERESOLVER = 2, STRTOADDR = 3 };
+/* ---- DNR selectors (obs, MACTCP-REFERENCE-MATRIX.md "DNR") ----
+ * 1-8 are the entries of the 'dnrp' jump table. AddrToStr 4, EnumCache 5, AddrToName 6, HInfo 7
+ * and MXInfo 8 are Apple's dnr.c numbers, confirmed against the real dnrp by the ApiProbe DNR group
+ * (each selector does what its name says). */
+enum { OPENRESOLVER = 1, CLOSERESOLVER = 2, STRTOADDR = 3, ADDRTOSTR = 4, ENUMCACHE = 5,
+       ADDRTONAME = 6, HINFO = 7, MXINFO = 8 };
+
+/* returnRec of HInfo / MXInfo (obs: offsets seen through the real dnrp): rtnCode 0, cname 4,
+ * then at 260 either cpuType[30] + osType[30] or the MX preference (uint16) + exchange[255]. */
+#define MT_RETREC_UNION 260
 
 #ifdef __cplusplus
 }

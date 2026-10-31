@@ -3,8 +3,8 @@
 #   install-moof.sh [--no-prefs | --prefs <MoofTCP Prefs.bin>] [--cdev <MacTCP.bin>]
 # 1. Moves the real "MacTCP", "MacTCP DNR" and "MacTCP Prep" from :System Folder: into
 #    ":MacTCP Parked:" (hrename keeps forks and type/creator; EMULATOR.md "Method" step 3).
-# 2. Copies the MoofTCP cdev (default build-mac/moof/MacTCP.bin, `scripts/build-mac.sh MoofTCP`)
-#    and the prefs file (default: built by scripts/mkprefs.sh for Snow's NAT: 10.0.0.2/8,
+# 2. Copies the MoofTCP cdev (default build-mac/moof/MacTCP.bin, `scripts/build-mac.sh MoofTCP`),
+#    the resolver file "MacTCP DNR" (build-mac/moof/MacTCP DNR.bin, next to the cdev) and the prefs file (default: built by scripts/mkprefs.sh for Snow's NAT: 10.0.0.2/8,
 #    gateway 10.0.0.1, DNS 1.1.1.1) into :System Folder:. --no-prefs leaves MoofTCP unconfigured.
 # Only work.hda is touched (deploy.sh refuses golden.hda and a running Snow).
 set -euo pipefail
@@ -23,6 +23,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -f "$cdev" ] || die "no $cdev (run scripts/build-mac.sh MoofTCP)"
+[ -f "$(dirname "$cdev")/MacTCP DNR.bin" ] || die "no MacTCP DNR.bin next to $cdev (run scripts/build-mac.sh MoofTCP)"
 if [ "$prefs" = default ]; then
   "$ROOT/scripts/mkprefs.sh" --ip 10.0.0.2 --mask 255.0.0.0 --gw 10.0.0.1 --dns 1.1.1.1 >/dev/null
   prefs="$ROOT/build-mac/prefs/MoofTCP Prefs.bin"
@@ -65,4 +66,5 @@ for f in "MacTCP" "MacTCP DNR" "MacTCP Prep" "MoofTCP Prefs"; do
   fi
 done
 humount >/dev/null 2>&1 || true; vol=""
-"$ROOT/scripts/deploy.sh" "$cdev" ${prefs:+"$prefs"} --to ":System Folder:" | grep -E "copied|MacTCP|MoofTCP" || true
+dnrfile="$(dirname "$cdev")/MacTCP DNR.bin"      # the resolver file apps look for (Task 11)
+"$ROOT/scripts/deploy.sh" "$cdev" ${prefs:+"$prefs"} ${dnrfile:+"$dnrfile"} --to ":System Folder:" | grep -E "copied|MacTCP|MoofTCP" || true
