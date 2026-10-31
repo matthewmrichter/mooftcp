@@ -19,3 +19,16 @@ target_include_directories(mtglue68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_
 target_compile_definitions(mtglue68k PUBLIC MT_OS_MAC)
 target_compile_options(mtglue68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
+
+# The .IPP PB dispatcher and the driver around it (Task 10), for the 68k. mt_pb*.c and mt_drv.c
+# include mt_mactcp.h; mt_drv_mac.c and mt_cfg.c hold the Toolbox calls (the two header sets
+# clash). The driver's entry dispatcher mt_drv_stubs.s defines `_start`, so it is linked straight
+# into the flat DRVR code (mac/moof), not kept in this library.
+add_library(mtdrv68k STATIC
+  mt_pb.c mt_pb_tcp.c mt_pb_udp.c mt_pb_ip.c mt_drv.c mt_drv_mac.c mt_cfg.c)
+target_include_directories(mtdrv68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_definitions(mtdrv68k PUBLIC MT_OS_MAC)
+target_link_libraries(mtdrv68k PUBLIC mtcore68k)
+target_compile_options(mtdrv68k PRIVATE
+  $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
+set(MT_DRV_STUBS ${CMAKE_CURRENT_SOURCE_DIR}/mt_drv_stubs.s PARENT_SCOPE)

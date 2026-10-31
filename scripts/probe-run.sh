@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Build ApiProbe, run it in Snow against whichever stack the image loads, and collect
 # ApiProbe.out into build-mac/probe/<label>.out.
-#   probe-run.sh [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>
+#   probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>
+#     --moof          run against MoofTCP instead of MacTCP: after fresh-disk.sh, scripts/install-moof.sh
+#                     parks the MacTCP files and installs build-mac/moof/MacTCP.bin (built first) and a
+#                     "MoofTCP Prefs" for 10.0.0.2/8 (with --unconfigured: no prefs file)
 #     --unconfigured  after fresh-disk.sh, reinstall the factory MacTCP file on work.hda
 #                     (scripts/probe-unconfig.py --mode factory) and boot Snow with the Ethernet
 #                     link Down (MT_ETH_LINK=Down) so no address is obtainable; the app then
@@ -24,11 +27,12 @@ IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${PROBE_TIMEOUT:-900}"
 die() { echo "probe-run.sh: $*" >&2; exit 1; }
-usage() { echo 'usage: probe-run.sh [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>' >&2; exit 2; }
+usage() { echo 'usage: probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>' >&2; exit 2; }
 
-unconf=""; keepdisk=""; label=""; groups="1 2 3 4 5 6 7 8 9 0"
+unconf=""; keepdisk=""; label=""; groups="1 2 3 4 5 6 7 8 9 0"; moof=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --moof) moof=1; shift;;
     --unconfigured) unconf=1; shift;;
     --keep-disk) keepdisk=1; shift;;
     --groups) [ $# -ge 2 ] || usage; groups="$2"; shift 2;;
@@ -57,6 +61,10 @@ echo "== build"
 scripts/build-mac.sh ApiProbe >/dev/null
 bin="$ROOT/build-mac/apiprobe/ApiProbe.bin"
 [ -f "$bin" ] || die "build did not produce $bin"
+if [ -n "$moof" ]; then
+  scripts/build-mac.sh MoofTCP >/dev/null
+  [ -f "$ROOT/build-mac/moof/MacTCP.bin" ] || die "build did not produce build-mac/moof/MacTCP.bin"
+fi
 
 started_testnet=""
 if ! (exec 3<>/dev/tcp/127.0.0.1/17007) 2>/dev/null; then
@@ -157,7 +165,11 @@ launch_app() {
 echo "== disk"
 snow_stop
 [ -n "$keepdisk" ] || scripts/fresh-disk.sh
-if [ -n "$unconf" ]; then python3 -I scripts/probe-unconfig.py "$IMG" ${PROBE_UNCONF_MODE:+--mode "$PROBE_UNCONF_MODE"}; fi
+if [ -n "$moof" ]; then
+  if [ -n "$unconf" ]; then scripts/install-moof.sh --no-prefs; else scripts/install-moof.sh; fi
+elif [ -n "$unconf" ]; then
+  python3 -I scripts/probe-unconfig.py "$IMG" ${PROBE_UNCONF_MODE:+--mode "$PROBE_UNCONF_MODE"}
+fi
 scripts/deploy.sh "$bin" --to ":MoofTCP Test:" >/dev/null
 
 export DISPLAY="$DISPLAY_NUM"; unset WAYLAND_DISPLAY
