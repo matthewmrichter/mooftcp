@@ -138,5 +138,5 @@ if [ -n "$nat" ]; then
   fw_rules add
   echo "tap-up.sh: guest traffic to the internet leaves via $(uplink || echo '?') (MASQUERADE)"
 fi
-echo "tap-up.sh: $dev up, host 10.0.0.1 (guest 10.0.0.2/8, gateway 10.0.0.1)."
+echo "tap-up.sh: $dev up, network 10.0.0.0/24, host 10.0.0.1 (guest 10.0.0.2, gateway 10.0.0.1; the guest prefs' /8 mask covers it)."
 echo "tap-up.sh: start Snow with: MT_ETH_LINK=tap:$dev scripts/snow.sh start"
