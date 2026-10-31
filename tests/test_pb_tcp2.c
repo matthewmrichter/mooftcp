@@ -56,6 +56,7 @@ static void peer_close_closing_after_data_read(void) {
     st = pbt_pb(TCPStatus, s);
     T_EQ(pbt_call(&x, st), 0);
     T_EQ(st->csParam.status.amtUnreadData, 17);           /* matrix 601: 17 unread */
+    T_EQ(st->csParam.status.connectionState, ConnectionStateEstablished);   /* matrix 601: 8 until read */
     r = pbt_rcv(&x, s, 100, 0);                           /* drains: completes 0, then TCPClosing */
     T_EQ(r->ioResult, 0);                                 /* matrix 601: rcv1 0, n1 17 */
     T_EQ(r->csParam.receive.rcvBuffLen, 17);

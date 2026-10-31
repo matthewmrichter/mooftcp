@@ -735,6 +735,10 @@ static int16_t do_status(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     p->tosFlags = (int8_t)s->tos;
     p->precedence = (int8_t)s->prec;
     p->connectionState = (int8_t)(in.state * 2);               /* MacTCP numbering (ref) */
+    /* Matrix 601/606: after the peer's FIN MacTCP keeps reporting Established (8) until the app has read
+     * the data (then CloseWait 14, with TCPClosing). NCSA Telnet's FTP server ends a download as soon as it
+     * sees a state other than 8, and so lost the last 6 KB of a 1 MiB upload (Task 13, TAP). */
+    if (in.state == MT_TCP_CLOSE_WAIT && in.rcv_avail > s->lent) p->connectionState = ConnectionStateEstablished;
     p->sendWindow = (uint16_t)(in.snd_wnd > 65535u ? 65535u : in.snd_wnd);
     p->rcvWindow = (uint16_t)(in.rcv_wnd > 65535u ? 65535u : in.rcv_wnd);
     p->amtUnackedData = (uint16_t)(unacked > 65535u ? 65535u : unacked);
