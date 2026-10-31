@@ -83,6 +83,7 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
     }
 
     mt_enet_ph_set_ctx(gate);
+    gate->open = 1;          /* a failed earlier open closed it (mt_enet_close); final review fix 4 */
     r = attach(e, 0x0806);
     if (r == 0) {
         e->attached |= 1;
