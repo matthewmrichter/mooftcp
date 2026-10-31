@@ -70,6 +70,7 @@ void mt_enet_link_reset(MtEnet *e)
     e->opened = 0;
     e->reattach_req = 0;
     e->reattach_tries = 0;
+    e->blocked_tries = 0;
     /* tx[], tx_started, wd_* and the counters stay: the driver may still own PBs in tx[] */
 }
 
@@ -105,11 +106,6 @@ void mt_enet_watchdog(MtEnet *e, uint32_t now)
     }
 }
 
-static int blocked(const MtEnet *e)
-{
-    return mt_os_enet_blocked(e->refnum, &e->tx[0], &e->tx[MT_ENET_TXSLOTS]);
-}
-
 void mt_enet_service(MtEnet *e, uint32_t now)
 {
     int16_t r;
@@ -118,14 +114,27 @@ void mt_enet_service(MtEnet *e, uint32_t now)
         e->tx_killed++;
         r = mt_os_enet_kill(e->refnum, NULL);
         if (r) e->last_err = r;
+        if (e->reattach_req) { e->reattach_at = now + MT_ENET_TX_STUCK_MS; return; }   /* let the kill work */
     }
     if (!e->reattach_req || (int32_t)(now - e->reattach_at) < 0) return;
-    if (blocked(e)) {
-        e->reattach_blocked++;
-        r = MT_ENET_E_BUSY;
-    } else {
-        r = (int16_t)mt_enet_reattach_io(e);
+    if (e->opened && !mt_enet_tx_quarantined(e)) {      /* the kill (or the driver) freed them: nothing to repair */
+        e->reattach_req = 0;
+        e->reattach_tries = 0;
+        e->blocked_tries = 0;
+        return;
     }
+    if (mt_os_enet_blocked(e->refnum)) {                /* a sync call would wait behind the head request */
+        e->reattach_blocked++;
+        e->reattach_at = now + MT_ENET_BLOCKED_RETRY_MS;
+        if (++e->blocked_tries >= MT_ENET_BLOCKED_TRIES && e->opened) {
+            e->reattach_req = 0;                        /* link intact: give up for now */
+            e->reattach_abandoned++;
+            e->blocked_tries = 0;
+        }
+        return;
+    }
+    e->blocked_tries = 0;
+    r = (int16_t)mt_enet_reattach_io(e);
     if (r == 0) {
         e->reattach++;
         e->reattach_req = 0;
@@ -134,10 +143,11 @@ void mt_enet_service(MtEnet *e, uint32_t now)
     }
     e->last_err = r;
     e->reattach_fail++;
-    if (++e->reattach_tries >= MT_ENET_REATTACH_TRIES) {
-        e->reattach_req = 0;                     /* abandoned: link stays as it is */
-        e->reattach_abandoned++;
-        return;
+    if (e->reattach_tries < 255) e->reattach_tries++;
+    {
+        uint32_t d = e->reattach_tries > 4u ? MT_ENET_REATTACH_BACKOFF_MAX_MS
+                                            : (MT_ENET_REATTACH_BACKOFF_MS << (e->reattach_tries - 1u));
+        if (d > MT_ENET_REATTACH_BACKOFF_MAX_MS) d = MT_ENET_REATTACH_BACKOFF_MAX_MS;
+        e->reattach_at = now + d;                       /* opened is 0 now: kept trying, from Control entries */
     }
-    e->reattach_at = now + (MT_ENET_REATTACH_BACKOFF_MS << (e->reattach_tries - 1));
 }

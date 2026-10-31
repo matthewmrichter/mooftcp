@@ -76,14 +76,15 @@ typedef struct MtEnet {
     int16_t   last_err;          /* last nonzero Device Manager result */
     uint32_t  tx_ok, tx_pad, tx_drop_busy, tx_drop_len, tx_drop_closed, tx_err;
     uint32_t  tx_stuck, tx_killed, reattach, reattach_fail;   /* watchdog (Plan 3 Task 5) */
-    uint32_t  reattach_blocked, reattach_abandoned;   /* sync call skipped (our PB at the head) / gave up */
+    uint32_t  reattach_blocked, reattach_abandoned;   /* sync call skipped (a request heads .ENET0's queue) / gave up */
     uint32_t  reattach_at;       /* ms: earliest next attempt */
     uint32_t  wd_next;           /* ms: next scan */
     uint8_t   tx_started;        /* slots with started != 0 (0: the watchdog returns at once) */
     uint8_t   wd_fresh;          /* a write started: scan at the next call */
     uint8_t   kill_req;          /* the watchdog asked for a KillIO (performed at task time) */
     uint8_t   reattach_req;      /* the watchdog asked; mt_enet_service performs it at task time */
-    uint8_t   reattach_tries;    /* failed attempts of the current request */
+    uint8_t   reattach_tries;    /* failed detach/attach attempts of the current request */
+    uint8_t   blocked_tries;     /* attempts skipped because a request headed the driver's queue */
     MtEnetTx  tx[MT_ENET_TXSLOTS];
 } MtEnet;
 
@@ -110,16 +111,22 @@ int  mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len);
  * MT_ENET_TX_STUCK_MS it is counted (tx_stuck) and kill_req is set; after another
  * MT_ENET_TX_STUCK_MS it is quarantined and reattach_req is set. mt_enet_service(e, now) performs
  * the requests and must be called at task time only, gate owned, never from the goodbye call:
- * PBKillIO once (tx_killed; its OSErr goes to last_err), then the reattach (EDetachPH, EAttachPH
- * only: no CloseDriver/OpenDriver) with time backoff MT_ENET_REATTACH_BACKOFF_MS * 2^n for at most
- * MT_ENET_REATTACH_TRIES attempts, then it is abandoned (reattach_abandoned). Before any synchronous
- * call to .ENET0 mt_os_enet_blocked() is asked: if one of our transmit PBs is the head of the
- * driver's queue the call would wait behind it forever, so it is skipped (reattach_blocked) and
- * counted as a failed attempt. Idle cost: tx_started == 0 -> one compare and return. */
+ * PBKillIO once (tx_killed; its OSErr goes to last_err; it aborts EVERY pending request on .ENET0,
+ * other clients' too), then the reattach MT_ENET_TX_STUCK_MS later (the kill needs time to work; if all
+ * quarantined slots completed meanwhile and the link is intact the reattach is cancelled). The reattach
+ * is EDetachPH, EAttachPH only (no CloseDriver/OpenDriver) with time backoff 1 s, 2 s, 4 s, 8 s (cap)
+ * between failed attempts. A failed attach leaves opened = 0 and is retried forever at the cap rate from
+ * Control entries (OpenDriver(".IPP") does not re-run: the driver stays open). Before any synchronous
+ * call to .ENET0 mt_os_enet_blocked() is asked: if ANY request heads the driver's queue the call could
+ * wait behind a wedged one, so it is skipped (reattach_blocked) and retried every
+ * MT_ENET_BLOCKED_RETRY_MS; blocked skips do not count as detach attempts, and after
+ * MT_ENET_BLOCKED_TRIES of them an intact link (opened) gives up (reattach_abandoned).  Idle cost: tx_started == 0 -> one compare and return. */
 #define MT_ENET_TX_STUCK_MS 2000u
 #define MT_ENET_WD_SCAN_MS  100u       /* scan period while a slot is started */
 #define MT_ENET_REATTACH_BACKOFF_MS 1000u
-#define MT_ENET_REATTACH_TRIES 4u
+#define MT_ENET_REATTACH_BACKOFF_MAX_MS 8000u
+#define MT_ENET_BLOCKED_RETRY_MS 500u
+#define MT_ENET_BLOCKED_TRIES 16u   /* skipped attempts before an intact link (opened) gives up */
 #define MT_ENET_E_BUSY (-2000)         /* mt_enet_open: our PB heads the driver's queue; try later */
 void mt_enet_watchdog(MtEnet *e, uint32_t now_ms);
 void mt_enet_service(MtEnet *e, uint32_t now_ms);
@@ -136,9 +143,9 @@ uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d);
 MtEnetTx *mt_enet_tx_claim(MtEnet *e);
 /* Slots whose PB is still in flight after a reattach was asked (quarantined). */
 int  mt_enet_tx_quarantined(const MtEnet *e);
-/* Nonzero when one of our transmit PBs is the active/head request of .ENET0 (a synchronous call
- * would hang behind it). Mac: reads the DCE (dCtlQHdr.qHead); host: faked. */
-int  mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi);
+/* Nonzero when ANY request (ours or another client's) is queued/active at .ENET0 (a synchronous
+ * call would wait behind it; a healthy queue drains in milliseconds). Mac: reads the DCE (dCtlQHdr.qHead); host: faked. */
+int  mt_os_enet_blocked(int16_t refnum);
 
 /* Detach the handlers and close. Transmits in flight finish on their own; the MtEnet must stay
  * allocated until their ioResult is not 1 (mt_enet_tx_busy() == 0). */

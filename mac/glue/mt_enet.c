@@ -5,7 +5,7 @@
 #include "mt_enet.h"
 /* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
-int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi);
+int mt_os_enet_blocked(int16_t refnum);
 
 enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
 
@@ -65,7 +65,7 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
     int16_t r = MT_ENET_E_NODRIVER;
     int i;
 
-    if (e->refnum && mt_os_enet_blocked(e->refnum, &e->tx[0], &e->tx[MT_ENET_TXSLOTS]))
+    if (e->refnum && mt_os_enet_blocked(e->refnum))
         return MT_ENET_E_BUSY;                   /* a re-open behind our stuck PB would hang */
     mt_enet_link_reset(e);                       /* keeps tx[]: the driver may still own PBs there */
     for (i = 0; i < 2 && r != 0; i++) r = (int16_t)OpenDriver(names[i], &ref);
@@ -151,20 +151,20 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb)
 }
 
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory globals */
-/* The DCE of .ENET0: is one of our transmit PBs the head (active) request of its queue? */
-int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi)
+/* The DCE of .ENET0: is ANY request (ours or another client's) at the head of its queue? */
+int mt_os_enet_blocked(int16_t refnum)
 {
     /* UTableBase (0x11C) -> DCtlHandle[~refnum]; DCE: dCtlQHdr at 6 = qFlags(2) qHead(4) qTail(4) */
     const uint8_t *const *const *tab = *(const uint8_t *const *const *const *)0x11C;
     int16_t unit = (int16_t)~refnum;
     const uint8_t *const *h;
     const uint8_t *dce;
-    uint32_t head, l = (uint32_t)(uintptr_t)lo & 0x00FFFFFFu, u = (uint32_t)(uintptr_t)hi & 0x00FFFFFFu;
+    uint32_t head;
     if (!tab || unit < 0 || unit >= *(volatile const int16_t *)0x1D2) return 0;
     h = (const uint8_t *const *)tab[unit];
     if (!h || !(dce = *h)) return 0;
     head = ((uint32_t)dce[8] << 24 | (uint32_t)dce[9] << 16 | (uint32_t)dce[10] << 8 | dce[11]) & 0x00FFFFFFu;
-    return head && head >= l && head < u;
+    return head != 0;                            /* any request queued/active: a sync call waits behind it */
 }
 
 /* Detach both handlers, attach both again (task time, gate owned by the caller). No CloseDriver /

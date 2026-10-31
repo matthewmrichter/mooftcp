@@ -183,10 +183,10 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb) {
 
 const void *pbf_dev_head;                /* head of .ENET0's queue (NULL = idle) */
 int pbf_blocked_calls;
-int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi) {
+int mt_os_enet_blocked(int16_t refnum) {
     (void)refnum;
     pbf_blocked_calls++;
-    return pbf_dev_head && pbf_dev_head >= lo && pbf_dev_head < hi;
+    return pbf_dev_head != NULL;                 /* any request at the head blocks */
 }
 
 int pbf_reattach_calls;
