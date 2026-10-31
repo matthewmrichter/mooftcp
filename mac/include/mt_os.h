@@ -67,6 +67,10 @@ typedef struct MtStreamAsr {
 /* Monotonic milliseconds (wraps at 2^32); the one clock every glue entry uses. */
 uint32_t mt_os_ms(void);
 
+/* The Toolbox tick count (low-memory Ticks, 60 Hz): for values an app compares with TickCount(),
+ * e.g. ICMPEcho's echoRequestOut/echoReplyIn. */
+uint32_t mt_os_ticks(void);
+
 /* The A5 world of the application making the current call (the Mac reads CurrentA5, low memory
  * 0x904). The glue records it when a stream is created and mt_os_asr runs the stream's ASR with
  * that A5 (an ASR can run from the timer or the network input path, where A5 is whatever was

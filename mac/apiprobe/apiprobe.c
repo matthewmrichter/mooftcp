@@ -140,6 +140,7 @@ static int slot_idx(const void *p)
 static short pbres(const Slot *s) { return *(volatile const int16_t *)&s->raw[16]; }
 
 int32_t g_n_res, g_n_out, g_n_in; uint16_t g_n_len; uint32_t g_n_calls;   /* ICMP notify snapshot */
+uint32_t g_n_user, g_n_opt, g_n_ptrrel; uint8_t g_n_head[8];   /* Task 12: icmpEchoInfo.userDataPtr, options, data */
 
 void compl_c(void *a0, void *stk)
 {
@@ -152,6 +153,14 @@ void compl_c(void *a0, void *stk)
             g_n_out = (int32_t)*(const uint32_t *)(q + 50);
             g_n_in = (int32_t)*(const uint32_t *)(q + 54);
             g_n_len = *(const uint16_t *)(q + 58);
+            g_n_opt = *(const uint32_t *)(q + 64);
+            g_n_user = *(const uint32_t *)(q + 68);       /* icmpEchoInfo.userDataPtr */
+            {
+                const uint8_t *dp = (const uint8_t *)(uintptr_t)*(const uint32_t *)(q + 60);
+                int j;
+                g_n_ptrrel = dp ? (uint32_t)(dp - q) : 0;   /* echoedData.ptr relative to the block */
+                for (j = 0; j < 8; j++) g_n_head[j] = dp && g_n_len > j ? dp[j] : 0;
+            }
             g_n_calls++;
         }
     }
@@ -1324,6 +1333,7 @@ static void c_icmp(int async)
         s->p.csParam.IPEchoPB.data.length = 32; s->p.csParam.IPEchoPB.data.ptr = P32(data);
         s->p.csParam.IPEchoPB.timeout = 3;
         s->p.csParam.IPEchoPB.icmpCompletion = ICMP_PROC;
+        s->p.csParam.IPEchoPB.userDataPtr = 0x55AA0000UL + (uint32_t)i;   /* Task 12: where does it reappear? */
         note(t[i].id, "about to call ICMPEcho (a crash here leaves this line last)");
         t0 = (long)os_ticks();
         r = run(s, async, TK(15));
@@ -1339,7 +1349,16 @@ static void c_icmp(int async)
             kt("notifyWait", (long)os_ticks() - tw); kv("notifyCalls", nc - (async ? 1 : 0));
         }
         kh("notifyPBisOurs", slot_idx((void *)(uintptr_t)g_c_a0) >= 0);
-        if (g_n_calls) { kv("nRes", g_n_res); kt("nOut", g_n_out); kt("nIn", g_n_in); kv("nLen", g_n_len); }
+        if (g_n_calls) {
+            kv("nRes", g_n_res); kt("nOut", g_n_out); kt("nIn", g_n_in); kv("nLen", g_n_len);
+            kh("nUser", (long)g_n_user); kh("nOpt", (long)g_n_opt); kh("nPtrRel", (long)g_n_ptrrel);
+            kh("nHead", (long)(((uint32_t)g_n_head[0] << 24) | ((uint32_t)g_n_head[1] << 16) |
+                               ((uint32_t)g_n_head[2] << 8) | g_n_head[3]));
+            kh("nHead4", (long)(((uint32_t)g_n_head[4] << 24) | ((uint32_t)g_n_head[5] << 16) |
+                                ((uint32_t)g_n_head[6] << 8) | g_n_head[7]));
+            kh("nOutRaw", (long)g_n_out); kh("nowTicks", (long)os_ticks());
+        }
+        g_n_user = 0; g_n_opt = 0; g_n_ptrrel = 0; memset(g_n_head, 0, sizeof g_n_head);
         g_n_calls = 0; g_n_res = 0; g_n_out = 0; g_n_in = 0; g_n_len = 0;
         kv("resNow", pbres(s));
         kt("echoOut", (long)s->i.icmpEchoInfo.echoRequestOut); kt("echoIn", (long)s->i.icmpEchoInfo.echoReplyIn);

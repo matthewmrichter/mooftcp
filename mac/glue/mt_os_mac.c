@@ -26,6 +26,11 @@ uint32_t mt_os_ms(void)
     return mt_ms_from_ticks(*(volatile const uint32_t *)0x16A);      /* low-memory Ticks */
 }
 
+uint32_t mt_os_ticks(void)
+{
+    return *(volatile const uint32_t *)0x16A;
+}
+
 int mt_os_irq_save(void)
 {
     if (g_gate) mt_gate_enter(g_gate);

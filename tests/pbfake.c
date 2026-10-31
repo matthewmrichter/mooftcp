@@ -72,6 +72,7 @@ void *pbf_p(MacPtr32 a) {
 /* ---- mt_os.h ---- */
 
 uint32_t mt_os_ms(void) { return pbf_now; }
+uint32_t mt_os_ticks(void) { return pbf_now / 50u * 3u + (pbf_now % 50u) * 3u / 50u; }   /* 60 Hz */
 MacPtr32 mt_os_a5(void) { return pbf_a5; }
 void *mt_os_ptr(MacPtr32 a) { return pbf_p(a); }
 MacPtr32 mt_os_addr(const void *p) { return pbf_a(p); }

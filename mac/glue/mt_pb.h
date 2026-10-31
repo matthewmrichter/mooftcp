@@ -162,7 +162,8 @@ typedef struct MtUdpStream {
  * gets (matrix "ICMP echo notify"); the app's PB itself completed 0 when the request was sent. */
 typedef struct MtEcho {
     ICMPParamBlock blk;
-    uint32_t dl, t0, dest;      /* absolute ms deadline, ms at the request, target address */
+    uint32_t dl, dest;          /* absolute ms deadline, target address */
+    uint32_t tk0, user;         /* Ticks at the request; the request's IPEchoPB.userDataPtr */
     uint16_t id, seq;
     uint8_t  state;             /* 0 free, 1 waiting, 2 notifying (slot not reusable yet) */
 } MtEcho;
@@ -203,12 +204,13 @@ struct MtDrv {
     MtDnsSlot dns[MT_PB_DNS];
     uint32_t  dead_pb[4];       /* DNR lookups cancelled while queued in the entry (mt_pb_dns.c) */
     uint16_t  dead_gen[4];
-    uint8_t   dead_n;
-    uint8_t   echo_data[MT_PB_ECHO_DATA];   /* reply payload lent to the notify block */
+    uint8_t   echo_data[MT_PB_ECHO_DATA];   /* reply payload lent to the notify block (even address:
+                                             * apps read it by words, ApiProbe A00 nPtrRel, Task 12) */
     uint8_t   ubuf[MT_PB_UDP_GATHER];       /* gathers a multi-entry UDPWrite */
     uint8_t   lap_mac[8];       /* LAPStats.ifPhysicalAddress */
     uint8_t   lap_if[12];       /* LAPStats.ifString: Pascal string, NUL terminated (a guess) */
     arp_entry arp[ARP_TABLE_SIZE];   /* LAPStats.AddrXlation: all zero (not mirrored from the core) */
+    uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
 };
 
 /* Bytes needed for the MtDrv plus the core arena for `lim`. */

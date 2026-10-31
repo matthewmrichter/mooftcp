@@ -5,8 +5,10 @@
  * which for an unresolved host is after the ARP wait; ours does not wait). The real outcome comes
  * through the PB's icmpCompletion routine, called like an ioCompletion routine (mt_os_complete)
  * with the driver's OWN copy of the block (MtEcho.blk): ioResult 0 for a reply, -23035 when no
- * reply came within `timeout` seconds; icmpEchoInfo holds the request and reply times in ticks
- * (1/60 s; 0 reply time for a timeout) and echoedData the first MT_PB_ECHO_DATA reply bytes.
+ * reply came within `timeout` seconds; icmpEchoInfo holds the request and reply times as Toolbox
+ * Ticks (TickCount values, as MacTCP; 0 reply time for a timeout), echoedData the first
+ * MT_PB_ECHO_DATA reply bytes and userDataPtr the request's IPEchoPB.userDataPtr (MacTCP copies it
+ * there, ApiProbe A00-A03 nUser; MacTCP Watcher finds its ping record through it, Task 12).
  * The slot stays reserved while the routine runs, so the routine may issue another ICMPEcho.
  * Replies are matched on (id, seq, source address); id carries the slot, seq a driver counter. */
 #include <string.h>
@@ -16,15 +18,11 @@
 #define ECHO_WAIT 1
 #define ECHO_NOTIFY 2
 
-/* Milliseconds -> ticks (60 Hz): floor(ms * 3 / 50) without overflowing 32 bits. */
-static uint32_t ms_ticks(uint32_t ms) { return ms / 50u * 3u + (ms % 50u) * 3u / 50u; }
-
 static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 
 /* ---- ICMPEcho ---- */
 
-static void notify(MtDrv *d, MtEcho *e, int16_t err, uint32_t reply_ms, const uint8_t *data,
-                   uint16_t len) {
+static void notify(MtDrv *d, MtEcho *e, int16_t err, const uint8_t *data, uint16_t len) {
     ICMPEchoInfo *info = &e->blk.icmpEchoInfo;
     MacPtr32 proc = e->blk.ioCompletion;      /* the app's icmpCompletion (copied at the request) */
     e->state = ECHO_NOTIFY;
@@ -32,8 +30,9 @@ static void notify(MtDrv *d, MtEcho *e, int16_t err, uint32_t reply_ms, const ui
         e->state = 0;
         return;
     }
-    info->echoRequestOut = ms_ticks(e->t0);
-    info->echoReplyIn = err == 0 ? ms_ticks(reply_ms) : 0;
+    info->echoRequestOut = e->tk0;
+    info->echoReplyIn = err == 0 ? mt_os_ticks() : 0;
+    info->userDataPtr = e->user;
     info->echoedData.length = 0;
     info->echoedData.ptr = 0;
     info->options = 0;
@@ -51,10 +50,11 @@ static void echo_cb(void *user, mt_ip4 from, uint16_t id, uint16_t seq, const ui
                     uint16_t len, uint32_t now) {
     MtDrv *d = (MtDrv *)user;
     uint8_t i;
+    (void)now;                                   /* the reply time is taken as Ticks in notify() */
     for (i = 0; i < MT_PB_ECHOQ; i++) {
         MtEcho *e = &d->echo[i];
         if (e->state == ECHO_WAIT && e->id == id && e->seq == seq && e->dest == from) {
-            notify(d, e, 0, now, data, len);
+            notify(d, e, 0, data, len);
             return;
         }
     }
@@ -87,7 +87,8 @@ static int16_t do_echo(MtDrv *d, MtAnyPb *pb) {
     e->id = (uint16_t)(0x4D00u + i);
     e->seq = d->echo_seq;
     e->dest = dest;
-    e->t0 = d->now;
+    e->tk0 = mt_os_ticks();
+    e->user = pb->ip.csParam.IPEchoPB.userDataPtr;
     e->dl = d->now + (tmo > 0 ? (uint32_t)tmo : (uint32_t)MT_PB_ECHO_TMO_S) * 1000u;
     e->state = ECHO_WAIT;
     return 0;                                                /* matrix A00: our PB completes 0 */
@@ -98,7 +99,7 @@ void mt_pb_ip_timers(MtDrv *d) {
     for (i = 0; i < MT_PB_ECHOQ;) {
         MtEcho *e = &d->echo[i];
         if (e->state == ECHO_WAIT && due(e->dl, d->now)) {
-            notify(d, e, icmpEchoTimeoutErr, 0, NULL, 0);    /* matrix A02, A03: -23035 */
+            notify(d, e, icmpEchoTimeoutErr, NULL, 0);    /* matrix A02, A03: -23035 */
             i = 0;                                           /* the routine may have changed anything */
         } else {
             i++;

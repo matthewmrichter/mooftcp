@@ -93,6 +93,7 @@ static void echo_icmp_roundtrip_and_timeout(void) {
     for (i = 0; i < 32; i++) payload[i] = (uint8_t)(0x40 + i);
     fake_clear(&x.fl);
     pb = echo_pb(&x, T_PEER, payload, 32, 3, 1);
+    pb->csParam.IPEchoPB.userDataPtr = 0x55AA0000u;       /* Task 12: MacTCP hands it back in the notify */
     T_EQ(icall(&x, pb), 0);                               /* matrix A00: our PB completes 0 once sent */
     T_EQ(pb->ioResult, 0);
     T_EQ(g_nt.n, 0);                                      /* the notify comes with the reply */
@@ -106,9 +107,11 @@ static void echo_icmp_roundtrip_and_timeout(void) {
     T_EQ(g_nt.n, 1);
     T_EQ(g_nt.res[0], 0);                                 /* matrix A00: notify ioResult 0 */
     T_CHECK(g_nt.pbaddr[0] != pbf_a(pb));                 /* the driver's own block, not our PB */
-    T_EQ(g_nt.blk[0].icmpEchoInfo.echoRequestOut, 60);    /* ticks: 1000 ms -> 60 */
+    T_EQ(g_nt.blk[0].icmpEchoInfo.echoRequestOut, 60);    /* Ticks (mt_os_ticks): 1000 ms -> 60 */
     T_EQ(g_nt.blk[0].icmpEchoInfo.echoReplyIn, 67);       /* 1120 ms -> 67 */
+    T_EQ(g_nt.blk[0].icmpEchoInfo.userDataPtr, 0x55AA0000u);   /* matrix A00 nUser (Task 12) */
     T_EQ(g_nt.blk[0].icmpEchoInfo.echoedData.length, 32);
+    T_EQ(g_nt.blk[0].icmpEchoInfo.echoedData.ptr & 1u, 0);     /* even, as MacTCP's (Task 12) */
     T_MEMEQ(g_nt.data[0], payload, 32);
     T_EQ(pbf_count('C'), 2);                              /* our PB, then the notify */
     T_EQ(mt_pb_ip_deadline(x.d), MT_NO_DEADLINE);         /* nothing left waiting */
@@ -118,6 +121,7 @@ static void echo_icmp_roundtrip_and_timeout(void) {
     /* no reply: -23035 after the timeout (matrix A02, A03) */
     fake_clear(&x.fl);
     pb = echo_pb(&x, T_PEER, payload, 8, 2, 1);
+    pb->csParam.IPEchoPB.userDataPtr = 0x55AA0002u;
     T_EQ(icall(&x, pb), 0);
     n = last_echo_req(&x, &dst, &id2, &seq2, back);
     T_EQ(n, 8);
@@ -133,7 +137,8 @@ static void echo_icmp_roundtrip_and_timeout(void) {
     T_EQ(g_nt.n, 2);
     T_EQ(g_nt.res[1], icmpEchoTimeoutErr);                /* matrix A02/A03: -23035 */
     T_EQ(g_nt.blk[1].icmpEchoInfo.echoReplyIn, 0);
-    T_EQ(pb->ioResult, 0);                                /* our PB stays as it was completed */
+    T_EQ(g_nt.blk[1].icmpEchoInfo.userDataPtr, 0x55AA0002u);   /* also on a timeout (matrix A02 nUser) */
+    T_EQ(pb->ioResult, 0);                               /* our PB stays as it was completed */
     pbt_echo_reply(&x, T_PEER, id2, seq2, payload, 8);    /* a late reply does nothing */
     T_EQ(g_nt.n, 2);
     T_EQ(pbf_bad, 0);
