@@ -65,9 +65,11 @@ volatile int g_inpoll;
 
 /* Case 509: a reader that re-issues a 1-byte TCPRcv from its completion routine. */
 static void *volatile g_chain;      /* the Slot being chained (Slot is defined below) */
-static volatile int g_ch_n, g_ch_depth, g_ch_max, g_ch_bad, g_ch_end;
+static volatile long g_ch_n, g_ch_target;
+static volatile int g_ch_depth, g_ch_max, g_ch_bad, g_ch_end, g_ch_calls;
 static volatile short g_ch_last;
-static char g_chbuf[4];
+static volatile unsigned short g_ch_len;
+static char g_chbuf[4096];
 static void chain_step(void);
 
 extern void compl_stub(void);
@@ -986,18 +988,23 @@ static void c_remote_close(int async)
     emit(TCPClose, r);
 }
 
-/* 509: chained 1-byte reads over the 5000-byte burst (A..Z). Each completion re-issues the
- * read; maxDepth is how deeply completions nest (MoofTCP serves inline reads at most 3 deep, the
- * rest from its tick: final review fix 2). */
+/* 509 / 510: a reader that re-issues its TCPRcv from the completion routine. Data is the A..Z
+ * pattern (burst server; 510 echoes our own A..Z). maxDepth is how deeply completions nest:
+ * MoofTCP serves inline at most 3 deep (MT_PB_INLINE_MAX) and defers the rest (final review). */
 static void chain_step(void)
 {
     Slot *s = (Slot *)g_chain;
     g_ch_depth++;
+    g_ch_calls++;
     if (g_ch_depth > g_ch_max) g_ch_max = g_ch_depth;
-    if (s->t.ioResult == 0 && s->t.csParam.receive.rcvBuffLen == 1) {
-        if (g_chbuf[0] != (char)(65 + g_ch_n % 26)) g_ch_bad++;
-        g_ch_n++;
-        s->t.csParam.receive.rcvBuffLen = 1;
+    if (s->t.ioResult == 0) {
+        unsigned short n = s->t.csParam.receive.rcvBuffLen, k;
+        for (k = 0; k < n; k++)
+            if (g_chbuf[k] != (char)(65 + (g_ch_n + k) % 26)) g_ch_bad++;
+        g_ch_n += n;
+    }
+    if (s->t.ioResult == 0 && (!g_ch_target || g_ch_n < g_ch_target)) {
+        s->t.csParam.receive.rcvBuffLen = g_ch_len;
         s->t.ioResult = 1;
         (void)os_control_async(s);
     } else {
@@ -1007,23 +1014,57 @@ static void chain_step(void)
     g_ch_depth--;
 }
 
+static void chain_start(Slot *s, StreamPtr sp, unsigned short len, long target)
+{
+    g_ch_n = 0; g_ch_target = target; g_ch_len = len;
+    g_ch_depth = g_ch_max = g_ch_bad = g_ch_end = g_ch_calls = 0; g_ch_last = 1;
+    pb_init(s, TCPRcv); s->t.tcpStream = sp;
+    s->t.csParam.receive.commandTimeoutValue = 10;
+    s->t.csParam.receive.rcvBuff = P32(g_chbuf); s->t.csParam.receive.rcvBuffLen = len;
+    g_chain = s;
+    (void)issue(s, 1);
+}
+
+static void chain_report(long t0)
+{
+    kv("n", g_ch_n); kv("calls", g_ch_calls); kv("maxDepth", g_ch_max); kv("bad", g_ch_bad);
+    kv("end", g_ch_end); kt("dt", (long)os_ticks() - t0);
+}
+
 static void c_chain_rcv(void)
 {
     Slot *s = &slots[0]; StreamPtr sp; long t0;
     BEGIN("509", "rcv_chained_1byte", 1);
     kv("open", connect_to(1, HOST, P_BURST, &sp, 1));
     delay(60);
-    g_ch_n = g_ch_depth = g_ch_max = g_ch_bad = g_ch_end = 0; g_ch_last = 1;
-    pb_init(s, TCPRcv); s->t.tcpStream = sp;
-    s->t.csParam.receive.commandTimeoutValue = 10;
-    s->t.csParam.receive.rcvBuff = P32(g_chbuf); s->t.csParam.receive.rcvBuffLen = 1;
     t0 = (long)os_ticks();
-    g_chain = s;
-    (void)issue(s, 1);
+    chain_start(s, sp, 1, 0);
     while (!g_ch_end && (long)os_ticks() - t0 < TK(40)) { }
     g_chain = 0;
-    kv("n", g_ch_n); kv("maxDepth", g_ch_max); kv("bad", g_ch_bad); kv("end", g_ch_end);
-    kt("dt", (long)os_ticks() - t0);
+    chain_report(t0);
+    kv("abort", tcall(TCPAbort, sp)); kv("rel", rel(sp));
+    emit(TCPRcv, g_ch_last);
+}
+
+/* 510: a 4 KB reader chained from its completion while 40,000 bytes come back from the echo
+ * server: each read empties the buffer, completes in the entry, and more data is there again. */
+static void c_chain_rcv_bulk(void)
+{
+    Slot *s = &slots[0], *w = &slots[1]; StreamPtr sp; long t0, i; short r;
+    BEGIN("510", "rcv_chained_4k_echo_40000", 1);
+    kv("open", connect_to(1, HOST, P_ECHO, &sp, 1));
+    for (i = 0; i < 40000; i++) big[i] = (char)(65 + i % 26);
+    t0 = (long)os_ticks();
+    chain_start(s, sp, 4096, 40000);
+    wds[0][0].length = 20000; wds[0][0].ptr = P32(big);
+    wds[0][1].length = 20000; wds[0][1].ptr = P32(big + 20000);
+    wds[0][2].length = 0; wds[0][2].ptr = 0;
+    r = snd_issue(w, sp, wds[0], 1, 1);
+    kv("sendImm", r);
+    while (!g_ch_end && (long)os_ticks() - t0 < TK(40)) { }
+    g_chain = 0;
+    chain_report(t0);
+    kv("send", waitdone(w, TK(10)));
     kv("abort", tcall(TCPAbort, sp)); kv("rel", rel(sp));
     emit(TCPRcv, g_ch_last);
 }
@@ -1655,6 +1696,7 @@ int main(void)
         both(c_remote_close);
         both(c_abort);
         c_chain_rcv();
+        c_chain_rcv_bulk();
     }
     if (grp(5)) {
         note("G5", "release, remote reset, burst, passive open");
