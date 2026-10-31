@@ -612,6 +612,151 @@ static void chained_one_byte_reader_is_bounded(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* ---- re-review: the entry's own inline completion is bounded too ----
+ * A 4 KB reader empties the receive buffer with every read, so each read completes inline in the
+ * entry (result 0). The read's window update goes out through link.tx; the "driver" then delivers
+ * the next segment synchronously, and the gate's outermost leave runs it before the entry's
+ * completion: the app finds data again on every re-issue. */
+#define BIG_CHUNK 2920              /* two full segments: a 4 KB window drops below an MSS */
+#define BIG_N     12
+static uint8_t g_big[BIG_CHUNK * BIG_N], g_bigout[BIG_CHUNK * BIG_N];
+static uint32_t g_bin, g_bout;
+static int g_barmed, g_bhook, g_bdepth, g_bmax, g_bcompl, g_bissued, g_bbad;
+static pbt_conn g_bc;
+static mt_tcp *g_bt;                                     /* the reader's core TCB */
+static int big_empty(void) {
+    mt_tcp_info in;
+    mt_tcp_get_info(g_bt, &in);
+    return in.rcv_avail == 0;
+}
+static void big_tx(void) { g_barmed = 1; }
+static void big_inject(void) {
+    int was = g_bhook;
+    g_bhook = 1;                              /* no injection from inside an injection */
+    pbt_peer(&g_x, g_bc.lport, g_bc.ps + g_bin, g_bc.ms, TF_ACK, 8192, g_big + g_bin, 1460);
+    pbt_peer(&g_x, g_bc.lport, g_bc.ps + g_bin + 1460, g_bc.ms, TF_ACK | TF_PSH, 8192, g_big + g_bin + 1460, 1460);
+    g_bin += BIG_CHUNK;
+    g_bhook = was;
+}
+static void big_leave(void) {
+    if (!g_barmed || g_bhook || g_bin >= sizeof g_big) return;
+    if (!big_empty()) return;                 /* the next segments come after a read emptied it */
+    g_barmed = 0;
+    big_inject();
+}
+static void big_reader(MtAnyPb *pb) {
+    uint16_t n = pb->tcp.csParam.receive.rcvBuffLen;
+    g_bdepth++;
+    if (g_bdepth > g_bmax) g_bmax = g_bdepth;
+    g_bcompl++;
+    if (pb->hdr.ioResult != 0 || g_bout + n > sizeof g_bigout) g_bbad++;
+    else {
+        memcpy(g_bigout + g_bout, pbf_p(pb->tcp.csParam.receive.rcvBuff), n);
+        g_bout += n;
+    }
+    if (g_bout < sizeof g_bigout) {                       /* re-issue from the completion */
+        pb->tcp.csParam.receive.rcvBuffLen = 4096;
+        g_bissued++;
+        (void)mt_entry_control(&g_e, pb, TRAP_ASYNC, 0);
+    }
+    g_bdepth--;
+}
+
+static void chained_buffer_emptying_reader_is_bounded(void) {
+    TCPiopb *pb;
+    StreamPtr s;
+    unsigned i;
+    int loops = 0;
+    entry_setup();
+    s = pbt_create(&g_x, 4096, pbf_asr(asr_nop), 0);     /* MacTCP's minimum buffer */
+    T_EQ(pbt_connect(&g_x, s, &g_bc), 0);
+    for (i = 0; i < g_x.d->ntcp; i++) if (g_x.d->tcp[i].handle == s) g_bt = g_x.d->tcp[i].t;
+    for (i = 0; i < sizeof g_big; i++) g_big[i] = (uint8_t)(i * 13 + i / 977);
+    g_bin = g_bout = 0;
+    g_barmed = g_bhook = g_bdepth = g_bmax = g_bcompl = g_bbad = 0;
+    big_inject();                                         /* data waiting for the first read */
+    fake_tx_hook = big_tx;
+    pbf_leave_hook = big_leave;
+    pb = pbt_pb(TCPRcv, s);
+    pb->ioCompletion = pbf_compl(big_reader);
+    pb->csParam.receive.rcvBuff = pbf_a(pbf_alloc(4096));
+    pb->csParam.receive.rcvBuffLen = 4096;
+    g_bissued = 1;
+    (void)mt_entry_control(&g_e, (MtAnyPb *)pb, TRAP_ASYNC, 0);
+    while (g_bout < sizeof g_bigout && loops++ < 200) {  /* if the chain ever waits for data */
+        if (g_bin < sizeof g_big && big_empty()) big_inject();
+        mt_pb_tick(g_x.d);
+        mt_entry_drain(&g_e);
+    }
+    fake_tx_hook = NULL;
+    pbf_leave_hook = NULL;
+    T_EQ(g_bout, sizeof g_bigout);
+    T_CHECK(memcmp(g_bigout, g_big, sizeof g_big) == 0);  /* every byte, in order */
+    T_EQ(g_bbad, 0);
+    T_EQ(g_bcompl, g_bissued);                            /* each completion exactly once */
+    T_CHECK(g_bmax <= MT_PB_INLINE_MAX + 1);
+    T_CHECK(g_bmax >= MT_PB_INLINE_MAX);                  /* the scenario did chain to the limit
+                                                             (old code: one level per round) */
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* The entry's own deferral: any call that completes inline (TCPStatus here), re-issued from its
+ * completion 20 times, nests at most MT_PB_INLINE_MAX deep; deferred completions run from the
+ * outermost frame, each exactly once (one PB re-issued: the order is the issue order). */
+static int g_sdepth, g_smax, g_sn, g_sbad;
+static void status_chain(MtAnyPb *pb) {
+    g_sdepth++;
+    if (g_sdepth > g_smax) g_smax = g_sdepth;
+    if (pb->hdr.ioResult != 0) g_sbad++;
+    if (++g_sn < 20) (void)mt_entry_control(&g_e, pb, TRAP_ASYNC, 0);   /* re-issue the same PB */
+    g_sdepth--;
+}
+
+static void entry_inline_completions_are_bounded(void) {
+    pbt_conn c;
+    StreamPtr s;
+    TCPiopb *pb;
+    entry_setup();
+    s = pbt_est(&g_x, pbf_asr(asr_nop), 0x55, &c);
+    g_sdepth = g_smax = g_sn = g_sbad = 0;
+    pb = pbt_pb(TCPStatus, s);
+    pb->ioCompletion = pbf_compl(status_chain);
+    (void)mt_entry_control(&g_e, (MtAnyPb *)pb, TRAP_ASYNC, 0);
+    T_EQ(g_sn, 20);                                       /* every completion ran exactly once */
+    T_EQ(g_sbad, 0);
+    T_EQ(ncompl(pbf_a(pb)), 20);
+    T_CHECK(g_smax <= MT_PB_INLINE_MAX);
+    T_CHECK(g_e.n_compl_deferred > 0);
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Minor (a): a system-heap PB whose completion routine is application code is the app's. */
+static void goodbye_drops_pbs_with_app_completion(void) {
+    StreamPtr s;
+    TCPiopb *rcv, *q;
+    pbt_conn c;
+    entry_setup();
+    pbf_app_hi = PBF_BASE + PBF_SIZE;                     /* procs are system code for now */
+    s = pbt_est(&g_x, 0, 0, &c);                          /* system buffer, no ASR */
+    rcv = pbt_rcv(&g_x, s, 100, 0);                       /* a system-heap PB pending on it */
+    T_EQ(rcv->ioResult, inProgress);
+    g_g.depth = 1;
+    q = pbt_pb(TCPStatus, s);                             /* a system-heap PB queued by preemption */
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)q, TRAP_ASYNC, 1), 0);
+    g_g.depth = 0;
+    pbf_app_lo = PBF_BASE + PBF_SIZE;                     /* no fake memory is the app's ... */
+    pbf_app_hi = 0xFFFFFFFFu;                             /* ... but the completion routines are */
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)pbt_pb(-1, 0), TRAP_SYNC, 0), 0);
+    T_EQ(g_e.n_pend_dropped, 1);
+    T_EQ(rcv->ioResult, inProgress);                      /* silently */
+    T_EQ(pbt_simple(&g_x, TCPStatus, s), invalidStreamPtr);
+    mt_entry_drain(&g_e);
+    T_EQ(ncompl(pbf_a(q)), 0);
+    T_EQ(pbf_bad, 0);
+}
+
 /* ---- final review fix 5: a stream with the app's ASR or a pending app PB is the app's ---- */
 
 static void goodbye_drops_streams_holding_app_routines_or_pbs(void) {
@@ -654,4 +799,6 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        entry_killio_answers_zero, entry_goodbye_from_inside_a_routine,
        goodbye_keeps_system_heap_clients, callout_needs_recorded_gate_depth,
        preemption_inside_nested_core_call_is_not_a_callout, chained_one_byte_reader_is_bounded,
-       goodbye_drops_streams_holding_app_routines_or_pbs)
+       goodbye_drops_streams_holding_app_routines_or_pbs,
+       chained_buffer_emptying_reader_is_bounded, goodbye_drops_pbs_with_app_completion,
+       entry_inline_completions_are_bounded)

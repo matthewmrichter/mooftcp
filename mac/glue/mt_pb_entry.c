@@ -30,7 +30,8 @@ static uint32_t drop_app(MtDrvPend *q) {
     int m = mt_os_mask();
     void *pb;
     while ((pb = mt_drv_pend_pop(q)) != NULL) {
-        if (mt_os_app_mem(mt_os_addr(pb))) dropped++;
+        MacPtr32 c = ((const MtAnyPb *)pb)->hdr.ioCompletion;
+        if (mt_os_app_mem(mt_os_addr(pb)) || (c && mt_os_app_mem(c))) dropped++;
         else keep[n++] = pb;
     }
     for (k = 0; k < n; k++) (void)mt_drv_pend_push(q, keep[k]);
@@ -54,7 +55,7 @@ static void goodbye(MtEntry *e) {
         g->in_irq = 0;
         g->depth = 0;
     }
-    e->n_pend_dropped += drop_app(&e->pend) + drop_app(&e->refq);
+    e->n_pend_dropped += drop_app(&e->pend) + drop_app(&e->refq) + drop_app(&e->doneq);
     mt_pb_goodbye(d);
     e->n_goodbye++;
 }
@@ -109,7 +110,23 @@ int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     res = mt_pb_control(d, pb);
     if (res == inProgress) return 0;             /* contract 2: the PB is the glue's now */
     if (res == MT_PB_NOTOPEN) return res;        /* contract 4: no completion */
-    mt_os_complete(pb, res);                     /* contract 3: once, after the glue returned */
+    /* contract 3: once, after the glue returned. It is a call-out like every other (depth,
+     * co_gate), so an app that re-issues from its completion nests at most MT_PB_INLINE_MAX
+     * deep (a read that empties the buffer completes here, and new data can arrive meanwhile:
+     * the driver delivers frames from inside EWrite). Deeper, ioResult is final at once (a
+     * sync caller goes on) and the routine runs from the outermost frame or the owner's drain. */
+    pb->hdr.ioResult = res;
+    if (d->depth >= MT_PB_INLINE_MAX && push(&e->doneq, pb)) {
+        e->n_compl_deferred++;
+        e->gate->tick_pending = 1;
+        return res;
+    }
+    mt_pb_call_complete(d, pb, res);
+    if (d->depth == 0) {                         /* the outermost frame: run what was deferred */
+        MtAnyPb *x;
+        while ((x = pop(&e->doneq)) != NULL) mt_pb_call_complete(d, x, x->hdr.ioResult);
+        mt_pb_flush(d);
+    }
     return res;
 }
 
@@ -118,6 +135,10 @@ void mt_entry_drain(MtEntry *e) {
     MtDrv *d = e->d;
     MtAnyPb *pb;
     for (;;) {
+        if ((pb = pop(&e->doneq)) != NULL) {        /* older results first */
+            mt_pb_call_complete(d, pb, pb->hdr.ioResult);
+            continue;
+        }
         if ((pb = pop(&e->pend)) != NULL) {
             int16_t res = mt_pb_control(d, pb);
             e->n_pend_run++;

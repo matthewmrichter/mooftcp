@@ -54,7 +54,8 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
     d->co_gate = sv;
 }
 
-/* Perform the core releases that were deferred while a glue frame was active. */
+/* Perform the core releases that were deferred while a glue frame was active. Also called by
+ * the driver entry after it ran a completion routine itself (mt_pb_flush). */
 static void flush_deferred(MtDrv *d) {
     uint8_t i;
     if (d->depth || d->in_core || !d->rel_mask) return;
@@ -151,9 +152,21 @@ void mt_pb_tick(MtDrv *d) {
     mt_os_irq_restore(sv);
 }
 
+void mt_pb_flush(MtDrv *d) {
+    int sv;
+    if (d->depth || d->in_core || !d->rel_mask) return;
+    sv = mt_os_irq_save();
+    flush_deferred(d);
+    mt_os_irq_restore(sv);
+}
+
 /* A stream belongs to the departing application if its receive buffer, its ASR or any PB it
- * holds lies in the application's memory: its routines must never run again either way. */
-static int app_pb(const MtAnyPb *pb) { return pb && mt_os_app_mem(mt_os_addr(pb)); }
+ * holds (the PB itself or its completion routine) lies in the application's memory: its
+ * routines must never run again either way. */
+static int app_pb(const MtAnyPb *pb) {
+    return pb && (mt_os_app_mem(mt_os_addr(pb)) ||
+                  (pb->hdr.ioCompletion && mt_os_app_mem(pb->hdr.ioCompletion)));
+}
 static int app_tcp(const MtStream *s) {
     uint8_t k;
     if (mt_os_app_mem(s->rbuf) || (s->asr && mt_os_app_mem(s->asr))) return 1;

@@ -252,6 +252,7 @@ int16_t  mt_pb_icmp_type(uint32_t core_arg);   /* (type << 8) | code -> ICMPRepo
 
 /* ---- glue-internal (mt_pb.c <-> mt_pb_tcp.c) ---- */
 void     mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err);
+void     mt_pb_flush(MtDrv *d);                /* deferred core releases, if no glue frame is active */
 void     mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason, MacPtr32 icmp);
 int16_t  mt_pb_tcp_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_tcp_after_core(MtDrv *d);       /* close / send progress after input and ticks */

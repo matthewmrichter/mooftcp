@@ -18,7 +18,9 @@
  *     would otherwise recurse on the interrupt stack. A SYNC PB (or `refq` full) is completed at
  *     once, but at most MT_ENTRY_REFUSE_NEST deep; deeper, only ioResult is set (counted).
  *   - Otherwise mt_pb_control and the mt_pb.h result contract (completion once, after the glue
- *     returned; none for -28 and inProgress). */
+ *     returned; none for -28 and inProgress). The completion is a call-out (MtDrv.depth); nested
+ *     MT_PB_INLINE_MAX deep it is deferred (`doneq`, ioResult already final) to the outermost
+ *     entry frame or the gate owner's drain, in order. */
 #ifndef MT_PB_ENTRY_H
 #define MT_PB_ENTRY_H
 

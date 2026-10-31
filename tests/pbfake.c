@@ -12,6 +12,7 @@ int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
 int pbf_mask, pbf_mask_max;
 MtGate *pbf_gate;
+void (*pbf_leave_hook)(void);
 MacPtr32 pbf_app_lo, pbf_app_hi;
 MacPtr32 pbf_a5;
 
@@ -34,6 +35,7 @@ void pbf_reset(void) {
     pbf_a5 = 0x00A50000u;
     pbf_mask = pbf_mask_max = 0;
     pbf_gate = NULL;
+    pbf_leave_hook = NULL;
     fake_tx_hook = NULL;
     pbf_app_lo = 0;
     pbf_app_hi = 0xFFFFFFFFu;
@@ -138,6 +140,7 @@ void mt_os_irq_restore(int saved) {
     if (saved != pbf_irq - 1) pbf_bad++;        /* restores must nest */
     pbf_irq = saved;
     if (pbf_gate && pbf_gate->depth) pbf_gate->depth--;
+    if (saved == 0 && pbf_leave_hook) pbf_leave_hook();   /* as the gate's outermost leave */
 }
 
 int mt_os_in_interrupt(void) { return pbf_in_int > 0; }

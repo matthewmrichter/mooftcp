@@ -85,6 +85,7 @@ typedef struct MtEntry {
     MtGate       *gate;
     MtDrvPend     pend;          /* PBs queued by preemption (run by the gate owner) */
     MtDrvPend     refq;          /* async PBs refused while the core was owned (completed by the owner) */
+    MtDrvPend     doneq;         /* results whose completion was too deep to run inline (ioResult set) */
     volatile uint8_t refuse_nest;/* inline refusal completions now running */
     uint8_t       pad[3];
     uint32_t      n_calls, n_refused, n_pend_run, n_goodbye;
@@ -92,6 +93,7 @@ typedef struct MtEntry {
     uint32_t      n_adopted;         /* PBs found left in the Device Manager queue (mt_drv.c) */
     uint32_t      n_compl_skipped;   /* refusals past MT_ENTRY_REFUSE_NEST: ioResult only */
     uint32_t      n_pend_dropped;    /* queued PBs of an application forgotten at its goodbye */
+    uint32_t      n_compl_deferred;  /* results completed later because completions nested too deep */
 } MtEntry;
 
 /* ioTrap bits the Device Manager stores in the PB (offset 6). */
