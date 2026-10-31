@@ -23,10 +23,10 @@
 extern "C" {
 #endif
 
-/* Transmit slots (each about 1.6 KB). A pass at interrupt level (handler, mask 6; timer, mask 1)
+/* Transmit slots (each about 1.6 KB; 12 since Task 13). A pass at interrupt level (handler, mask 6; timer, mask 1)
  * frees no slot (async EWrite completes after the mask drops), so one ACK that opens the window
- * for N segments needs N slots; the core ignores link.tx failures (Task 13 measures exhaustion). */
-#define MT_ENET_TXSLOTS 8u
+ * for N segments needs N slots; the core ignores link.tx failures (Task 13: 8 slots dropped 2 frames per 40 KB send, 12 drop none; core fix is Plan 3). */
+#define MT_ENET_TXSLOTS 12u
 
 /* Errors (negative, Mac OSErr style); other values are the Device Manager's own. */
 #define MT_ENET_E_NODRIVER (-43)   /* fnfErr from OpenDriver: no .ENET0 */
