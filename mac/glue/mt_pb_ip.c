@@ -15,6 +15,10 @@
 #include <stddef.h>
 #include "mt_pb.h"
 
+/* Compile-time check (C99, negative array size on failure): the echoed data lent to the notify block
+ * must start at an even address; apps read it by words (MacTCP's is even; Task 12). */
+typedef char mt_echo_data_must_be_even[(offsetof(MtDrv, echo_data) % 2u == 0u) ? 1 : -1];
+
 #define ECHO_WAIT 1
 #define ECHO_NOTIFY 2
 
