@@ -45,12 +45,13 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
  * builds that file with the same resource); the cdev carries a copy as the real MacTCP file does. */
 #include "dnrp.r"
 
-/* System-heap bytes INIT 31 adds for us: 0x28000 = 163,840. The DRVR code (74,694), the resident
- * block (49,924: gate, Ethernet slots, MtDrv, core arena), the DCE, plus the .ENET0 driver the
- * first open loads (about 16.5K); 0x24000 boots but leaves too little for that open (-23000).
+/* System-heap bytes INIT 31 adds for us: 0x2C000 = 180,224 (Task 11 raised it from 0x28000: the DNR
+ * grew the DRVR code to about 78K and the resident block to about 52.7K, leaving 7.5K free after the
+ * open). The DRVR code, the resident block (gate, Ethernet slots, MtDrv, core arena), the DCE, plus
+ * the .ENET0 driver the first open loads (about 16.5K); 0x24000 booted but left too little (-23000).
  * Derivation: docs/dev/MACTCP-INTERFACE.md "MoofTCP driver (Task 10)". */
 data 'sysz' (0) {
-    $"0002 8000"
+    $"0002 C000"
 };
 
 resource 'vers' (1) {

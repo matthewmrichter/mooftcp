@@ -10,7 +10,8 @@
  *                                         hostInfo (A) or returnRec (HINFO, MX)
  *   MT_DNR_PTR                            arg = IP address, out = hostInfo
  *   MT_DNR_ENUM                           arg = entry index, out = MtDnrEnum; slot = 1 if entry
- *   MT_DNR_CANCEL                         slot = the slot a pending lookup returned
+ *   MT_DNR_CANCEL                         name = the pending PB's address, arg = its gen (a PB still queued in
+ *                                         the driver entry is refused later, without a completion call)
  *
  * A lookup is made with PBControlAsync and ioCompletion = dnrp's routine:
  *   - it finishes inside the call (cache hit, dotted quad, immediate error): ioResult is final
@@ -50,7 +51,8 @@ typedef struct MtDnrPb {
     uint32_t out;               /* 40: hostInfo / returnRec / MtDnrEnum */
     int16_t  hasproc;           /* 44: the caller gave a result proc */
     int16_t  deferred;          /* 46: out: the lookup is pending, the PB completes later */
-} MtDnrPb;                      /* 48 bytes */
+    int16_t  gen;               /* 48: lookup generation (dnrp counts them); MT_DNR_CANCEL passes it in arg */
+} MtDnrPb;                      /* 50 bytes */
 
 /* One EnumCache entry: the name server record (index 0 when a server is set; type 17, ttl 0xFFFFFFFF,
  * empty name, rdata = server address, as MacTCP's) and then the cached A answers, one per address. */

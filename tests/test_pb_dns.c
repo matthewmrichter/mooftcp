@@ -336,13 +336,160 @@ static void unknown_op_is_the_unimplemented_code(void) {
     
     p = dpb(99, NULL, 0, 0, 0);
     T_EQ(call(&x, p), MT_PB_UNIMP);
-    T_EQ(sizeof(MtDnrPb), 48);
+    T_EQ(sizeof(MtDnrPb), 50);
     T_EQ(offsetof(MtDnrPb, op), 28);
     T_EQ(offsetof(MtDnrPb, deferred), 46);
+}
+
+static void hinfo_and_mx_delivery_layout(void) {
+    pbt x; uint8_t *hi; MtDnrPb *p; qv q; pkt a; int at;
+    dns_init(&x);
+    hi = host_info();
+    p = dpb(MT_DNR_HINFO, "box.example.com", 0, pbf_a(hi), 1);
+    T_EQ(call(&x, p), inProgress);
+    query_at(&x, x.fl.n - 1, &q);
+    T_EQ(q.qtype, 13);
+    begin(&a, q.id, 0x8180, q.name, 13);
+    count_an(&a, 1);
+    at = rr(&a, 13, 300);
+    p8(&a, 3); memcpy(a.b + a.n, "68K", 3); a.n += 3;
+    p8(&a, 6); memcpy(a.b + a.n, "System", 6); a.n += 6;
+    endrr(&a, at);
+    reply(x.d->s, &q, &a, pbf_now + 5);
+    T_EQ(rtn_of(hi), 0);
+    T_CHECK(strcmp(cname_of(hi), "box.example.com.") == 0);
+    T_CHECK(strcmp((const char *)hi + 260, "68K") == 0);              /* cpuType[30] at 260 */
+    T_CHECK(strcmp((const char *)hi + 290, "System") == 0);           /* osType[30] at 290 */
+    p = dpb(MT_DNR_MX, "mail.example.com", 0, pbf_a(hi), 1);
+    T_EQ(call(&x, p), inProgress);
+    query_at(&x, x.fl.n - 1, &q);
+    T_EQ(q.qtype, 15);
+    begin(&a, q.id, 0x8180, q.name, 15);
+    count_an(&a, 1);
+    at = rr(&a, 15, 300);
+    p16(&a, 20);
+    pname(&a, "mx1.example.com");
+    endrr(&a, at);
+    reply(x.d->s, &q, &a, pbf_now + 5);
+    T_EQ(rtn_of(hi), 0);
+    T_EQ(mt_rd16(hi + 260), 20);                                      /* preference at 260 */
+    T_CHECK(strcmp((const char *)hi + 262, "mx1.example.com.") == 0); /* exchange[255] at 262, dotted */
+}
+
+static void queued_ptr_can_be_cancelled_and_goodbye_drops_it(void) {
+    pbt x; uint8_t *h1, *h2; MtDnrPb *p1, *p2, *c; int n, c0;
+    dns_init(&x);
+    h1 = host_info(); h2 = host_info();
+    p1 = dpb(MT_DNR_PTR, NULL, 0x0A000001u, pbf_a(h1), 1);
+    p2 = dpb(MT_DNR_PTR, NULL, 0x0A000002u, pbf_a(h2), 1);
+    T_EQ(call(&x, p1), inProgress);
+    T_EQ(call(&x, p2), inProgress);                                   /* state 2: waits for the scratch */
+    n = x.fl.n;
+    c = dpb(MT_DNR_CANCEL, NULL, 0, 0, 0);
+    c->name = pbf_a(p2);
+    c0 = pbf_count('C');
+    T_EQ(call(&x, c), 0);
+    T_EQ(p2->ioResult, -27);
+    T_EQ(pbf_count('C'), c0 + 2);                                     /* the victim and the cancel PB */
+    mt_pb_goodbye(x.d);                                               /* p1 goes silently; nothing may start */
+    T_EQ(x.fl.n, n);
+    T_EQ(pbf_count('C'), c0 + 2);
+    /* a queued PTR dropped by the goodbye never starts later */
+    p1 = dpb(MT_DNR_PTR, NULL, 0x0A000003u, pbf_a(h1), 1);
+    p2 = dpb(MT_DNR_PTR, NULL, 0x0A000004u, pbf_a(h2), 1);
+    T_EQ(call(&x, p1), inProgress);
+    T_EQ(call(&x, p2), inProgress);
+    n = x.fl.n;
+    c0 = pbf_count('C');
+    mt_pb_goodbye(x.d);
+    T_EQ(pbf_count('C'), c0);
+    T_EQ(x.fl.n, n);
+}
+
+static pbt *g_chain_x;
+static MtDnrPb *g_chain_next;
+static int16_t g_chain_r;
+static void chain_compl(MtAnyPb *pb) {
+    (void)pb;
+    if (g_chain_next) {
+        MtDnrPb *n = g_chain_next;
+        g_chain_next = NULL;
+        n->ioCompletion = pbf_compl(nop_compl);
+        g_chain_r = mt_pb_control(g_chain_x->d, (MtAnyPb *)n);    /* a result proc starting the next lookup */
+    }
+}
+
+static void a_completion_can_start_the_next_lookup(void) {
+    pbt x; uint8_t *h1, *h2; MtDnrPb *n; qv q; pkt a; int i;
+    dns_init(&x);
+    h1 = host_info(); h2 = host_info();
+    for (i = 0; i < MT_PB_DNS; i++) {                                 /* fill every slot */
+        char nm[24]; MtDnrPb *f;
+        sprintf(nm, "f%d.example.com", i);
+        f = dpb(MT_DNR_A, nm, 0, pbf_a(h1), 1);
+        if (i == 0) { f->ioCompletion = pbf_compl(chain_compl); T_EQ(pbt_call(&x, (TCPiopb *)f), inProgress); }
+        else T_EQ(call(&x, f), inProgress);
+    }
+    n = dpb(MT_DNR_A, "next.example.com", 0, pbf_a(h2), 1);
+    g_chain_x = &x; g_chain_next = n; g_chain_r = 99;
+    query_at(&x, 0, &q);
+    answer_a(&a, &q, 0x0A000001u, 0);
+    reply(x.d->s, &q, &a, pbf_now + 5);
+    T_EQ(g_chain_r, inProgress);                                      /* the slot was free before the proc ran */
+    T_EQ(n->deferred, 1);
+    T_EQ(rtn_of(h2), cacheFault);
+}
+
+static void a_cancelled_queued_pb_is_refused_without_completion(void) {
+    pbt x; uint8_t *hi; MtDnrPb *p, *c;
+    dns_init(&x);
+    hi = host_info();
+    p = dpb(MT_DNR_A, "q.example.com", 0, pbf_a(hi), 1);
+    p->gen = 5;
+    c = dpb(MT_DNR_CANCEL, NULL, 5, 0, 0);                            /* cancel of a PB that never reached a slot */
+    c->name = pbf_a(p);
+    T_EQ(call(&x, c), 0);
+    p->ioCompletion = pbf_compl(nop_compl);
+    T_EQ(mt_pb_control(x.d, (MtAnyPb *)p), -27);                      /* the entry then runs it: refused */
+    T_EQ(p->ioCompletion, 0);                                         /* dnrp's code may be gone: not called */
+    T_EQ(p->deferred, 0);
+    /* a different generation of the same PB memory is a new lookup */
+    c = dpb(MT_DNR_CANCEL, NULL, 6, 0, 0);
+    c->name = pbf_a(p);
+    T_EQ(call(&x, c), 0);
+    p->gen = 7;
+    p->ioCompletion = pbf_compl(nop_compl);
+    T_EQ(mt_pb_control(x.d, (MtAnyPb *)p), inProgress);
+}
+
+static void long_names_are_cut_at_254_characters(void) {
+    pbt x; uint8_t *hi; MtDnrPb *p; qv q; pkt a; char nm[260]; int i;
+    dns_init(&x);
+    hi = host_info();
+    memset(nm, 0, sizeof nm);
+    for (i = 0; i < 4; i++) {                                         /* 63 + 63 + 63 + 61 characters, 3 dots: 253 */
+        int l = i == 3 ? 61 : 63;
+        memset(nm + strlen(nm), 'a' + i, (size_t)l);
+        if (i < 3) strcat(nm, ".");
+    }
+    T_EQ(strlen(nm), 253);
+    hi[259] = 0x77;
+    p = dpb(MT_DNR_A, nm, 0, pbf_a(hi), 1);
+    T_EQ(call(&x, p), inProgress);
+    query_at(&x, x.fl.n - 1, &q);
+    answer_a(&a, &q, 0x0A000001u, 0);
+    reply(x.d->s, &q, &a, pbf_now + 5);
+    T_EQ(rtn_of(hi), 0);
+    T_EQ(strlen(cname_of(hi)), 254);                                  /* 253 + the dot: the field's limit */
+    T_EQ(hi[259], 0x77);                                              /* addr[] untouched by the name */
+    T_EQ(mt_rd32(hi + 260), 0x0A000001u);
 }
 
 T_MAIN(a_lookup_pending_then_answer, ip_literal_and_cache_hit_answer_at_once,
        errors_are_the_dnr_codes, no_result_proc_asks_nothing, slots_are_limited,
        ptr_lookups_queue_behind_the_scratch, cancel_completes_the_pb_and_stops_writes,
        goodbye_drops_pending_lookups_silently, enum_cache_lists_server_then_answers,
-       unconfigured_is_not_open, unknown_op_is_the_unimplemented_code)
+       unconfigured_is_not_open, unknown_op_is_the_unimplemented_code,
+       hinfo_and_mx_delivery_layout, queued_ptr_can_be_cancelled_and_goodbye_drops_it,
+       a_completion_can_start_the_next_lookup, a_cancelled_queued_pb_is_refused_without_completion,
+       long_names_are_cut_at_254_characters)

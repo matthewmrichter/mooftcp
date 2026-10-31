@@ -25,6 +25,7 @@
 /* Result codes (obs, matrix "DNR"). */
 #define E_SYNTAX      (-23041)
 #define E_CACHEFAULT  (-23042)
+#define E_NONAMESERVER (-23044)
 #define E_DNRERR      (-23047)
 #define E_OUTOFMEM    (-23048)
 
@@ -40,6 +41,7 @@ typedef struct {
     MtDnrPb  pb;
     uint32_t proc, ud;                /* the caller's result proc and userDataPtr */
     int16_t  active;                  /* the result proc is still owed */
+    int16_t  gen;                     /* lookup generation, counted per claim */
     int16_t  late;                    /* the driver queued the PB: its completion (deferred or not) is the result */
 } Q;
 
@@ -53,8 +55,6 @@ static struct {
     int16_t   open;
     int16_t   freed;                  /* Retro68FreeGlobals ran (at most once per load) */
     Q         q[NQ];
-    MtDnrPb   cpb;                    /* synchronous calls: cancel, enum */
-    MtDnrEnum en;
 } g __attribute__((section(".data")));
 
 extern void mt_dnr_call2(uint32_t proc, uint32_t a, uint32_t b);
@@ -84,14 +84,34 @@ static void done(MtDnrPb *pb) {
 
 /* ---- a lookup ---- */
 
-static long lookup(int op, const char *name, uint32_t addr, uint32_t out, uint32_t proc, uint32_t ud) {
+/* Claim a free record. An interrupt-time caller (a result proc starting the next lookup) must not
+ * pick the same one as the task-level caller it interrupted: the scan and the claim are one step
+ * under the interrupt mask. */
+static Q *claim(void) {
     Q *q = 0;
     int i;
-    long err;
-    if (!g.open) return E_DNRERR;
+    uint16_t sr;
+    __asm__ volatile("move.w %%sr,%0\n\tori.w #0x0700,%%sr" : "=d"(sr) : : "memory", "cc");
     for (i = 0; i < NQ; i++)
-        if (!g.q[i].active) { q = &g.q[i]; break; }
-    if (!q) { put_rtn(out, E_OUTOFMEM); return E_OUTOFMEM; }
+        if (!g.q[i].active) { q = &g.q[i]; q->active = 1; q->late = 0; q->gen++; break; }
+    __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory", "cc");
+    return q;
+}
+
+/* A refused or unanswerable call: rtnCode as well as the return value (matrix D11, D16). */
+static long fail(uint32_t out, long e) {
+    put_rtn(out, (int32_t)e);
+    return e;
+}
+
+static long lookup(int op, const char *name, uint32_t addr, uint32_t out, uint32_t proc, uint32_t ud) {
+    Q *q;
+    long err;
+    int16_t gen;
+    if (!g.open) return E_DNRERR;
+    q = claim();
+    if (!q) return fail(out, E_OUTOFMEM);
+    gen = q->gen;
     zero(&q->pb, sizeof q->pb);
     q->pb.ioCompletion = (uint32_t)(uintptr_t)done;
     q->pb.ioCRefNum = g.drv;
@@ -101,28 +121,29 @@ static long lookup(int op, const char *name, uint32_t addr, uint32_t out, uint32
     q->pb.arg = addr;
     q->pb.out = out;
     q->pb.hasproc = proc != 0;
+    q->pb.gen = gen;
     q->proc = proc;
     q->ud = ud;
-    q->late = 0;
-    q->active = 1;                              /* before the call: the completion may come at once */
     q->pb.ioResult = 1;
-    err = PBControlAsync((ParmBlkPtr)&q->pb);
+    err = PBControlAsync((ParmBlkPtr)&q->pb);    /* a nested lookup uses another record: our PB is ours alone */
     if (q->pb.deferred) return E_CACHEFAULT;     /* the driver owns the PB; the result proc follows */
-    if (err && q->pb.ioResult == 1) { q->active = 0; return err; }   /* the Device Manager refused the call */
+    if (err && q->pb.ioResult == 1) { q->active = 0; return fail(out, err); }   /* the Device Manager refused it */
     if (q->pb.ioResult == 1) { q->late = 1; return E_CACHEFAULT; }   /* the driver queued it (an interrupt preempted
                                                                         its owner): the completion follows */
     q->active = 0;
+    if (q->pb.ioResult == -28) return fail(out, E_NONAMESERVER);   /* driver not open: the real DNR's "no server" */
     return q->pb.ioResult;
 }
 
 static void cancel(Q *q) {
-    zero(&g.cpb, sizeof g.cpb);
-    g.cpb.ioCRefNum = g.drv;
-    g.cpb.csCode = MT_CS_DNR;
-    g.cpb.op = MT_DNR_CANCEL;
-    g.cpb.slot = q->pb.slot;
-    g.cpb.name = (uint32_t)(uintptr_t)&q->pb;    /* identifies the pending PB */
-    (void)PBControlSync((ParmBlkPtr)&g.cpb);
+    MtDnrPb c;                                   /* on the stack: the enum proc may close the resolver */
+    zero(&c, sizeof c);
+    c.ioCRefNum = g.drv;
+    c.csCode = MT_CS_DNR;
+    c.op = MT_DNR_CANCEL;
+    c.name = (uint32_t)(uintptr_t)&q->pb;        /* identifies the pending PB */
+    c.arg = (uint16_t)q->pb.gen;
+    (void)PBControlSync((ParmBlkPtr)&c);
 }
 
 /* ---- the selectors ---- */
@@ -181,22 +202,25 @@ static long do_addrtostr(uint32_t addr, char *out) {
 
 static long do_enumcache(uint32_t proc, uint32_t ud) {
     uint32_t i;
-    if (!proc) return 0;
+    MtDnrPb c;                                   /* PB and record on the stack: the proc may call us again */
+    MtDnrEnum en;
+    if (!proc || !g.open) return 0;
     for (i = 0; i < 256; i++) {
         CacheRec r;
-        zero(&g.cpb, sizeof g.cpb);
-        g.cpb.ioCRefNum = g.drv;
-        g.cpb.csCode = MT_CS_DNR;
-        g.cpb.op = MT_DNR_ENUM;
-        g.cpb.arg = i;
-        g.cpb.out = (uint32_t)(uintptr_t)&g.en;
-        if (PBControlSync((ParmBlkPtr)&g.cpb) || !g.cpb.slot) break;
-        r.cname = (uint32_t)(uintptr_t)g.en.name;
-        r.type = g.en.type;
-        r.cclass = g.en.cclass;
-        r.ttl = g.en.ttl == 0xFFFFFFFFu ? 0xFFFFFFFFu : LM_TIME + g.en.ttl;   /* absolute, as MacTCP's (D60) */
-        r.rdata = g.en.rdata;
+        zero(&c, sizeof c);
+        c.ioCRefNum = g.drv;
+        c.csCode = MT_CS_DNR;
+        c.op = MT_DNR_ENUM;
+        c.arg = i;
+        c.out = (uint32_t)(uintptr_t)&en;
+        if (PBControlSync((ParmBlkPtr)&c) || !c.slot) break;
+        r.cname = (uint32_t)(uintptr_t)en.name;
+        r.type = en.type;
+        r.cclass = en.cclass;
+        r.ttl = en.ttl == 0xFFFFFFFFu ? 0xFFFFFFFFu : LM_TIME + en.ttl;   /* absolute, as MacTCP's (D60) */
+        r.rdata = en.rdata;
         mt_dnr_call2(proc, (uint32_t)(uintptr_t)&r, ud);
+        if (!g.open) break;                      /* the proc closed the resolver */
     }
     return 0;
 }

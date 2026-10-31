@@ -66,6 +66,7 @@ static void deliver(const MtDnsSlot *q, mt_dns_status st) {
     uint8_t *o = (uint8_t *)mt_os_ptr(q->out);
     uint32_t i;
     if (!o) return;
+    if (st == MT_DNS_OK && q->op == MT_DNR_A && q->res.naddr == 0) st = MT_DNS_NO_ANSWER;
     if (st != MT_DNS_OK) { put_rtn(o, dns_err(st)); return; }
     switch (q->op) {
     case MT_DNR_A:
@@ -157,6 +158,12 @@ static int16_t lookup(MtDrv *d, MtAnyPb *pb) {
     int r;
     int16_t e;
     p->deferred = 0;
+    for (i = 0; i < 4; i++)                               /* cancelled while queued in the driver entry */
+        if (d->dead_pb[i] == mt_os_addr(pb) && d->dead_gen[i] == (uint16_t)p->gen) {
+            d->dead_pb[i] = 0;
+            p->ioCompletion = 0;                          /* dnrp's code may be gone: no completion call */
+            return ABORT_ERR;
+        }
     if (!o || (p->op != MT_DNR_PTR && !name)) return invalidBufPtr;
     for (i = 0; i < MT_PB_DNS; i++)
         if (!d->dns[i].state) { q = &d->dns[i]; break; }
@@ -186,19 +193,29 @@ static int16_t lookup(MtDrv *d, MtAnyPb *pb) {
     return e;
 }
 
+/* CANCEL: name = the PB's address, arg = its generation. The PB may be pending in a slot (state 1,
+ * or a PTR waiting, state 2), or still sitting in the driver entry's queue of preempted calls (it
+ * never reached a slot): then it is remembered (tombstone) and refused, without a completion call,
+ * when the entry runs it. The generation keeps a stale tombstone from hitting the next lookup that
+ * reuses the same PB memory. */
 static int16_t do_cancel(MtDrv *d, MtAnyPb *pb) {
     MtDnrPb *p = &pb->dnr;
-    MtDnsSlot *q;
-    MtAnyPb *victim;
-    if (p->slot < 0 || p->slot >= MT_PB_DNS) return 0;
-    q = &d->dns[p->slot];
-    if (!q->state || !q->pb || mt_os_addr(q->pb) != p->name) return 0;   /* name = the pending PB's address */
-    victim = q->pb;
-    cancel_core(d, q);
-    q->state = 0;
-    q->pb = NULL;
-    mt_pb_call_complete(d, victim, ABORT_ERR);
-    kick(d);
+    uint32_t i;
+    for (i = 0; i < MT_PB_DNS; i++) {
+        MtDnsSlot *q = &d->dns[i];
+        MtAnyPb *victim;
+        if (!q->state || !q->pb || mt_os_addr(q->pb) != p->name) continue;
+        victim = q->pb;
+        cancel_core(d, q);
+        q->state = 0;
+        q->pb = NULL;
+        mt_pb_call_complete(d, victim, ABORT_ERR);
+        kick(d);
+        return 0;
+    }
+    d->dead_pb[d->dead_n & 3u] = p->name;
+    d->dead_gen[d->dead_n & 3u] = (uint16_t)p->arg;
+    d->dead_n++;
     return 0;
 }
 

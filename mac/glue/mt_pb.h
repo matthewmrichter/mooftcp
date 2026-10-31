@@ -201,6 +201,9 @@ struct MtDrv {
     MtUdpStream udp[MT_PB_MAX_UDP];
     MtEcho    echo[MT_PB_ECHOQ];
     MtDnsSlot dns[MT_PB_DNS];
+    uint32_t  dead_pb[4];       /* DNR lookups cancelled while queued in the entry (mt_pb_dns.c) */
+    uint16_t  dead_gen[4];
+    uint8_t   dead_n;
     uint8_t   echo_data[MT_PB_ECHO_DATA];   /* reply payload lent to the notify block */
     uint8_t   ubuf[MT_PB_UDP_GATHER];       /* gathers a multi-entry UDPWrite */
     uint8_t   lap_mac[8];       /* LAPStats.ifPhysicalAddress */
