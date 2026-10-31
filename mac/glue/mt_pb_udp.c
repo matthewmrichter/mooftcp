@@ -6,9 +6,10 @@
  *    slot live, same generation). No pointer into a queue is held across a call out.
  *  - Pending reads complete before the stream is released (UDPRelease: -23012, matrix 906).
  *  - UDPRead is zero-copy as in MacTCP (matrix 903): rcvBuff is the datagram's address inside the
- *    app's own receive buffer and it stays queued in the core until UDPBfrReturn. The core can
- *    only peek at its oldest datagram, so one datagram is lent at a time (s->loan); a further
- *    UDPRead waits until the loan is returned (carry-over note in PLAN2-CARRYOVER.md).
+ *    app's own receive buffer and it stays queued in the core until UDPBfrReturn. Several
+ *    datagrams can be lent at once (matrix 904-904d), up to MT_PB_UDPLOANS, and returned in any
+ *    order (s->loan, see mt_pb.h). With the table full a further UDPRead waits like one with no
+ *    datagram: a return serves it, else its timeOut ends it with -23016 (matrix 905).
  *  - UDPRelease frees the core endpoint at once, in every context. Unlike a TCB, a UDP endpoint
  *    is released by a memset and no core code touches it after a callback returns, so there is
  *    nothing to defer; the core stops writing the app's buffer right away. The glue slot stays
@@ -54,22 +55,25 @@ static MtAnyPb *rq_take(MtUdpStream *s, uint8_t k) {
 
 /* ---- read ---- */
 
-/* Give the oldest queued datagram to a read PB and lend it. 0 if none is queued. */
+/* Give the oldest datagram not lent yet to a read PB and lend it. 0 if there is none or the
+ * loan table is full. */
 static int take_datagram(MtUdpStream *s, MtAnyPb *pb) {
     mt_udp_dgram dg;
-    if (s->loan || !mt_udp_peek(s->u, &dg)) return 0;
+    MacPtr32 a;
+    if (s->loan_n >= MT_PB_UDPLOANS || !mt_udp_peek_at(s->u, s->loan_n, &dg)) return 0;
+    a = mt_os_addr(dg.data);                                     /* inside the app's buffer */
     pb->udp.csParam.receive.remoteHost = dg.src;
     pb->udp.csParam.receive.remotePort = dg.sport;
-    pb->udp.csParam.receive.rcvBuff = mt_os_addr(dg.data);       /* inside the app's buffer */
+    pb->udp.csParam.receive.rcvBuff = a;
     pb->udp.csParam.receive.rcvBuffLen = dg.len;
-    s->loan = mt_os_addr(dg.data);
+    s->loan[s->loan_n++] = a;
     return 1;
 }
 
-/* Serve pending reads in FIFO order while datagrams are queued and none is lent. */
+/* Serve pending reads in FIFO order while datagrams wait and the loan table has room. */
 static void serve_reads(MtUdpStream *s) {
     uint8_t g = s->gen;
-    while (s->rq_n && s->u && !s->loan) {
+    while (s->rq_n && s->u && s->loan_n < MT_PB_UDPLOANS) {
         MtAnyPb *pb = s->rq[0].pb;
         if (!take_datagram(s, pb)) break;
         rq_take(s, 0);
@@ -91,10 +95,13 @@ static int16_t do_read(MtDrv *d, MtUdpStream *s, MtAnyPb *pb) {
 }
 
 static int16_t do_bfr_return(MtUdpStream *s, MtAnyPb *pb) {
-    if (!s->loan || pb->udp.csParam.receive.rcvBuff != s->loan)
-        return invalidBufPtr;                                    /* matrix 903: again, or made up */
-    s->loan = 0;
-    mt_udp_done(s->u);
+    MacPtr32 p = pb->udp.csParam.receive.rcvBuff;
+    uint8_t i;
+    for (i = 0; i < s->loan_n && s->loan[i] != p; i++) {}
+    if (!p || i == s->loan_n) return invalidBufPtr;              /* matrix 903: again, or made up */
+    mt_udp_done_at(s->u, i);                                     /* loan[i] is the core's datagram i */
+    for (; i + 1u < s->loan_n; i++) s->loan[i] = s->loan[i + 1u];
+    s->loan_n--;
     serve_reads(s);                                              /* a read may have waited for it */
     return 0;
 }
@@ -167,7 +174,7 @@ static int16_t do_release(MtUdpStream *s, MtAnyPb *pb) {
     mt_udp_release(s->u);                    /* first: the core stops using the app's buffer */
     s->u = NULL;
     s->used = RELEASING;                     /* the handle is invalid from here on */
-    s->loan = 0;
+    s->loan_n = 0;                           /* outstanding loans are forgotten: the buffer is the app's */
     while (s->rq_n) complete(s, rq_take(s, 0), connectionTerminated);   /* matrix 906 */
     pb->udp.csParam.create.rcvBuff = s->rbuf;                    /* the buffer goes back to the app */
     pb->udp.csParam.create.rcvBuffLen = s->rlen;

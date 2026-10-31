@@ -305,7 +305,108 @@ static void test_udp_length_mismatch_dropped(void) {
     T_EQ(fl.n, 0);
 }
 
+/* Several datagrams held at once (the glue lends them to UDPRead until UDPBfrReturn): peek_at
+ * leaves them queued, done_at returns any of them, and space comes back only from the oldest. */
+static void test_udp_peek_at_done_at(void) {
+    fake_link fl; mt_stack *s = setup(&fl);
+    static uint8_t rb[1025];
+    cbs c = {0, 0, 0, 0};
+    mt_udp *u = mt_udp_create(s, 5000, rb + 1, 1024, cb, &c);   /* odd app buffer */
+    mt_udp_dgram g0, g1, g2, g;
+    uint8_t d[200];
+    int i;
+    for (i = 0; i < 3; i++) {
+        memset(d, i + 1, sizeof d);
+        inject(s, T_PEER, T_ME, (uint16_t)(10 + i), 5000, d, (uint16_t)(1 + i), 1, 0, 0);
+    }
+    T_EQ(mt_udp_queued(u), 3);
+    T_CHECK(mt_udp_peek_at(u, 0, &g0)); T_EQ(g0.sport, 10); T_EQ(g0.len, 1);
+    T_CHECK(mt_udp_peek_at(u, 1, &g1)); T_EQ(g1.sport, 11); T_EQ(g1.len, 2);
+    T_CHECK(mt_udp_peek_at(u, 2, &g2)); T_EQ(g2.sport, 12); T_EQ(g2.len, 3);
+    T_EQ(mt_udp_peek_at(u, 3, &g), 0);
+    T_EQ(mt_udp_queued(u), 3);                         /* peeking removes nothing */
+    T_EQ(mt_udp_done_at(u, 1), 1);                     /* the middle one, out of order */
+    T_EQ(mt_udp_queued(u), 2);
+    T_CHECK(mt_udp_peek_at(u, 0, &g)); T_CHECK(g.data == g0.data); T_EQ(g.sport, 10);
+    T_CHECK(mt_udp_peek_at(u, 1, &g)); T_CHECK(g.data == g2.data); T_EQ(g.sport, 12);
+    T_EQ(mt_udp_peek_at(u, 2, &g), 0);
+    T_EQ(mt_udp_done_at(u, 2), 0);                     /* no such datagram */
+    T_EQ(g0.data[0], 1); T_EQ(g2.data[0], 3); T_EQ(g2.data[2], 3);   /* held bytes untouched */
+    /* the buffer is not freed behind the oldest: 1024 - 3 records (10+10+12) holds 4 of 200 */
+    memset(d, 9, sizeof d);
+    for (i = 0; i < 5; i++) inject(s, T_PEER, T_ME, 20, 5000, d, 200, 1, 0, 0);
+    T_EQ(mt_udp_queued(u), 2 + 4);
+    T_EQ(mt_get_stats(s)->udp_drops, 1);
+    T_EQ(mt_udp_done_at(u, 0), 1);                     /* the oldest: it and the returned one go */
+    T_EQ(mt_udp_queued(u), 5);
+    T_CHECK(mt_udp_peek(u, &g)); T_CHECK(g.data == g2.data);
+    inject(s, T_PEER, T_ME, 21, 5000, d, 150, 1, 0, 0);   /* fills the end (tail 1022) */
+    inject(s, T_PEER, T_ME, 22, 5000, d, 2, 1, 0, 0);     /* wraps into the space now free at 0 */
+    T_EQ(mt_udp_queued(u), 7);
+    T_CHECK(mt_udp_peek_at(u, 6, &g)); T_EQ(g.sport, 22); T_CHECK(g.data < g2.data);
+    T_EQ(mt_get_stats(s)->udp_drops, 1);
+    for (i = 0; i < 7 && mt_udp_queued(u); i++)        /* newest first */
+        T_EQ(mt_udp_done_at(u, mt_udp_queued(u) - 1), 1);
+    T_EQ(mt_udp_queued(u), 0);
+    T_EQ(mt_udp_peek(u, &g), 0);
+    for (i = 0; i < 5; i++) inject(s, T_PEER, T_ME, 22, 5000, d, 200, 1, 0, 0);
+    T_EQ(mt_udp_queued(u), 1024 / 208);                /* all space is back */
+}
+
+/* Random arrivals, lends and out-of-order returns against a model: every held datagram keeps its
+ * bytes and place, the order of the rest is kept, nothing is written outside the buffer. */
+static void test_udp_out_of_order_model(void) {
+    fake_link fl; mt_stack *s = setup(&fl);
+    static uint8_t rb[1100];
+    cbs c = {0, 0, 0, 0};
+    uint32_t rs = 12345u;
+    mt_udp *u;
+    struct { uint16_t id, len; const uint8_t *p; } q[128];
+    int n = 0, step, i, k;
+    uint16_t id = 0;
+    memset(rb, 0xA5, sizeof rb);
+    u = mt_udp_create(s, 5000, rb + 37, 1024, cb, &c);
+    for (step = 0; step < 20000; step++) {
+        rs = rs * 1103515245u + 12345u;
+        k = (int)((rs >> 16) % 4u);
+        if (k <= 1) {                                  /* arrival */
+            uint8_t d[300];
+            uint16_t len = (uint16_t)((rs >> 8) % 300u);
+            uint32_t before = mt_udp_queued(u);
+            memset(d, (uint8_t)id, sizeof d);
+            inject(s, T_PEER, T_ME, id, 5000, d, len, (int)(rs & 1u), 0, 0);
+            if (mt_udp_queued(u) == before + 1u) {
+                mt_udp_dgram g;
+                T_CHECK(n < 128);
+                T_CHECK(mt_udp_peek_at(u, (uint32_t)n, &g));
+                T_EQ(g.sport, id); T_EQ(g.len, len);
+                q[n].id = id; q[n].len = len; q[n].p = g.data;
+                n++;
+            }
+            id++;
+        } else if (n) {                                /* return any one */
+            int j = (int)((rs >> 4) % (uint32_t)n);
+            T_EQ(mt_udp_done_at(u, (uint32_t)j), 1);
+            for (i = j; i + 1 < n; i++) q[i] = q[i + 1];
+            n--;
+        }
+        T_EQ(mt_udp_queued(u), (uint32_t)n);
+        for (i = 0; i < n; i++) {                      /* the held ones did not move or change */
+            mt_udp_dgram g;
+            T_CHECK(mt_udp_peek_at(u, (uint32_t)i, &g));
+            T_CHECK(g.data == q[i].p); T_EQ(g.sport, q[i].id); T_EQ(g.len, q[i].len);
+            T_CHECK(g.data >= rb + 37 && g.data + g.len <= rb + 37 + 1024);
+            if (g.len) { T_EQ(g.data[0], (uint8_t)q[i].id); T_EQ(g.data[g.len - 1], (uint8_t)q[i].id); }
+        }
+        if (t_failed) return;
+    }
+    for (i = 0; i < 37; i++) T_EQ(rb[i], 0xA5);
+    for (i = 37 + 1024; i < (int)sizeof rb; i++) T_EQ(rb[i], 0xA5);
+    T_CHECK(id > 5000);
+}
+
 T_MAIN(test_udp_roundtrip, test_udp_send_fields, test_udp_unconfigured_send,
        test_udp_large_send_fragments, test_udp_closed_port_unreach, test_udp_ephemeral_unique,
        test_udp_ephemeral_wrap, test_udp_buffer_full_drop, test_udp_ring_wrap,
-       test_udp_icmp_event, test_udp_length_mismatch_dropped)
+       test_udp_icmp_event, test_udp_length_mismatch_dropped, test_udp_peek_at_done_at,
+       test_udp_out_of_order_model)

@@ -1081,7 +1081,10 @@ typedef struct {
     StreamPtr h; uint8_t *buf; int live;
     uint32_t len; uint16_t port;
     MacPtr32 base;                   /* the receive buffer given to UDPCreate */
-    MacPtr32 loan;                   /* the datagram lent by the last completed UDPRead */
+    int nloan;                       /* datagrams lent by completed UDPReads, in lending order */
+    MacPtr32 loan[MT_PB_UDPLOANS];
+    uint16_t llen[MT_PB_UDPLOANS];
+    uint32_t lsum[MT_PB_UDPLOANS];   /* the lent bytes may not change until they are returned */
 } ustream;
 
 static struct {
@@ -1090,7 +1093,7 @@ static struct {
     pstream ps[PS_N];
     ustream us[US_N];
     long u_read_ok, u_tmo, u_write_ok, u_ret_ok, u_asr, u_rel_pending, u_in, echo_sent, echo_ok,
-         echo_tmo, u_lent;
+         echo_tmo, u_lent, u_ret_ooo, u_multi, u_full;
     MacPtr32 compl, asr, uasr;
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
          defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes, lo_rx;
@@ -1154,7 +1157,7 @@ static void ustream_dead(int slot) {
         if (P.r[k].uslot == slot && P.r[k].busy && !P.r[k].incall) bad("PB still pending after UDPRelease returned");
     P.us[slot].live = 0;
     P.us[slot].h = 0;
-    P.us[slot].loan = 0;
+    P.us[slot].nloan = 0;
     memset(P.us[slot].buf, CAN2, US_BUF);
 }
 
@@ -1180,7 +1183,7 @@ static void act_ucreate(void) {
     if (res == 0) {
         P.us[slot].h = pb->udpStream;
         P.us[slot].live = 1;
-        P.us[slot].loan = 0;
+        P.us[slot].nloan = 0;
         P.us[slot].len = len;
         P.us[slot].base = pb->csParam.create.rcvBuff;
         P.us[slot].port = pb->csParam.create.localPort;
@@ -1244,40 +1247,63 @@ static void act_uwrite(void) {
     if (!r->busy) pr_free(r);
 }
 
+static void u_unlend(ustream *u, int j) {
+    for (; j + 1 < u->nloan; j++) {
+        u->loan[j] = u->loan[j + 1]; u->llen[j] = u->llen[j + 1]; u->lsum[j] = u->lsum[j + 1];
+    }
+    u->nloan--;
+}
+
+/* Return one of the stream's lent datagrams, any of them (out of order), sometimes after a made-up
+ * pointer (of the other parity than every datagram address in that buffer, so never a loan). */
 static void act_ubfr(void) {
-    int uslot, k = (int)rn(US_N), i;
+    int uslot, k = (int)rn(US_N), i, j;
     prec *r;
     UDPiopb *pb;
     int16_t res;
     StreamPtr h;
-    for (i = 0; i < US_N; i++, k = (k + 1) % US_N) if (P.us[k].live && P.us[k].loan) break;
+    for (i = 0; i < US_N; i++, k = (k + 1) % US_N) if (P.us[k].live && P.us[k].nloan) break;
     if (i == US_N || !(r = pr_get())) return;
     uslot = k;
     h = P.us[k].h;
     pb = (UDPiopb *)pr_pb(r);
+    j = (int)rn((uint32_t)P.us[k].nloan);
     if (rn(8) == 0) {                                   /* a made-up pointer first */
-        pb->csParam.receive.rcvBuff = P.us[k].loan ^ 0x10u;
+        pb->csParam.receive.rcvBuff = P.us[k].loan[j] + 1u;
         res = issue_ex(r, UDPBfrReturn, h, -1, uslot, 1);
         if (res == 0) bad("a made-up datagram pointer was accepted");
         if (!r->busy) pr_free(r);
         if (!(r = pr_get())) return;
         pb = (UDPiopb *)pr_pb(r);
-        if (!P.us[k].live || !P.us[k].loan) { pr_free(r); return; }
+        if (!P.us[k].live || P.us[k].h != h || !P.us[k].nloan) { pr_free(r); return; }
+        if (j >= P.us[k].nloan) j = P.us[k].nloan - 1;
     }
     {
-        MacPtr32 key = P.us[k].loan;
+        ustream *u = &P.us[k];
+        MacPtr32 key = u->loan[j];
+        uint16_t len = u->llen[j];
+        uint32_t sum = u->lsum[j];
+        int ooo = j != 0;
         pb->csParam.receive.rcvBuff = key;
-        P.us[k].loan = 0;                       /* returned: the call itself may lend the next datagram */
+        u_unlend(u, j);                         /* returned: the call itself may lend the next datagram */
         res = issue_ex(r, UDPBfrReturn, h, -1, uslot, 1);
         if (res == 0) {
             P.u_ret_ok++;
+            P.u_ret_ooo += ooo;
         } else {
             int glue_live = 0;
             uint8_t q;
             for (q = 0; q < P.d->nudp; q++) glue_live |= P.d->udp[q].used == 1 && P.d->udp[q].handle == h;
             if (glue_live || res != invalidStreamPtr)    /* (else: released by a nested call, not yet known here) */
-                bad("returning the lent datagram failed");
-            if (P.us[k].live && P.us[k].h == h && !P.us[k].loan) P.us[k].loan = key;
+                bad("returning a lent datagram failed");
+            if (u->live && u->h == h && u->nloan < MT_PB_UDPLOANS) {   /* put it back where it was */
+                int m;
+                for (m = u->nloan; m > j; m--) {
+                    u->loan[m] = u->loan[m - 1]; u->llen[m] = u->llen[m - 1]; u->lsum[m] = u->lsum[m - 1];
+                }
+                u->loan[j] = key; u->llen[j] = len; u->lsum[j] = sum;
+                u->nloan++;
+            }
         }
     }
     if (!r->busy) pr_free(r);
@@ -1429,11 +1455,27 @@ static void pb_reenter(void) {
     g.cb_depth--;
 }
 
+static uint32_t u_sum(MacPtr32 key, uint16_t len) {
+    const uint8_t *p = (const uint8_t *)pbf_p(key);
+    uint32_t h = 2166136261u, i;
+    if (!p) return 0;
+    for (i = 0; i < len; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
 static void u_lend(int uslot, MacPtr32 key, uint32_t len) {
     ustream *u = &P.us[uslot];
-    if (u->loan) bad("a second datagram was lent while one is outstanding");
+    int j;
+    if (u->nloan >= MT_PB_UDPLOANS) { bad("more datagrams lent than the loan table holds"); return; }
     if (key < u->base || key + len > u->base + u->len) bad("lent datagram lies outside the receive buffer");
-    u->loan = key;
+    for (j = 0; j < u->nloan; j++)
+        if (key < u->loan[j] + u->llen[j] + 8u && u->loan[j] < key + len + 8u) bad("lent datagrams overlap");
+    u->loan[u->nloan] = key;
+    u->llen[u->nloan] = (uint16_t)len;
+    u->lsum[u->nloan] = u_sum(key, (uint16_t)len);
+    u->nloan++;
+    if (u->nloan > 1) P.u_multi++;
+    if (u->nloan == MT_PB_UDPLOANS) P.u_full++;
     P.u_lent++;
 }
 
@@ -1827,9 +1869,15 @@ static void pb_udp_invariants(void) {
         for (k = 0; k < PR_N; k++)
             if (P.r[k].uslot == i && P.r[k].busy && !P.r[k].incall && P.r[k].cs == UDPRead) nrd++;
         if (nrd != s->rq_n) bad("pending UDPReads differ from the glue's queue");
-        if (s->loan != P.us[i].loan) bad("lent datagram differs from the glue's");
+        if (s->loan_n != P.us[i].nloan || s->loan_n > MT_PB_UDPLOANS) bad("lent datagrams differ from the glue's");
+        for (k = 0; k < P.us[i].nloan && k < s->loan_n; k++) {
+            if (s->loan[k] != P.us[i].loan[k]) bad("lent datagram differs from the glue's (or its order)");
+            if (u_sum(P.us[i].loan[k], P.us[i].llen[k]) != P.us[i].lsum[k]) bad("a lent datagram changed before its return");
+        }
         if (s->u && mt_udp_port(s->u) != P.us[i].port) bad("UDP port changed");
-        if (s->rq_n && !s->loan && s->u && mt_udp_queued(s->u)) bad("read waits although a datagram is queued and none lent");
+        if (s->u && mt_udp_queued(s->u) < s->loan_n) bad("more datagrams lent than queued in the core");
+        if (s->rq_n && s->loan_n < MT_PB_UDPLOANS && s->u && mt_udp_queued(s->u) > s->loan_n)
+            bad("read waits although an unlent datagram is queued and the loan table has room");
     }
     for (j = 0; j < MT_PB_ECHOQ; j++) nwait += P.d->echo[j].state != 0 && P.d->echo[j].blk.ioCompletion != 0;
     if ((long)nwait != P.echo_sent - P.echo_ok - P.echo_tmo) bad("waiting echoes differ from requests minus notifications");
@@ -1939,7 +1987,8 @@ static void test_fuzz_pb(void) {
     uint32_t seed;
     long sok = 0, sterm = 0, rok = 0, nc = 0, ret = 0, tmo = 0, ad = 0, at = 0, ac = 0, drc = 0,
          drp = 0, ie = 0, re = 0, op = 0, mg = 0, early = 0, rx = 0, lo = 0, lorx = 0;
-    long uro = 0, utm = 0, uwr = 0, urt = 0, uas = 0, urp = 0, uin = 0, eok = 0, eto = 0, ese = 0;
+    long uro = 0, utm = 0, uwr = 0, urt = 0, uas = 0, urp = 0, uin = 0, eok = 0, eto = 0, ese = 0,
+         uoo = 0, umu = 0, ufu = 0;
     /* FZ_SEED=n runs only seed n (replay a failure); FZ_SEEDS=n runs seeds 1..n */
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
@@ -1958,6 +2007,7 @@ static void test_fuzz_pb(void) {
         lo += (long)mt_get_stats(P.d->s)->ip_lo_out; lorx += P.lo_rx;
         uro += P.u_read_ok; utm += P.u_tmo; uwr += P.u_write_ok; urt += P.u_ret_ok; uas += P.u_asr;
         urp += P.u_rel_pending; uin += P.u_in; eok += P.echo_ok; eto += P.echo_tmo; ese += P.echo_sent;
+        uoo += P.u_ret_ooo; umu += P.u_multi; ufu += P.u_full;
     }
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "pb: open %ld send ok %ld term %ld rcv ok %ld nocopy %ld returned %ld timeouts %ld "
@@ -1967,10 +2017,12 @@ static void test_fuzz_pb(void) {
                 op, sok, sterm, rok, nc, ret, tmo, ad, at, ac, drc, drp, ie, re, mg, early, rx, lo, lorx);
     if (getenv("FUZZ_VERBOSE"))
         fprintf(stderr, "pb udp/icmp: datagrams in %ld reads ok %ld timeouts %ld writes %ld returned %ld "
-                "data asr %ld reads failed by release %ld; echoes sent %ld replied %ld timed out %ld\n",
-                uin, uro, utm, uwr, urt, uas, urp, ese, eok, eto);
+                "(out of order %ld) lends with others outstanding %ld table full %ld data asr %ld reads failed by release %ld; "
+                "echoes sent %ld replied %ld timed out %ld\n",
+                uin, uro, utm, uwr, urt, uoo, umu, ufu, uas, urp, ese, eok, eto);
     T_CHECK(uro > 0); T_CHECK(utm > 0); T_CHECK(uwr > 0); T_CHECK(urt > 0); T_CHECK(uas > 0);
     T_CHECK(urp > 0); T_CHECK(eok > 0); T_CHECK(eto > 0);
+    T_CHECK(uoo > 0); T_CHECK(umu > 0); T_CHECK(ufu > 0);   /* several loans per stream, returned out of order (Task 4) */
     /* coverage: the run must reach the interesting paths */
     T_CHECK(op > 0); T_CHECK(sok > 0); T_CHECK(sterm > 0); T_CHECK(rok > 0); T_CHECK(nc > 0);
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);

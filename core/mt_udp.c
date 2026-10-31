@@ -71,22 +71,39 @@ uint16_t mt_udp_port(const mt_udp *u) { return u->port; }
 
 void mt_udp_release(mt_udp *u) { memset(u, 0, sizeof *u); }
 
-uint32_t mt_udp_queued(const mt_udp *u) { return u->n; }
+uint32_t mt_udp_queued(const mt_udp *u) { return (uint32_t)u->n - u->nret; }
 
-int mt_udp_peek(mt_udp *u, mt_udp_dgram *out) {
-    const uint8_t *r;
-    if (u->n == 0) return 0;
-    r = u->buf + u->head;
-    out->src = mt_rd32(r);
-    out->sport = mt_rd16(r + 4);
-    out->len = mt_rd16(r + 6);
-    out->data = r + UDP_HDR;
-    return 1;
+/* Records given back out of order stay in the ring (their space comes back once every older one
+ * is back) and are marked by src = UDP_RET. No live record can carry it: IPv4 input drops every
+ * class E source (mt_ip.c) and loopback sources are local addresses. */
+#define UDP_RET 0xFFFFFFFFu
+#define UDP_NONE 0xFFFFFFFFu
+
+static uint32_t rec_len(const mt_udp *u, uint32_t off) {
+    return (UDP_HDR + (uint32_t)mt_rd16(u->buf + off + 6) + 1u) & ~1u;
 }
 
-void mt_udp_done(mt_udp *u) {
-    if (u->n == 0) return;
-    u->head += (UDP_HDR + (uint32_t)mt_rd16(u->buf + u->head + 6) + 1u) & ~1u;
+/* Offset of the record after the one at off. The head..wrap run ends exactly at wrap (wrap is the
+ * old tail), the run 0..tail stays below head < wrap, so reaching wrap means "continue at 0". */
+static uint32_t rec_next(const mt_udp *u, uint32_t off) {
+    off += rec_len(u, off);
+    return (u->wrap && off >= u->wrap) ? 0 : off;
+}
+
+/* Offset of the k-th record not given back, or UDP_NONE. The head record is never a given-back
+ * one (they are freed from the head at once), so k = 0 costs no walk. */
+static uint32_t rec_find(const mt_udp *u, uint32_t k) {
+    uint32_t off = u->head, i;
+    if (k >= (uint32_t)u->n - u->nret) return UDP_NONE;
+    for (i = 0; i < u->n; i++) {
+        if (mt_rd32(u->buf + off) != UDP_RET && k-- == 0) return off;
+        off = rec_next(u, off);
+    }
+    return UDP_NONE;
+}
+
+static void pop_head(mt_udp *u) {
+    u->head += rec_len(u, u->head);
     if (--u->n == 0) {
         u->head = u->tail = u->wrap = 0;
     } else if (u->wrap && u->head >= u->wrap) {
@@ -94,6 +111,34 @@ void mt_udp_done(mt_udp *u) {
         u->wrap = 0;
     }
 }
+
+int mt_udp_peek_at(mt_udp *u, uint32_t k, mt_udp_dgram *out) {
+    uint32_t off = rec_find(u, k);
+    const uint8_t *r;
+    if (off == UDP_NONE) return 0;
+    r = u->buf + off;
+    out->src = mt_rd32(r);
+    out->sport = mt_rd16(r + 4);
+    out->len = mt_rd16(r + 6);
+    out->data = r + UDP_HDR;
+    return 1;
+}
+
+int mt_udp_done_at(mt_udp *u, uint32_t k) {
+    uint32_t off = rec_find(u, k);
+    if (off == UDP_NONE) return 0;
+    mt_wr32(u->buf + off, UDP_RET);
+    u->nret++;
+    while (u->n && mt_rd32(u->buf + u->head) == UDP_RET) {   /* free the run now back at the head */
+        u->nret--;
+        pop_head(u);
+    }
+    return 1;
+}
+
+int mt_udp_peek(mt_udp *u, mt_udp_dgram *out) { return mt_udp_peek_at(u, 0, out); }
+
+void mt_udp_done(mt_udp *u) { (void)mt_udp_done_at(u, 0); }
 
 /* Offset where a record of r bytes can go, or UINT32_MAX if it does not fit. Wraps the
  * tail to 0 (recording the wrap point) when the run up to the end is too short. */

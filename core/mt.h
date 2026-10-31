@@ -193,10 +193,21 @@ uint16_t mt_udp_port(const mt_udp *u);
 /* len <= 65507 else MT_ERR_INVAL; checksum 0 sends field 0. Returns what mt_ip_output returns. */
 int      mt_udp_send(mt_udp *u, mt_ip4 dst, uint16_t dport, const uint8_t *p, uint16_t len,
                      int checksum, uint32_t now);
-/* 1 and *out filled (data points into the receive buffer) if a datagram is queued. */
+/* Queued datagrams stay in place in the receive buffer until they are given back, so a caller can
+ * hold several at once (the Mac glue lends them to UDPRead until UDPBfrReturn) and give them back
+ * in any order. Index k counts the datagrams not yet given back, oldest first (k = 0).
+ * mt_udp_peek_at: 1 and *out filled (data points into the receive buffer and stays valid and
+ * unchanged until that datagram is given back or the endpoint released) if there are more than k,
+ * else 0. Nothing is removed. Cost: O(1) for k = 0, else a walk over the records ahead of it.
+ * mt_udp_done_at: give back the k-th datagram (1; 0 if there is no k-th). Its space, and that of
+ * any datagrams given back behind it, is reused only once every older datagram is back too (the
+ * buffer is a ring, nothing moves). Later datagrams keep their place and their order.
+ * mt_udp_peek / mt_udp_done are the k = 0 forms. */
 int      mt_udp_peek(mt_udp *u, mt_udp_dgram *out);
-void     mt_udp_done(mt_udp *u);                       /* drop the peeked (oldest) datagram */
-uint32_t mt_udp_queued(const mt_udp *u);               /* number of queued datagrams */
+void     mt_udp_done(mt_udp *u);                       /* give back the oldest datagram */
+int      mt_udp_peek_at(mt_udp *u, uint32_t k, mt_udp_dgram *out);
+int      mt_udp_done_at(mt_udp *u, uint32_t k);
+uint32_t mt_udp_queued(const mt_udp *u);               /* datagrams queued and not given back */
 void     mt_udp_release(mt_udp *u);
 
 /* ---- DNS resolver (mt_dns.c) ---- */

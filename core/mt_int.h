@@ -118,7 +118,9 @@ typedef void (*mt_ip_spy_fn)(void *ctx, uint8_t proto, mt_ip4 src, mt_ip4 dst,
  * reserved for the DNS resolver, apps use slots 0..max_udp-1) ----
  * Receive area: records [src(4) sport(2) len(2) data] padded to even, placed contiguously
  * in the caller's buf. head/tail are byte offsets; when a record does not fit before the
- * end, `wrap` remembers where the tail run stopped and the next record starts at 0. */
+ * end, `wrap` remembers where the tail run stopped and the next record starts at 0.
+ * Datagrams are given back in any order (mt_udp_done_at): a given-back record keeps its place,
+ * marked src = 0xFFFFFFFF, until every older record is back; the head record is never marked. */
 struct mt_udp {
     mt_stack *st;
     uint8_t *buf;
@@ -126,7 +128,8 @@ struct mt_udp {
     mt_udp_cb cb;
     void *user;
     uint16_t port;
-    uint16_t n;          /* queued datagrams */
+    uint16_t n;          /* records in the ring (queued datagrams, including given-back ones) */
+    uint16_t nret;       /* records given back out of order but still in the ring (src = UDP_RET) */
 };
 
 /* ---- TCP (mt_tcp.c lifecycle + input, mt_tcp_out.c segment output) ----

@@ -269,17 +269,15 @@ static void rcv_buffer_return(void) {
     r1 = uread(&x, s, 0);
     T_EQ(r1->ioResult, 0);
     k1 = r1->csParam.receive.rcvBuff;
-    r2 = uread(&x, s, 0);                                 /* one datagram is lent at a time */
-    T_EQ(r2->ioResult, inProgress);
+    r2 = uread(&x, s, 0);                                 /* matrix 904b-d: no return needed first */
+    T_EQ(r2->ioResult, 0);
+    T_EQ(r2->csParam.receive.rcvBuffLen, 7);
     b = upb(UDPBfrReturn, s);
     b->csParam.receive.rcvBuff = k1 + 1;                  /* made up */
     T_EQ(ucall(&x, b), invalidBufPtr);                    /* matrix 903: -23013 */
-    T_EQ(r2->ioResult, inProgress);
     b = upb(UDPBfrReturn, s);
     b->csParam.receive.rcvBuff = k1;
     T_EQ(ucall(&x, b), 0);
-    T_EQ(r2->ioResult, 0);                                /* the next datagram is served at the return */
-    T_EQ(r2->csParam.receive.rcvBuffLen, 7);
     T_EQ(r2->csParam.receive.remotePort, PEERPORT + 1u);
     b = upb(UDPBfrReturn, s);
     b->csParam.receive.rcvBuff = k1;
@@ -578,7 +576,176 @@ static void exact_size_pbs(void) {
     T_EQ(pbf_bad, 0);
 }
 
+static int16_t ureturn(pbt *x, StreamPtr s, MacPtr32 p) {
+    UDPiopb *b = upb(UDPBfrReturn, s);
+    b->csParam.receive.rcvBuff = p;
+    return ucall(x, b);
+}
+
+/* Matrix 904-904d: MacTCP returns each datagram although the earlier ones were never given back
+ * with UDPBfrReturn. Each read gets its own datagram, in arrival order, in place. */
+static void udp_two_reads_without_return(void) {
+    pbt x;
+    StreamPtr s;
+    uint16_t port = 0;
+    UDPiopb *r1, *r2, *r3;
+    pbt_init(&x, 1);
+    s = pbt_ucreate(&x, 0, 2048, 0, 0, &port);
+    pbt_udp_in(&x, PEERPORT, port, "", 0);                /* matrix 904: the empty datagram */
+    r1 = uread(&x, s, 2);
+    T_EQ(r1->ioResult, 0);
+    T_EQ(r1->csParam.receive.rcvBuffLen, 0);
+    r2 = uread(&x, s, 3);                                 /* matrix 904b: no return in between */
+    T_EQ(r2->ioResult, inProgress);
+    pbt_udp_in(&x, PEERPORT, port, "odd-addr!", 9);
+    T_EQ(r2->ioResult, 0);                                /* matrix 904b: rd 0, n 9 */
+    T_EQ(r2->csParam.receive.rcvBuffLen, 9);
+    T_MEMEQ(pbf_p(r2->csParam.receive.rcvBuff), "odd-addr!", 9);
+    pbt_udp_in(&x, PEERPORT, port, "multi", 5);           /* matrix 904c: arrives before the read */
+    r3 = uread(&x, s, 3);
+    T_EQ(r3->ioResult, 0);                                /* at once (903b) */
+    T_EQ(r3->csParam.receive.rcvBuffLen, 5);
+    T_MEMEQ(pbf_p(r3->csParam.receive.rcvBuff), "multi", 5);
+    T_MEMEQ(pbf_p(r2->csParam.receive.rcvBuff), "odd-addr!", 9);   /* the earlier loan is intact */
+    T_CHECK(r2->csParam.receive.rcvBuff != r3->csParam.receive.rcvBuff);
+    T_EQ(ureturn(&x, s, r1->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, r2->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, r3->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, r3->csParam.receive.rcvBuff), invalidBufPtr);   /* matrix 903: again */
+    T_EQ(pbf_bad, 0);
+}
+
+static void udp_return_out_of_order(void) {
+    pbt x;
+    StreamPtr s;
+    uint16_t port = 0;
+    UDPiopb *r[3], *w;
+    pbt_init(&x, 1);
+    s = pbt_ucreate(&x, 0, 2048, 0, 0, &port);
+    pbt_udp_in(&x, PEERPORT, port, "aaaa", 4);
+    pbt_udp_in(&x, PEERPORT + 1u, port, "bbbbbbb", 7);
+    pbt_udp_in(&x, PEERPORT + 2u, port, "c", 1);
+    r[0] = uread(&x, s, 0); r[1] = uread(&x, s, 0); r[2] = uread(&x, s, 0);
+    T_EQ(r[0]->ioResult, 0); T_EQ(r[1]->ioResult, 0); T_EQ(r[2]->ioResult, 0);
+    T_EQ(r[1]->csParam.receive.remotePort, PEERPORT + 1u);
+    T_EQ(r[2]->csParam.receive.remotePort, PEERPORT + 2u);
+    T_EQ(ureturn(&x, s, r[1]->csParam.receive.rcvBuff + 1), invalidBufPtr);   /* made up */
+    T_EQ(ureturn(&x, s, r[1]->csParam.receive.rcvBuff), 0);                   /* the middle one */
+    T_EQ(ureturn(&x, s, r[1]->csParam.receive.rcvBuff), invalidBufPtr);       /* already back */
+    T_MEMEQ(pbf_p(r[0]->csParam.receive.rcvBuff), "aaaa", 4);
+    T_MEMEQ(pbf_p(r[2]->csParam.receive.rcvBuff), "c", 1);
+    pbt_udp_in(&x, PEERPORT + 3u, port, "dd", 2);
+    w = uread(&x, s, 0);                                  /* the next datagram, not a returned one */
+    T_EQ(w->ioResult, 0);
+    T_EQ(w->csParam.receive.remotePort, PEERPORT + 3u);
+    T_MEMEQ(pbf_p(w->csParam.receive.rcvBuff), "dd", 2);
+    T_EQ(ureturn(&x, s, r[2]->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, r[0]->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, w->csParam.receive.rcvBuff), 0);
+    T_EQ(ureturn(&x, s, r[0]->csParam.receive.rcvBuff), invalidBufPtr);
+    {   /* every loan is back: the whole buffer is free again */
+        int i, n = 0;
+        uint8_t big[400];
+        memset(big, 7, sizeof big);
+        for (i = 0; i < 5; i++) pbt_udp_in(&x, PEERPORT, port, big, sizeof big);
+        for (i = 0; i < 5; i++) n += uread(&x, s, 0)->ioResult == 0;
+        T_EQ(n, 5);
+    }
+    T_EQ(pbf_bad, 0);
+}
+
+/* MT_PB_UDPLOANS datagrams can be held per stream. A further read gets what MacTCP gives a read for
+ * which no datagram can be handed out (its buffer full of unreturned datagrams): it waits and ends
+ * with commandTimeout -23016 (matrix 905); a return in time serves it. */
+static void udp_loan_table_full_returns_error(void) {
+    pbt x;
+    StreamPtr s;
+    uint16_t port = 0;
+    UDPiopb *r[MT_PB_UDPLOANS], *w, *w2;
+    int i;
+    pbt_init(&x, 1);
+    s = pbt_ucreate(&x, 0, 4096, 0, 0, &port);
+    for (i = 0; i < MT_PB_UDPLOANS + 2; i++) pbt_udp_in(&x, PEERPORT + (uint16_t)i, port, "dg", 2);
+    for (i = 0; i < MT_PB_UDPLOANS; i++) {
+        r[i] = uread(&x, s, 0);
+        T_EQ(r[i]->ioResult, 0);
+        T_EQ(r[i]->csParam.receive.remotePort, PEERPORT + (uint16_t)i);
+    }
+    w = uread(&x, s, 2);                                  /* the table is full */
+    T_EQ(w->ioResult, inProgress);
+    pbf_now += 2000;
+    mt_pb_tick(x.d);
+    T_EQ(w->ioResult, commandTimeout);                    /* matrix 905: -23016 */
+    w = uread(&x, s, 2);
+    w2 = uread(&x, s, 2);
+    T_EQ(w->ioResult, inProgress);
+    T_EQ(ureturn(&x, s, r[3]->csParam.receive.rcvBuff), 0);    /* one back: the oldest read is served */
+    T_EQ(w->ioResult, 0);
+    T_EQ(w->csParam.receive.remotePort, PEERPORT + MT_PB_UDPLOANS);
+    T_EQ(w2->ioResult, inProgress);
+    T_EQ(ureturn(&x, s, r[0]->csParam.receive.rcvBuff), 0);
+    T_EQ(w2->ioResult, 0);
+    T_EQ(w2->csParam.receive.remotePort, PEERPORT + MT_PB_UDPLOANS + 1u);
+    T_EQ(pbf_bad, 0);
+}
+
+/* UDPRelease (and the goodbye kiss when the app quits) with datagrams still lent: the buffer goes
+ * back to the app at once, nothing writes into it afterwards, the loans are forgotten. */
+static void udp_release_with_loans_outstanding(void) {
+    pbt x;
+    StreamPtr s;
+    uint16_t port = 0;
+    UDPiopb *r1, *r2, *rel;
+    uint8_t *buf, snap[2048];
+    int pass;
+    pbt_init(&x, 1);
+    for (pass = 0; pass < 2; pass++) {
+        s = pbt_ucreate(&x, 0, 2048, pbf_asr(asr_count), 0, &port);
+        pbt_udp_in(&x, PEERPORT, port, "one", 3);
+        pbt_udp_in(&x, PEERPORT, port, "two", 3);
+        pbt_udp_in(&x, PEERPORT, port, "three", 5);
+        r1 = uread(&x, s, 0);
+        r2 = uread(&x, s, 0);
+        T_EQ(r1->ioResult, 0); T_EQ(r2->ioResult, 0);
+        T_EQ(ureturn(&x, s, r2->csParam.receive.rcvBuff), 0);   /* one returned, r1 still held */
+        if (pass == 0) {
+            rel = upb(UDPRelease, s);
+            T_EQ(ucall(&x, rel), 0);
+            T_EQ(rel->csParam.create.rcvBuffLen, 2048);
+            buf = (uint8_t *)pbf_p(rel->csParam.create.rcvBuff);
+        } else {
+            buf = (uint8_t *)pbf_p(r1->csParam.receive.rcvBuff) - 8;   /* the first record */
+            mt_pb_goodbye(x.d);                           /* the app quits */
+        }
+        T_CHECK(buf != NULL);
+        if (!buf) return;
+        memcpy(snap, buf, sizeof snap);
+        T_EQ(ureturn(&x, s, r1->csParam.receive.rcvBuff), invalidStreamPtr);   /* matrix 120.22 */
+        T_EQ(uread(&x, s, 0)->ioResult, invalidStreamPtr);
+        pbt_udp_in(&x, PEERPORT, port, "late", 4);        /* the port is closed */
+        pbf_now += 5000;
+        mt_pb_tick(x.d);
+        T_MEMEQ(buf, snap, sizeof snap);                  /* not written after the release */
+        T_MEMEQ(pbf_p(r1->csParam.receive.rcvBuff), "one", 3);
+        {   /* a new stream in the same slot starts without loans */
+            uint16_t p2 = 0;
+            StreamPtr s2 = pbt_ucreate(&x, 0, 2048, 0, 0, &p2);
+            UDPiopb *n;
+            T_CHECK(s2 != 0);
+            pbt_udp_in(&x, PEERPORT, p2, "new", 3);
+            n = uread(&x, s2, 0);
+            T_EQ(n->ioResult, 0);
+            T_EQ(ureturn(&x, s2, r1->csParam.receive.rcvBuff), invalidBufPtr);
+            T_EQ(ureturn(&x, s2, n->csParam.receive.rcvBuff), 0);
+            T_EQ(ucall(&x, upb(UDPRelease, s2)), 0);
+        }
+    }
+    T_EQ(pbf_bad, 0);
+}
+
 T_MAIN(create_min_buffer_and_port_rules, create_with_port0_assigns, write_read_roundtrip,
        data_arrival_asr_and_read_at_once, read_timeout_completes_with_matrix_error,
        release_completes_pending_read, rcv_buffer_return, write_variants, mtu_call,
-       stream_check_sweep, icmp_report_asr, release_inside_callbacks, exact_size_pbs)
+       stream_check_sweep, icmp_report_asr, release_inside_callbacks, exact_size_pbs,
+       udp_two_reads_without_return, udp_return_out_of_order, udp_loan_table_full_returns_error,
+       udp_release_with_loans_outstanding)

@@ -44,6 +44,7 @@
 #define MT_PB_MIN_RCVBUF  4096u  /* TCPCreate minimum (matrix 200) */
 #define MT_PB_WDS_MAX     64     /* WDS entries scanned before the WDS counts as unterminated */
 #define MT_PB_MAX_UDP     8      /* UDP stream table size; mt_limits.max_udp may be smaller */
+#define MT_PB_UDPLOANS    8      /* datagrams lent to UDPRead per stream until UDPBfrReturn (matrix 904-904d: 4+) */
 #define MT_PB_UDPRQ       4      /* UDPRead PBs pending per stream (FIFO; matrix 906 shows two) */
 #define MT_PB_MIN_UDPBUF  2048u  /* UDPCreate minimum (matrix 900) */
 #define MT_PB_UDP_GATHER  1472u  /* largest multi-entry UDPWrite (one frame); a one-entry WDS is unlimited */
@@ -142,20 +143,25 @@ typedef struct MtUdpRead {
     uint8_t  timed;
 } MtUdpRead;
 
-/* A UDP stream (UDPCreate .. UDPRelease). UDPRead hands out a pointer to the oldest datagram
- * inside the app's receive buffer (matrix 903); it stays queued in the core until
- * UDPBfrReturn, so one datagram is lent at a time (loan = its address, 0 = none). */
+/* A UDP stream (UDPCreate .. UDPRelease). UDPRead hands out a pointer to the next datagram
+ * inside the app's receive buffer (matrix 903); it stays queued in the core until UDPBfrReturn.
+ * Up to MT_PB_UDPLOANS datagrams are lent at once (matrix 904-904d), returned in any order:
+ * loan[0..loan_n-1] are their addresses in lending order, which is also their order in the
+ * core's queue (loan[i] is the core's datagram i), so the next one to lend is datagram loan_n.
+ * The loans belong to the stream's owner: release and the goodbye kiss forget them (Task 12). */
 typedef struct MtUdpStream {
     mt_udp   *u;
     MtDrv    *d;
     StreamPtr handle;           /* address of this entry + 2 * (gen & 7) */
-    MacPtr32  asr, user, rbuf, loan;
+    MacPtr32  asr, user, rbuf;
     MacPtr32  a5;               /* mt_os_a5() at UDPCreate */
     uint32_t  rlen;
     uint8_t   used;             /* 0 free, 1 live, 2 releasing (pending reads being failed) */
     uint8_t   gen;
     uint8_t   rq_n;
+    uint8_t   loan_n;
     MtUdpRead rq[MT_PB_UDPRQ];
+    MacPtr32  loan[MT_PB_UDPLOANS];
 } MtUdpStream;
 
 /* One ICMPEcho in flight. blk is MacTCP's own copy of the PB that the icmpCompletion routine
