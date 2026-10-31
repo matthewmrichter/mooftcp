@@ -142,6 +142,35 @@ void mt_pb_tick(MtDrv *d) {
     mt_os_irq_restore(sv);
 }
 
+/* Goodbye kiss: drop everything the departing application owns, silently (no routine of its
+ * may run any more). Generations and connection counters move on, so a stale handle or a late
+ * core callback for an old connection is recognised as such. */
+void mt_pb_goodbye(MtDrv *d) {
+    int sv = mt_os_irq_save();
+    uint8_t i;
+    for (i = 0; i < d->ntcp; i++) {
+        MtStream *s = &d->tcp[i];
+        uint8_t gen = s->gen;
+        uint16_t conn = (uint16_t)(s->conn + 1u);
+        if (!s->used) continue;
+        if (s->t) mt_tcp_release(s->t);         /* no callbacks; a live connection gets an RST */
+        memset(s, 0, sizeof *s);
+        s->gen = gen;
+        s->conn = conn;
+    }
+    d->rel_mask = 0;
+    for (i = 0; i < d->nudp; i++) {
+        MtUdpStream *u = &d->udp[i];
+        uint8_t gen = u->gen;
+        if (!u->used) continue;
+        if (u->u) mt_udp_release(u->u);
+        memset(u, 0, sizeof *u);
+        u->gen = gen;
+    }
+    for (i = 0; i < MT_PB_ECHOQ; i++) d->echo[i].state = 0;   /* a late reply is ignored */
+    mt_os_irq_restore(sv);
+}
+
 /* ---- code tables (core -> MacTCP) ---- */
 
 uint16_t mt_pb_event_code(int core_ev) {

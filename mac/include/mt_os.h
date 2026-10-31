@@ -58,11 +58,18 @@ typedef struct MtStreamAsr {
     MacPtr32  proc;                 /* 0 = no ASR installed: mt_os_asr is never called with 0 */
     StreamPtr stream;
     MacPtr32  user;
+    MacPtr32  a5;                   /* the creator's A5 (mt_os_a5() at TCPCreate / UDPCreate) */
     uint8_t   kind;
 } MtStreamAsr;
 
 /* Monotonic milliseconds (wraps at 2^32); the one clock every glue entry uses. */
 uint32_t mt_os_ms(void);
+
+/* The A5 world of the application making the current call (the Mac reads CurrentA5, low memory
+ * 0x904). The glue records it when a stream is created and mt_os_asr runs the stream's ASR with
+ * that A5 (an ASR can run from the timer or the network input path, where A5 is whatever was
+ * interrupted). Completion routines get the A5 the driver recorded when the PB was issued. */
+MacPtr32 mt_os_a5(void);
 
 /* Finish a PB that mt_pb_control earlier returned inProgress for: store err in ioResult, then
  * run ioCompletion (if nonzero) with the register convention above. Called at most once per
@@ -79,7 +86,8 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 int  mt_os_irq_save(void);
 void mt_os_irq_restore(int saved);
 
-/* Nonzero while running at interrupt time (completion routines, ASRs and input run there). */
+/* Nonzero while running at interrupt time (completion routines, ASRs and input run there). The
+ * Mac reads the processor's interrupt mask (SR bits 8-10, nonzero = interrupt time). */
 int  mt_os_in_interrupt(void);
 
 #ifdef MT_OS_MAC

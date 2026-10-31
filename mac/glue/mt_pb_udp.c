@@ -40,6 +40,7 @@ static void asr(MtUdpStream *s, uint16_t ev, MacPtr32 icmp) {
     a.proc = s->asr;
     a.stream = s->handle;
     a.user = s->user;
+    a.a5 = s->a5;
     a.kind = MT_ASR_UDP;
     mt_pb_call_asr(s->d, &a, ev, 0, icmp);
 }
@@ -154,6 +155,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->udp.csParam.create.notifyProc;
     s->user = pb->udp.csParam.create.userDataPtr;
+    s->a5 = mt_os_a5();
     s->rbuf = buf;
     s->rlen = len;
     pb->udp.udpStream = s->handle;

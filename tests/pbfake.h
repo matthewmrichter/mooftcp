@@ -32,6 +32,7 @@ typedef struct {
     StreamPtr stream;             /* A */
     uint16_t ev, reason;          /* A */
     MacPtr32 user, icmp;          /* A */
+    MacPtr32 a5;                  /* A: the A5 the ASR would run with */
 } pbf_ev;
 #define PBF_LOG 2048
 
@@ -41,6 +42,7 @@ extern int pbf_nlog;
 extern int pbf_bad;               /* misuse seen by the fake (bad pointer, unknown routine, ...) */
 extern int pbf_irq, pbf_irq_max, pbf_irq_calls;
 extern int pbf_in_int;            /* what mt_os_in_interrupt reports */
+extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current application's" A5) */
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */

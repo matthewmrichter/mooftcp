@@ -97,6 +97,7 @@ struct MtStream {
     MtDrv    *d;
     StreamPtr handle;           /* address of this entry + 2 * (gen & 7) */
     MacPtr32  asr, user, rbuf;
+    MacPtr32  a5;               /* mt_os_a5() at TCPCreate: the A5 the ASR runs with */
     uint32_t  rlen;
     uint8_t   used;             /* 0 free, 1 live, 2 released (core release deferred) */
     uint8_t   gen;              /* bumped on every TCPCreate of this slot */
@@ -148,6 +149,7 @@ typedef struct MtUdpStream {
     MtDrv    *d;
     StreamPtr handle;           /* address of this entry + 2 * (gen & 7) */
     MacPtr32  asr, user, rbuf, loan;
+    MacPtr32  a5;               /* mt_os_a5() at UDPCreate */
     uint32_t  rlen;
     uint8_t   used;             /* 0 free, 1 live, 2 releasing (pending reads being failed) */
     uint8_t   gen;
@@ -204,6 +206,12 @@ int16_t  mt_pb_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
 uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE */
 void     mt_pb_tick(MtDrv *d);
+/* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
+ * forget every TCP and UDP stream and every ICMPEcho in flight WITHOUT calling any completion
+ * routine or ASR (the application's code and buffers are going away). Core objects are
+ * released, so the core stops touching the app's buffers (a live connection gets an RST). Call
+ * it at task time with no glue frame active (depth 0, not inside the core): the driver does. */
+void     mt_pb_goodbye(MtDrv *d);
 
 /* The one table each for core -> MacTCP codes (exported so every row is tested). */
 uint16_t mt_pb_event_code(int core_ev);        /* mt_tcp_event -> TCP ASR eventCode, 0 = none */

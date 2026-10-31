@@ -70,8 +70,9 @@ mt_enet_ph:
         bne     .Lc
         moveq   #0,%d2
 .Lc:    move.w  %d2,GATE_HEAD(%a2)
-        move.l  52(%sp),%a5              | the interrupted A5 (movem frame: d0-d7 then a0-a6, a5 = 8*4+5*4)
-                                         | back in A5: ASRs and completions the core calls get the app's A5
+        move.l  0x904,%a5                | CurrentA5 (low memory), not the interrupted A5 (which may be
+                                         | ROM scratch): code reached from here sees the app's A5. The
+                                         | .IPP driver sets each routine's own recorded A5 anyway.
         move.l  %a2,-(%sp)
         jsr     mt_gate_poke             | C: runs the core now, or leaves it to the owner
         addq.l  #4,%sp

@@ -61,6 +61,7 @@ static void asr(MtStream *s, uint16_t ev, uint16_t reason, MacPtr32 icmp) {
     a.proc = s->asr;
     a.stream = s->handle;
     a.user = s->user;
+    a.a5 = s->a5;
     a.kind = MT_ASR_TCP;
     mt_pb_call_asr(s->d, &a, ev, reason, icmp);
 }
@@ -592,6 +593,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->tcp.csParam.create.notifyProc;                  /* 0 is fine (matrix 202b) */
     s->user = pb->tcp.csParam.create.userDataPtr;
+    s->a5 = mt_os_a5();
     s->rbuf = buf;
     s->rlen = len;
     s->ulp_s = 120;

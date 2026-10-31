@@ -8,7 +8,7 @@
  *
  * Gate: mt_os_irq_save / mt_os_irq_restore are MT_GATE_ENTER / MT_GATE_LEAVE on the one gate the
  * driver registers with mt_os_mac_set_gate (no interrupt mask is touched: see mt_gate.h).
- * mt_os_in_interrupt() is true while the core is owned by the protocol handler or the timer. */
+ * mt_os_in_interrupt() reads the interrupt mask from the SR (Task 10 ruling). */
 #include "mt_os.h"
 #include "mt_gate.h"
 #include "mt_enet_logic.h"
@@ -38,7 +38,13 @@ void mt_os_irq_restore(int saved)
     if (g_gate) mt_gate_leave(g_gate);
 }
 
+/* Interrupt time = a nonzero processor interrupt mask (SR bits 8-10). `move sr` is unprivileged
+ * on the 68000, and Mac OS code runs in supervisor mode on the later CPUs anyway. Completion
+ * routines, ASRs, the protocol handler (mask 6) and the Time Manager task (mask 1) all run with
+ * a nonzero mask; the application thread runs at 0. */
 int mt_os_in_interrupt(void)
 {
-    return g_gate != 0 && mt_gate_in_irq(g_gate);
+    uint16_t sr;
+    __asm__ volatile("move.w %%sr,%0" : "=d"(sr));
+    return (sr & 0x0700u) != 0;
 }

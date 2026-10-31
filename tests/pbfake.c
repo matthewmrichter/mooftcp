@@ -9,6 +9,7 @@ int pbf_nlog;
 int pbf_bad;
 int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
+MacPtr32 pbf_a5;
 
 static uint64_t g_mem[PBF_SIZE / 8];
 static uint32_t g_used;
@@ -26,6 +27,7 @@ void pbf_reset(void) {
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
+    pbf_a5 = 0x00A50000u;
     pbf_now = 1000;
 }
 
@@ -65,6 +67,7 @@ void *pbf_p(MacPtr32 a) {
 /* ---- mt_os.h ---- */
 
 uint32_t mt_os_ms(void) { return pbf_now; }
+MacPtr32 mt_os_a5(void) { return pbf_a5; }
 void *mt_os_ptr(MacPtr32 a) { return pbf_p(a); }
 MacPtr32 mt_os_addr(const void *p) { return pbf_a(p); }
 
@@ -100,6 +103,7 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
     e.reason = reason;
     e.user = a->user;
     e.icmp = icmp;
+    e.a5 = a->a5;
     log_add(&e);
     if (c < PROC_BASE + 0x1000u || c >= PROC_BASE + 0x1000u + 4u * NPROC || (c & 3u)) {
         pbf_bad++;                              /* the glue must never call ASR 0 or garbage */
