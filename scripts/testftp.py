@@ -10,6 +10,7 @@ existing folders; no delete, rename or chmod). Passive ports 17100-17199. Active
 only mode Fetch 2.1.2 has) connects back to the guest, which works only on the TAP link.
 Needs Python >= 3.6 and pyftpdlib: python3 -m pip install --target "$MT_HOME/pylib" pyftpdlib"""
 import hashlib
+import socket
 import logging
 import os
 import sys
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.join(MT_HOME, "pylib"))
 try:
     from pyftpdlib.authorizers import DummyAuthorizer
     from pyftpdlib.handlers import FTPHandler
+    from pyftpdlib.handlers.ftp.dispatchers import ActiveDTP
     from pyftpdlib.servers import FTPServer
 except ImportError:
     sys.exit('testftp.py: pyftpdlib missing: python3 -m pip install --target "%s/pylib" pyftpdlib'
@@ -45,6 +47,56 @@ with open(big, "rb") as f:
 print("big10m.bin sha256", h.hexdigest(), flush=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+
+
+class QuietActive(ActiveDTP):
+    """ActiveDTP without the "200 Active data connection established" reply (PORT was answered at once)."""
+    def handle_connect(self):
+        self.del_channel()
+        if self._idler is not None and not self._idler.cancelled:
+            self._idler.cancel()
+        if not self.cmd_channel.connected:
+            return self.close()
+        err = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if err != 0:
+            raise OSError(err)
+        handler = self.cmd_channel.dtp_handler(self.socket, self.cmd_channel)
+        self.cmd_channel.data_channel = handler
+        self.cmd_channel._on_dtp_connection()
+
+
+class LateHandler(FTPHandler):
+    """Fetch 2.1.2 sends PORT and only then opens its listening socket, so connecting back at once (what
+    pyftpdlib does) is refused even by MacTCP 2.1 (RST). This handler answers PORT at once ("200"), connects
+    400 ms later (the listener is open well before Fetch's LIST, about 200 ms after its PORT) and holds every
+    transfer command until that connection exists, so pyftpdlib's normal "data channel open" path runs."""
+    permit_foreign_addresses = True     # test server only: the guest PORT address is the redirected peer
+    active_dtp = QuietActive
+    pending = False
+
+    def _make_eport(self, ip, port):
+        self.respond("200 PORT command successful.")
+        self.pending = True
+        self.ioloop.call_later(0.4, super()._make_eport, ip, port)
+
+    def _held(self, name, *args):
+        if self.pending:
+            if self.data_channel is None:
+                self.ioloop.call_later(0.05, self._held, name, *args)
+                return None
+            self.pending = False
+        return getattr(super(), name)(*args)
+
+    def ftp_LIST(self, path): return self._held("ftp_LIST", path)
+    def ftp_NLST(self, path): return self._held("ftp_NLST", path)
+    def ftp_MLSD(self, path): return self._held("ftp_MLSD", path)
+    def ftp_RETR(self, f): return self._held("ftp_RETR", f)
+    def ftp_STOR(self, f, mode="w"): return self._held("ftp_STOR", f, mode)
+    def ftp_STOU(self, line): return self._held("ftp_STOU", line)
+    def ftp_APPE(self, f): return self._held("ftp_APPE", f)
+
+
+FTPHandler = LateHandler
 auth = DummyAuthorizer()
 auth.add_user("moof", "moof", root, perm="elrw")
 auth.add_anonymous(root, perm="elr")
