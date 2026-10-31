@@ -614,26 +614,41 @@ static void check_invariants(void) {
         bad("tcp_tx_stalls differs from refused TCP frames");
     if (g.s->lo->n > MT_LO_SLOTS || g.s->lo->head >= MT_LO_SLOTS || g.s->lo->dlv)
         bad("loopback FIFO state");
+    /* loopback datagrams enter the FIFO whole: once it is empty no partial one holds reassembly */
+    if (g.s->reasm->active && mt_ip_is_local(g.s, g.s->reasm->src) && g.s->lo->n == 0)
+        bad("partial loopback datagram holds the reassembly slot");
 }
 
 /* Calling mt_tick whenever the deadline reads 0 must clear it. Loopback traffic is the exception:
  * each tick delivers what was queued and may queue replies (one hop per tick; a UDP echo endpoint
  * answering itself never stops), so a 0 that persists must come with frames in the FIFO. */
+/* The stack's deadline without the loopback term: ARP, reassembly, TCP (incl. the stall timer), DNS. */
+static uint32_t dl_no_lo(const mt_stack *s, uint32_t now) {
+    uint32_t d = mt_dl_min(mt_arp_deadline(s, now), mt_tcp_deadline(s, now));
+    d = mt_dl_min(d, mt_dns_deadline(s, now));
+    if (s->reasm->active)
+        d = mt_dl_min(d, mt_time_before(now, s->reasm->t_start + MT_REASM_TIMEOUT_MS)
+                         ? s->reasm->t_start + MT_REASM_TIMEOUT_MS - now : 0u);
+    return d;
+}
+
 static void deadline_check(void) {
     int k;
     for (k = 0; k < 64; k++) {
         if (mt_next_deadline(g.s, g.now) != 0) return;
-        if (k >= 6 && g.s->lo->n == 0) break;            /* no loopback hop left to explain it */
         mt_tick(g.s, g.now);
+        /* every timer that was due ran in that tick; only the loopback term may still read 0 */
+        if (dl_no_lo(g.s, g.now) == 0) {
+            if (getenv("FZ_DEBUG"))
+                fprintf(stderr, "dl arp %u tcp %u dns %u reasm %u stall_on %u at %u now %u\n",
+                        mt_arp_deadline(g.s, g.now), mt_tcp_deadline(g.s, g.now),
+                        mt_dns_deadline(g.s, g.now), g.s->reasm->active, g.s->stall_on,
+                        g.s->stall_at, g.now);
+            bad("expired deadline survives mt_tick");
+            return;
+        }
     }
-    if (mt_next_deadline(g.s, g.now) != 0) return;
-    if (g.s->lo->n == 0) {
-        if (getenv("FZ_DEBUG"))
-            fprintf(stderr, "dl arp %u ip %u tcp %u dns %u stall_on %u at %u now %u\n",
-                    mt_arp_deadline(g.s, g.now), mt_ip_deadline(g.s, g.now), mt_tcp_deadline(g.s, g.now),
-                    mt_dns_deadline(g.s, g.now), g.s->stall_on, g.s->stall_at, g.now);
-        bad("expired deadline survives mt_tick");
-    }
+    if (mt_next_deadline(g.s, g.now) == 0 && g.s->lo->n == 0) bad("expired deadline survives mt_tick");
 }
 
 /* ---- frame generation ---- */
@@ -1890,8 +1905,20 @@ static void pb_step(uint8_t *f) {
     pb_invariants();
     if ((g.step & 63) == 0) pb_full_canary_check();
     /* loopback hops keep the deadline at 0 while frames are queued (see deadline_check) */
-    for (k = 0; k < 64 && mt_pb_next_deadline_ms(P.d) == 0 && (k < 6 || P.d->s->lo->n); k++)
+    for (k = 0; k < 64 && mt_pb_next_deadline_ms(P.d) == 0; k++) {
         mt_pb_tick(P.d);
+        /* as before Task 3, up to 6 ticks may be needed (glue work after a tick can arm a core
+         * timer that is already due); after that only the loopback term may read 0 */
+        if (k >= 5 && (dl_no_lo(P.d->s, P.d->now) == 0 || mt_pb_tcp_deadline(P.d) == 0 ||
+            mt_pb_udp_deadline(P.d) == 0 || mt_pb_ip_deadline(P.d) == 0)) {
+            if (getenv("FZ_DEBUG"))
+                fprintf(stderr, "pb arp %u tcp %u dns %u now %u stall %u/%u; core %u glue tcp %u udp %u ip %u lo %u k %d\n",
+                        mt_arp_deadline(P.d->s, P.d->now), mt_tcp_deadline(P.d->s, P.d->now), mt_dns_deadline(P.d->s, P.d->now), P.d->now, P.d->s->stall_on, P.d->s->stall_at, dl_no_lo(P.d->s, P.d->now), mt_pb_tcp_deadline(P.d), mt_pb_udp_deadline(P.d),
+                        mt_pb_ip_deadline(P.d), P.d->s->lo->n, k);
+            bad("expired deadline survives mt_pb_tick");        /* only loopback may stay at 0 */
+            break;
+        }
+    }
     if (mt_pb_next_deadline_ms(P.d) == 0 && P.d->s->lo->n == 0) bad("expired deadline survives mt_pb_tick");
     d = mt_pb_next_deadline_ms(P.d);
     dt = rn(10) == 0 ? rn(5000) : rn(150);

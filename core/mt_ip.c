@@ -144,9 +144,10 @@ static int lo_put(mt_stack *s, uint16_t n) {
 
 void mt_ip_lo_drain(mt_stack *s, uint32_t now) {
     mt_lo *q = s->lo;
-    uint8_t k = q->n;                          /* frames queued meanwhile wait for the next tick */
-    while (k-- && q->n) {
+    q->left = q->n;                            /* frames queued meanwhile wait for the next tick */
+    while (q->left && q->n) {
         mt_lo_slot *e = &q->s[q->head];
+        q->left--;
         q->dlv = 1;                            /* slot head stays reserved during the dispatch */
         ip_in(s, e->d, e->len, now, 1);
         q->dlv = 0;
@@ -158,6 +159,7 @@ void mt_ip_lo_drain(mt_stack *s, uint32_t now) {
 void mt_ip_lo_flush(mt_stack *s) {
     mt_lo *q = s->lo;
     uint8_t keep = q->dlv;                     /* the slot being delivered is released by the drain */
+    q->left = 0;                               /* a drain in progress delivers nothing more */
     if (q->n <= keep) return;
     s->stats.ip_lo_drops += (uint32_t)(q->n - keep);
     MT_LOG_DROPPED(s, MT_LOGL_IP, __LINE__);
@@ -233,8 +235,20 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     if (mtu > MT_TXBUF_SIZE - MT_ETH_HDR) mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
     if (tot > 65535u - MT_IP_HDR) return MT_ERR_INVAL;
     if (MT_IP_HDR + tot > mtu && mtu < MT_IP_HDR + 8u) return MT_ERR_INVAL;   /* cannot fragment */
+    chunk = (uint16_t)(((mtu - MT_IP_HDR) >> 3) << 3);
+    /* Loopback: a fragmented datagram goes into the FIFO whole or not at all (a partial one would
+     * hold the reassembly slot, which wire datagrams share, for MT_REASM_TIMEOUT_MS). More
+     * fragments than MT_LO_SLOTS can never fit: too big. */
+    if (lo && MT_IP_HDR + tot > mtu && (tot + chunk - 1u) / chunk > MT_LO_SLOTS) return MT_ERR_INVAL;
     id = s->ip_id++;
     s->stats.ip_out++;
+    if (lo && MT_IP_HDR + tot > mtu &&
+        (tot + chunk - 1u) / chunk > (uint32_t)(MT_LO_SLOTS - s->lo->n)) {
+        s->stats.ip_lo_drops++;                /* one refusal per datagram */
+        s->tx_refused = 1;
+        MT_LOG_DROPPED(s, MT_LOGL_IP, __LINE__);
+        return MT_OK;
+    }
 
     if (MT_IP_HDR + tot <= mtu) {                                    /* fast path */
         ip_gather(body, hdr, hlen, pl, 0, (uint16_t)tot);
@@ -244,7 +258,6 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
         return MT_OK;
     }
 
-    chunk = (uint16_t)(((mtu - MT_IP_HDR) >> 3) << 3);
     for (off = 0; off < tot; off += chunk) {   /* off is 32-bit: no wrap near 65535 */
         uint16_t n = (uint16_t)(tot - off);
         uint16_t ff = (uint16_t)(off >> 3);

@@ -90,7 +90,9 @@ typedef struct {
  * refusal exactly like a refused link.tx (s->tx_refused, ip_lo_drops): TCP stalls and retries.
  * MT_LO_MTU is the loopback interface MTU (the frame never leaves the machine): 576, the datagram
  * size every IPv4 host must accept (RFC 791 / RFC 1122 EMTU_R); a self connection uses MSS 536,
- * larger datagrams are fragmented into the FIFO (up to MT_LO_SLOTS fragments). */
+ * larger datagrams are fragmented into the FIFO, all fragments or none: more than MT_LO_SLOTS
+ * fragments (an IP payload over 1656 bytes) is MT_ERR_INVAL, more than the free slots is one
+ * refusal (ip_lo_drops counts datagrams refused, not fragments). */
 #define MT_LO_MTU   576u
 #define MT_LO_SLOTS 3u
 typedef struct {
@@ -100,6 +102,7 @@ typedef struct {
 typedef struct {
     uint8_t head, n;             /* oldest slot; slots queued (incl. one being delivered) */
     uint8_t dlv;                 /* 1 while slot `head` is being delivered */
+    uint8_t left;                /* frames the running drain may still deliver (flush: 0) */
     mt_lo_slot s[MT_LO_SLOTS];
 } mt_lo;
 

@@ -111,16 +111,45 @@ static void test_loopback_udp_echo(void) {
     T_EQ(cb.n, 3); T_EQ(cb.len, 1000); T_MEMEQ(cb.data, big, 1000);
     T_EQ(st->ip_reasm_ok, 2); T_EQ(st->ip_frag_out, 4);
     T_EQ(st->udp_drops, 0); T_EQ(st->ip_lo_drops, 0);
-    /* three fragments go in (1200 bytes) but the 3-fragment echo cannot: its last fragment is
-     * refused (ip_lo_drops) and the datagram is lost, like a lost frame on the wire */
+    /* three fragments go in (1200 bytes) but the 3-fragment echo cannot: it is sent while the
+     * last request fragment holds its slot, 2 are free, so the whole reply is refused before any
+     * fragment is queued (one ip_lo_drops) and the reassembly slot stays free */
     T_EQ(mt_udp_send(ub, T_ME, 7, big, 1200, 1, now), MT_OK);
+    T_EQ(st->ip_frag_out, 7);
     run(s, &now, 30);
     T_EQ(ca.n, 4); T_EQ(ca.len, 1200); T_EQ(cb.n, 3); T_EQ(st->ip_lo_drops, 1);
-    /* four fragments never fit: the fourth is refused at once */
-    T_EQ(mt_udp_send(ub, T_ME, 7, big, 1700, 1, now), MT_OK);
-    T_EQ(st->ip_lo_drops, 2);
-    run(s, &now, 16000);                                      /* partial datagrams time out */
-    T_EQ(ca.n, 4); T_EQ(cb.n, 3); T_CHECK(st->ip_reasm_fail >= 1);
+    T_EQ(st->ip_frag_out, 7);                                 /* no reply fragment was built */
+    T_EQ(s->reasm->active, 0); T_EQ(st->ip_reasm_fail, 0);
+    /* so a fragmented datagram from the wire reassembles right away */
+    {
+        uint8_t f[100], u[24];
+        uint16_t n;
+        memset(u, 0, sizeof u);
+        mt_wr16(u, 4000); mt_wr16(u + 2, mt_udp_port(ub)); mt_wr16(u + 4, 24);   /* checksum 0 */
+        memcpy(u + 8, "wirefragmentsok!", 16);
+        n = mk_ip(f, T_PEER, T_ME, 17, 99, 0x2000, u, 16);
+        mt_input(s, f, n, now);
+        n = mk_ip(f, T_PEER, T_ME, 17, 99, 2, u + 16, 8);
+        mt_input(s, f, n, now);
+        T_EQ(st->ip_reasm_ok, 4); T_EQ(cb.n, 4); T_EQ(cb.src, T_PEER); T_EQ(cb.len, 16);
+        T_MEMEQ(cb.data, "wirefragmentsok!", 16);
+    }
+    /* the largest datagram that fits 3 fragments (UDP payload 1648) is accepted; one more byte
+     * needs 4 fragments, which never fit: MT_ERR_INVAL, nothing queued, not a refusal */
+    T_EQ(mt_udp_send(ub, T_ME, 4444, big, 1648, 1, now), MT_OK);
+    T_EQ(st->ip_lo_out, 14);
+    run(s, &now, 40);
+    T_EQ(mt_udp_send(ub, T_ME, 7, big, 1649, 1, now), MT_ERR_INVAL);
+    T_EQ(mt_udp_send(ub, T_ME, 7, big, 1700, 1, now), MT_ERR_INVAL);
+    T_EQ(st->ip_lo_out, 14); T_EQ(st->ip_lo_drops, 1); T_EQ(st->ip_reasm_fail, 0);
+    T_EQ(s->reasm->active, 0);
+    /* a fragmented datagram with too few free slots: refused whole, the FIFO keeps what it had */
+    T_EQ(mt_udp_send(ub, T_ME, 4444, (const uint8_t *)"x", 1, 1, now), MT_OK);
+    T_EQ(mt_udp_send(ub, T_ME, 4444, big, 600, 1, now), MT_OK);     /* 2 fragments, 2 free: ok */
+    T_EQ(mt_udp_send(ub, T_ME, 4444, big, 600, 1, now), MT_OK);     /* 0 free: refused */
+    T_EQ(s->lo->n, 3); T_EQ(st->ip_lo_drops, 2);
+    run(s, &now, 50);
+    T_EQ(s->reasm->active, 0); T_EQ(st->ip_reasm_fail, 0);
     T_EQ(mt_next_deadline(s, now), MT_NO_DEADLINE);
     T_EQ(fl.n, 0); T_EQ(st->eth_out, 0);
     mt_udp_release(ua); mt_udp_release(ub);
@@ -387,6 +416,8 @@ static void re_cb(mt_udp *u, mt_udp_event ev, uint32_t arg, void *user) {
             mt_get_config(c->s, &cf);
             cf.addr = T_ME + 1;
             mt_set_config(c->s, &cf);
+            /* queued after the flush, inside the drain: waits for the next tick */
+            mt_udp_send(u, T_ME + 1, mt_udp_port(u), (const uint8_t *)"n", 1, 1, 0);
         }
     }
 }
@@ -418,11 +449,15 @@ static void test_loopback_reentrant_callbacks(void) {
     T_EQ(mt_udp_send(u, T_ME, 9, (const uint8_t *)"3", 1, 1, 0), MT_OK);
     mt_tick(s, 0);
     T_EQ(c.n, 1); T_EQ(st->ip_lo_drops, 2);
+    T_EQ(s->lo->n, 1);                       /* the datagram sent after the flush: next tick */
+    T_EQ(mt_next_deadline(s, 0), 0);
+    mt_tick(s, 0);
+    T_EQ(c.n, 2);
     T_EQ(mt_next_deadline(s, 0), MT_NO_DEADLINE);
     /* the new address loops back too */
     T_EQ(mt_udp_send(u, T_ME + 1, 9, (const uint8_t *)"4", 1, 1, 0), MT_OK);
     mt_tick(s, 0);
-    T_EQ(c.n, 2);
+    T_EQ(c.n, 3);
     T_EQ(fl.n, 0);
     mt_udp_release(u);
 }

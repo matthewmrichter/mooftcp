@@ -103,10 +103,10 @@ typedef struct {
     uint32_t tcp_conns_open;   /* connections established and not yet terminated (gauge) */
     uint32_t tcp_tx_stalls;    /* TCP segments the link refused (link.tx nonzero): each one ends its
                                 * output pass; refused data / FIN is retried, never marked sent */
-    uint32_t ip_lo_out;        /* datagrams/fragments queued to the loopback FIFO (to our own address
-                                * or 127/8; also in ip_out, never in eth_out) */
-    uint32_t ip_lo_drops;      /* loopback frames refused (FIFO full: a refusal like link.tx's) or
-                                * discarded by an address change */
+    uint32_t ip_lo_out;        /* frames queued to the loopback FIFO (to our own address or 127/8): one
+                                * per fragment, while ip_out counts the datagram once; never in eth_out */
+    uint32_t ip_lo_drops;      /* loopback refusals (FIFO full: one per datagram, fragmented or not, a
+                                * refusal like link.tx's) plus frames discarded by an address change */
 } mt_stats;
 
 void      mt_limits_default(mt_limits *l);      /* 16, 8, 8, 8 */
@@ -316,7 +316,8 @@ void     mt_tcp_consume(mt_tcp *t, uint32_t n, uint32_t now);
 int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
 
 /* Loopback: datagrams to our own address or 127.0.0.0/8 never reach link.tx. They are queued
- * (a FIFO of 3 datagrams of up to 576 bytes; a self connection uses MSS 536) and delivered by the
+ * (a FIFO of 3 frames of up to 576 bytes; a self connection uses MSS 536; a datagram needing more
+ * than 3 fragments, IP payload over 1656 bytes, is MT_ERR_INVAL) and delivered by the
  * next mt_tick, which mt_next_deadline asks for at once (0) while any is queued. One mt_tick
  * delivers the datagrams queued when it started, so callbacks caused by loopback traffic fire
  * inside mt_tick, and each hop of a self connection costs one tick. A full FIFO is a refusal
