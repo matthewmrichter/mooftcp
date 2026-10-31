@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build ApiProbe, run it in Snow against whichever stack the image loads, and collect
 # ApiProbe.out into build-mac/probe/<label>.out.
-#   probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>
+#   probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] [--base N] <label>
 #     --moof          run against MoofTCP instead of MacTCP: after fresh-disk.sh, scripts/install-moof.sh
 #                     parks the MacTCP files and installs build-mac/moof/MacTCP.bin (built first) and a
 #                     "MoofTCP Prefs" for 10.0.0.2/8 (with --unconfigured: no prefs file)
@@ -13,6 +13,10 @@
 #     --groups        case groups to run (default "1 2 3 4 5 6 7 8 9 0"; 0 = group 10, see apiprobe.c;
 #                     D = the DNR suite (apiprobe_dnr.inc, needs the file "MacTCP DNR"); Q = the app quits
 #                     with a DNR lookup pending and the run checks that the machine is still alive)
+#     --base N        testnet.py ports at N+7, N+9, ... instead of 17007.. (ApiProbe.cfg "B<N>"): use it when
+#                     another project's testnet holds 17007 (its UDP echo does not reach the guest through
+#                     Snow's NAT, PLAN3-CARRYOVER 4.3); our own testnet.py --base N is started if N+7 is free.
+#                     Outputs then show N+7 where the stored ones show 17007 (903 fromPort).
 # One Snow boot per group: Snow's NAT stops accepting new guest TCP connections after
 # about 16 (it never closes the host side), so the groups run in separate boots on the same
 # work.hda and the per-boot outputs are concatenated in order. An unconfigured run needs a
@@ -29,15 +33,18 @@ IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${PROBE_TIMEOUT:-900}"
 die() { echo "probe-run.sh: $*" >&2; exit 1; }
-usage() { echo 'usage: probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] <label>' >&2; exit 2; }
+usage() { echo 'usage: probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] [--base N] <label>' >&2; exit 2; }
 
-unconf=""; keepdisk=""; label=""; groups="1 2 3 4 5 6 7 8 9 0"; moof=""
+unconf=""; keepdisk=""; label=""; groups="1 2 3 4 5 6 7 8 9 0"; moof=""; base=17000
 while [ $# -gt 0 ]; do
   case "$1" in
     --moof) moof=1; shift;;
     --unconfigured) unconf=1; shift;;
     --keep-disk) keepdisk=1; shift;;
     --groups) [ $# -ge 2 ] || usage; groups="$2"; shift 2;;
+    --base) [ $# -ge 2 ] || usage; base="$2"; shift 2
+            case "$base" in ''|*[!0-9]*) usage;; esac
+            [ "$base" -ge 1024 ] && [ "$base" -le 65000 ] || die "--base must be 1024..65000";;
     -h|--help) usage;;
     -*) usage;;
     *) [ -z "$label" ] || usage; label="$1"; shift;;
@@ -69,8 +76,8 @@ if [ -n "$moof" ]; then
 fi
 
 started_testnet=""
-if ! (exec 3<>/dev/tcp/127.0.0.1/17007) 2>/dev/null; then
-  scripts/testnet.py > "$out_dir/$label.testnet.log" 2>&1 &
+if ! (exec 3<>/dev/tcp/127.0.0.1/$((base + 7))) 2>/dev/null; then
+  scripts/testnet.py --base "$base" > "$out_dir/$label.testnet.log" 2>&1 &
   started_testnet=$!
   sleep 1
 fi
@@ -109,6 +116,7 @@ with_volume() {
 write_cfg() {  # write_cfg "<groups>" : ApiProbe.cfg (digits only)
   local f="$out_dir/$label.cfg"
   printf '%s' "$1" | tr -d ' ' > "$f"
+  if [ "$base" != 17000 ]; then printf 'B%s' "$base" >> "$f"; fi
   hcopy -t "$f" ":MoofTCP Test:ApiProbe.cfg"
 }
 fetch_out() { hcopy -t ":MoofTCP Test:ApiProbe.out" "$1"; }

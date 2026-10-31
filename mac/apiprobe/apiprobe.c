@@ -28,13 +28,16 @@
 #define GATEWAY    0x0A000001UL   /* 10.0.0.1 */
 #define DEADLINK   0x0A630063UL   /* 10.99.0.99 : on-link (mask 255.0.0.0), nobody home */
 #define DEADROUTED 0xC0000201UL   /* 192.0.2.1 : off-link, via the gateway */
-#define P_ECHO     17007
-#define P_DISCARD  17009
-#define P_BANNER   17023
-#define P_ONESHOT  17013
-#define P_BURST    17019
-#define P_RESET    17037
-#define P_CLOSED   17001
+/* testnet.py ports: base + offset. The base is 17000 unless ApiProbe.cfg gives "B<port>" (probe-run.sh
+ * --base, when another testnet holds 17007..; PLAN3-CARRYOVER 4.3). */
+static unsigned p_base = 17000;
+#define P_ECHO     (p_base + 7)
+#define P_DISCARD  (p_base + 9)
+#define P_BANNER   (p_base + 23)
+#define P_ONESHOT  (p_base + 13)
+#define P_BURST    (p_base + 19)
+#define P_RESET    (p_base + 37)
+#define P_CLOSED   (p_base + 1)
 
 /* ------------------------------------------------------------------ globals */
 
@@ -1628,7 +1631,12 @@ int main(void)
         char cfg[16]; int n = os_read_cfg("\pApiProbe.cfg", cfg, (int)sizeof cfg), k;
         if (n > 0) {
             grp_mask = 0;
-            for (k = 0; k < n; k++) if (cfg[k] >= '1' && cfg[k] <= '9') grp_mask |= 1u << (cfg[k] - '0');
+            for (k = 0; k < n; k++) if (cfg[k] == 'B') {   /* B<port base>: digits up to the next non-digit */
+                unsigned b = 0;
+                while (k + 1 < n && cfg[k + 1] >= '0' && cfg[k + 1] <= '9') b = b * 10u + (unsigned)(cfg[++k] - '0');
+                if (b >= 1024 && b <= 65000) p_base = b;
+            }
+            else if (cfg[k] >= '1' && cfg[k] <= '9') grp_mask |= 1u << (cfg[k] - '0');
             else if (cfg[k] == '0') grp_mask |= 1u << 10;
             else if (cfg[k] == 'D') grp_mask |= 1u << 11;
             else if (cfg[k] == 'Q') grp_mask |= 1u << 12;
@@ -1639,6 +1647,8 @@ int main(void)
     note("0", "ApiProbe 1: format id name S|A cs= res= extras | events (A=ASR C=completion P=poll)");
     { char m[16]; int k, n = 0; for (k = 1; k <= 12; k++) if (grp(k)) m[n++] = (char)(k == 12 ? 'Q' : k == 11 ? 'D' : '0' + (k % 10)); m[n] = 0; note("0", m); }
     note("0", "values written =@N are tick counts (timing dependent)");
+    if (p_base != 17000) { char m[24]; B *sv = cb; cb = &hd; hd.n = 0; apd((long)p_base); cb = sv;
+                           strcpy(m, "port base "); strcat(m, hd.s); note("0", m); }
 
     c_driver_open();
     {   /* decide the configuration */
