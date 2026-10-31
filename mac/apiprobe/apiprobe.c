@@ -1433,8 +1433,8 @@ static void c_icmp(int async)
         /* the reply (or timeout) is reported through icmpCompletion: wait for it to be called.
          * ioCompletion (async only) accounts for one 'C' event, icmpCompletion for another. */
         {
-            int want = async ? 2 : 1, k, nc = 0, spin; long tw = (long)os_ticks();
-            for (spin = 0; (long)os_ticks() - tw < TK(8); spin++) {
+            int want = async ? 2 : 1, k, nc = 0; long tw = (long)os_ticks();
+            for (;(long)os_ticks() - tw < TK(8);) {
                 nc = 0; for (k = 0; k < ev_n; k++) if (evs[k].kind == 'C') nc++;
                 if (nc >= want) break;
             }

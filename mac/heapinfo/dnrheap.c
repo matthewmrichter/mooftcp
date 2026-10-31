@@ -3,6 +3,9 @@
  * (own glue, no Apple source), then records system- and application-zone FreeMem
  * at: start, after OpenResolver, after a successful StrToAddr, while still open,
  * and after CloseResolver (and disposing the code). */
+/* Pascal string literals are char *, the Toolbox wants unsigned char *; low-memory globals sit at fixed small addresses. */
+#pragma GCC diagnostic ignored "-Wpointer-sign"
+#pragma GCC diagnostic ignored "-Warray-bounds"
 #include <Quickdraw.h>
 #include <Dialogs.h>
 #include <Fonts.h>
@@ -121,7 +124,7 @@ int main(void)
             rc = (short)dnr(STRTOADDR, (char *)host, &hi, doneProc, (char *)&done);
             if (rc == CACHEFAULT) {
                 t = TickCount() + 60L * 20;
-                while (!done && TickCount() < t) SystemTask();
+                while (!done && (long)TickCount() < t) SystemTask();
                 rcLook = done ? hi.rtnCode : 99;
             } else rcLook = rc;
             s2 = sysFree(); a2 = appFree();

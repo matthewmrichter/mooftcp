@@ -78,7 +78,7 @@ static int16_t refuse(MtEntry *e, MtAnyPb *pb, int async) {
     return MT_DRV_REFUSED;
 }
 
-int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
+static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     MtDrv *d = e->d;
     int16_t cs = pb->hdr.csCode, res;
     int async = (trap & MT_DRV_TRAP_ASYNC) != 0, route;
@@ -128,6 +128,14 @@ int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
         mt_pb_flush(d);
     }
     return res;
+}
+
+int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
+    int16_t r;
+    mt_os_stack_enter();                         /* stack-depth episode (no-op on the host) */
+    r = entry_control(e, pb, trap, irq);
+    mt_os_stack_leave();
+    return r;
 }
 
 /* The gate is held, so a completion routine that calls the driver nests (call-out, depth). */

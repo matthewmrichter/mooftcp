@@ -18,6 +18,79 @@
 #pragma GCC diagnostic ignored "-Warray-bounds"
 
 static MtGate *g_gate;
+static MtStackMark *g_stk;
+
+void mt_os_mac_set_stack(MtStackMark *m) { g_stk = m; }
+
+/* Stack depth marks (mt_stackmark.h). Compiled out with -DMT_STACK_MARK=0. */
+#if MT_STACK_MARK
+static inline uint32_t cur_sp(void)
+{
+    uint32_t s;
+    __asm__ volatile("move.l %%sp,%0" : "=r"(s));
+    return s;
+}
+
+void mt_os_stack_mark(void)
+{
+    MtStackMark *m = g_stk;
+    uint32_t sp;
+    if (!m) return;
+    sp = cur_sp();
+    if (m->low == 0 || sp < m->low) m->low = sp;
+    if (m->nest && m->base > sp && m->base - sp > m->used) {
+        m->used = m->base - sp;
+        m->entry = m->base;
+    }
+}
+
+#if MT_STACK_PAINT
+#define PAINT_WORD 0xA5C3u
+static void paint(MtStackMark *m)
+{
+    volatile uint16_t *top = (volatile uint16_t *)(cur_sp() - 16u), *p;
+    volatile uint16_t *lo = (volatile uint16_t *)((uint32_t)top - (MT_STACK_PAINT));
+    int saved = mt_os_mask();
+    for (p = lo; p < top; p++) *p = PAINT_WORD;
+    mt_os_unmask(saved);
+    m->paint_lo = (uint32_t)lo;
+}
+
+static void scan(MtStackMark *m)
+{
+    volatile uint16_t *p = (volatile uint16_t *)m->paint_lo, *end = (volatile uint16_t *)(m->paint_lo + MT_STACK_PAINT - 16u);
+    if (!p) return;
+    while (p < end && *p == PAINT_WORD) p++;
+    if (p < end && m->base > (uint32_t)p && m->base - (uint32_t)p > m->deep) m->deep = m->base - (uint32_t)p;
+    m->paint_lo = 0;
+}
+#endif
+
+void mt_os_stack_enter(void)
+{
+    MtStackMark *m = g_stk;
+    if (!m) return;
+    if (m->nest == 0) {
+        m->base = cur_sp();
+        m->n_enter++;
+#if MT_STACK_PAINT
+        paint(m);
+#endif
+    }
+    m->nest++;
+    mt_os_stack_mark();
+}
+
+void mt_os_stack_leave(void)
+{
+    MtStackMark *m = g_stk;
+    if (!m || !m->nest) return;
+#if MT_STACK_PAINT
+    if (m->nest == 1) scan(m);
+#endif
+    m->nest--;
+}
+#endif
 
 void mt_os_mac_set_gate(MtGate *g) { g_gate = g; }
 

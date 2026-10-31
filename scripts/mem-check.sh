@@ -10,6 +10,11 @@
 #        and after the network operation, <= 195,046
 #     2. system-zone growth over the no-network baseline 162,100 <= 273,672
 #     3. HeapInfoDNR (second run): app heap taken <= 29,150 and system heap taken <= 0
+#     4. interrupt-time stack depth <= STACK_BUDGET (MACTCP-INTERFACE.md "Stack budget"): MoofDiag runs
+#        after the network operation and its "stack:" line (mt_stackmark.h) gives `used`, the stack the
+#        driver took below the outermost entry (call-out frames and nested driver calls included),
+#        and `painted`, the deepest word the painted-stack scan of the measurement build saw (the build
+#        step compiles with -DMT_STACK_PAINT=4096); the rule uses the larger of the two
 # Exit status 0 only when every rule passes. Output also in build-mac/memcheck/MemCheck.out.
 # Uses snow.sh, fresh-disk.sh, install-moof.sh, deploy.sh; starts scripts/testnet.py only when nothing
 # listens on 17007 (another session's testnet is shared, never killed).
@@ -33,14 +38,16 @@ out_dir="$ROOT/build-mac/memcheck"
 mkdir -p "$out_dir"
 shot="$out_dir/state.png"
 res="$out_dir/HeapInfo.out"
-rm -f "$res" "$out_dir/MemCheck.out"
+diag="$out_dir/MoofDiag.out"
+rm -f "$res" "$diag" "$out_dir/MemCheck.out"
 
 if [ -n "$build" ]; then
-  echo "== build"
-  for t in HeapInfo HeapInfoOpen HeapInfoDNR ApiProbe MoofTCP; do scripts/build-mac.sh "$t" >/dev/null; done
+  echo "== build (stack-paint measurement build: MT_EXTRA_CFLAGS=-DMT_STACK_PAINT=4096 unless set)"
+  export MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS--DMT_STACK_PAINT=4096}"
+  for t in HeapInfo HeapInfoOpen HeapInfoDNR ApiProbe MoofDiag MoofTCP; do scripts/build-mac.sh "$t" >/dev/null; done
 fi
 for f in build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
-         build-mac/apiprobe/ApiProbe.bin build-mac/moof/MacTCP.bin; do
+         build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin build-mac/moof/MacTCP.bin; do
   [ -f "$f" ] || die "missing $f"
 done
 
@@ -84,8 +91,9 @@ put_cfg() {
   hcopy -t "$out_dir/ApiProbe.cfg" ":MoofTCP Test:ApiProbe.cfg"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:ApiProbe.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:HeapInfo.out"
+  hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:MoofDiag.out"
 }
-fetch_res() { hcopy -t ":MoofTCP Test:HeapInfo.out" "$res"; }
+fetch_res() { hcopy -t ":MoofTCP Test:HeapInfo.out" "$res" && hcopy -t ":MoofTCP Test:MoofDiag.out" "$diag"; }
 
 click() {  # click x y [dbl]
   local x=$1 y=$2 w i
@@ -117,7 +125,7 @@ else:
 PY
 }
 # Icon positions (x y) in the "MoofTCP Test" window with the 7 files deployed above (grid is alphabetical).
-declare -A ICON=([ApiProbe]="238 325" [HeapInfo]="607 325" [HeapInfoDNR]="114 447" [HeapInfoOpen]="238 447")
+declare -A ICON=([ApiProbe]="238 325" [HeapInfo]="607 325" [HeapInfoDNR]="114 447" [HeapInfoOpen]="238 447" [MoofDiag]="361 447")
 open_folder() { click 914 180 dbl; sleep 3; click 341 290 dbl; sleep 3; }
 wait_state() {  # wait_state <state> <seconds>
   local t=0
@@ -152,7 +160,7 @@ snow_stop
 [ -n "$keepdisk" ] || scripts/fresh-disk.sh >/dev/null
 scripts/install-moof.sh >/dev/null
 scripts/deploy.sh build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
-  build-mac/apiprobe/ApiProbe.bin --to ":MoofTCP Test:" >/dev/null
+  build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin --to ":MoofTCP Test:" >/dev/null
 with_volume put_cfg
 
 export DISPLAY="$DISPLAY_NUM"; unset WAYLAND_DISPLAY
@@ -167,6 +175,7 @@ click ${ICON[ApiProbe]} dbl; sleep 4
 [ "$(screen_state)" = finder ] && click ${ICON[ApiProbe]} dbl
 wait_state done 600 || die "ApiProbe did not finish"
 xdotool key Return; wait_state finder 30 || die "ApiProbe did not quit"
+run_alert_app MoofDiag 1          # counters and the stack-depth figure after the network operation
 run_alert_app HeapInfo 1          # after the network operation
 run_alert_app HeapInfoDNR 2       # first DNR run
 run_alert_app HeapInfoDNR 2       # second DNR run
@@ -175,8 +184,9 @@ sleep 2
 snow_stop
 with_volume fetch_res || die "HeapInfo.out missing on the image"
 echo "== figures"
-python3 -I - "$res" "$out_dir/MemCheck.out" <<'PY'
-import sys
+python3 -I - "$res" "$out_dir/MemCheck.out" "$diag" <<'PY'
+import sys, re
+STACK_BUDGET = 4096   # MACTCP-INTERFACE.md "Stack budget": worst measured 2724 x 1.5
 BASE_OCC, BASE_ZONE = 149248, 162100
 CAP1, CAP2, CAP3_APP, CAP3_SYS = 195046, 273672, 29150, 0
 rows = [l.split() for l in open(sys.argv[1]).read().replace("\r", "\n").split("\n") if l.strip()]
@@ -217,6 +227,14 @@ if int(d[1]) != 0 or int(d[2]) != 0: ok = False; P("FAIL resolver open/lookup di
 chk("rule 3  DNR app heap taken, open after lookup (2nd run)", int(d[6]), CAP3_APP)
 chk("rule 3  DNR system heap taken, open after lookup (2nd run)", int(d[5]), CAP3_SYS)
 chk("rule 3  DNR heap not returned at close (leak), app", int(d[8]), 0)
+# rule 4: the last "stack:" line of MoofDiag.out
+stk = [l for l in open(sys.argv[3]).read().replace("\r", "\n").split("\n") if l.startswith("stack:")]
+m = re.search(r"used (\d+) painted (\d+)", stk[-1]) if stk else None
+if not m:
+    ok = False; P("FAIL rule 4  no 'stack:' line in MoofDiag.out")
+else:
+    P("%s" % stk[-1].split(" (")[0])
+    chk("rule 4  interrupt-time stack depth (max of used, painted)", max(int(m.group(1)), int(m.group(2))), STACK_BUDGET)
 P("RESULT %s" % ("PASS" if ok else "FAIL"))
 open(sys.argv[2], "w").write("\n".join(out) + "\n")
 sys.exit(0 if ok else 1)

@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include "mt_mactcp.h"
 #include "mt_dnr_abi.h"
+#include "mt_stackmark.h"      /* mt_os_stack_mark: interrupt-time stack depth, no-op on the host */
 
 #ifdef __cplusplus
 extern "C" {

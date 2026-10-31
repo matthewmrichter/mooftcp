@@ -20,6 +20,8 @@
 #include <Memory.h>
 #include <Retro68Runtime.h>
 
+/* low-memory globals live at fixed small addresses; GCC would flag them as null derefs */
+#pragma GCC diagnostic ignored "-Warray-bounds"
 #define kParadeH     (*(short *)0x092C)
 #define kParadeCheck (*(short *)0x092E)
 

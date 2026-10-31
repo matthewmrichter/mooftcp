@@ -1,4 +1,7 @@
 /* probe_os.c - Toolbox wrappers for ApiProbe (see probe_os.h). */
+/* Pascal string literals are char *, the Toolbox wants unsigned char *; low-memory globals sit at fixed small addresses. */
+#pragma GCC diagnostic ignored "-Wpointer-sign"
+#pragma GCC diagnostic ignored "-Warray-bounds"
 #include <Quickdraw.h>
 #include <Dialogs.h>
 #include <Fonts.h>

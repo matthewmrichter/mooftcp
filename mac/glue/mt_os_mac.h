@@ -3,6 +3,7 @@
 #define MT_OS_MAC_H
 
 #include "mt_gate.h"
+#include "mt_stackmark.h"
 
 #ifdef __cplusplus
 extern "C" {

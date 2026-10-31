@@ -9,6 +9,7 @@
 #include "mt_enet.h"
 #include "mt_timer.h"
 #include "mt_drv_logic.h"
+#include "mt_stackmark.h"
 
 struct MtDrv;
 
@@ -28,6 +29,7 @@ typedef struct MtRes {
     uint8_t        mode;         /* MCFG mode slot */
     uint8_t        pad;
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
+    MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
 } MtRes;
 
 /* mt_drv_boot results (the INIT draws its icon only for MT_BOOT_OK) */

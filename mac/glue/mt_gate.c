@@ -1,6 +1,7 @@
 /* mt_gate.c - the core gate and the deferred-input ring (see mt_gate.h). Plain C, no Toolbox. */
 #include <stddef.h>
 #include "mt_gate.h"
+#include "mt_stackmark.h"
 
 static void barrier(void) { __asm__ volatile("" : : : "memory"); }
 
@@ -23,12 +24,14 @@ static void drain(MtGate *g)
         if (g->tick_pending) {
             g->tick_pending = 0;
             g->n_tick++;
+            mt_os_stack_mark();
             g->tick(g->ctx);
             continue;
         }
         if (g->tail != g->head) {
             MtRxSlot *s = &g->slot[g->tail];
             g->n_rx++;
+            mt_os_stack_mark();
             g->rx(g->ctx, s->buf, s->len);
             barrier();
             g->tail = (uint16_t)((g->tail + 1u) % MT_GATE_SLOTS);
@@ -62,6 +65,7 @@ void mt_gate_enter(MtGate *g)
 {
     g->depth++;
     if (g->depth > g->max_depth) g->max_depth = g->depth;
+    mt_os_stack_mark();
 }
 
 void mt_gate_leave(MtGate *g)
@@ -77,7 +81,9 @@ void mt_gate_poke(MtGate *g)
     if (!g->open) { g->tail = g->head; g->drops++; return; }
     if (g->depth) { g->n_deferred++; return; }
     g->depth = 1;
+    mt_os_stack_enter();
     own_and_run(g, 1);
+    mt_os_stack_leave();
 }
 
 void mt_gate_tick(MtGate *g)
@@ -86,7 +92,9 @@ void mt_gate_tick(MtGate *g)
     g->tick_pending = 1;
     if (g->depth) { g->n_tick_deferred++; return; }
     g->depth = 1;
+    mt_os_stack_enter();
     own_and_run(g, 1);
+    mt_os_stack_leave();
 }
 
 MtRxSlot *mt_gate_slot(MtGate *g)

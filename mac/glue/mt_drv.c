@@ -62,12 +62,14 @@ MacPtr32 mt_os_a5(void) { return LM_CURRENT_A5; }
 void mt_os_complete(MtAnyPb *pb, int16_t err) {
     MacPtr32 proc;
     pb->hdr.ioResult = err;              /* final before the routine runs (matrix 150) */
+    mt_os_stack_mark();
     proc = pb->hdr.ioCompletion;
     if (proc) mt_drv_call_completion(proc, pb, stashed_a5(pb));
 }
 
 void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 icmp) {
     uint32_t a5 = a->a5 ? a->a5 : LM_CURRENT_A5;
+    mt_os_stack_mark();
     if (a->kind == MT_ASR_UDP)
         mt_drv_call_asr_udp(a->proc, a5, a->stream, event, a->user, icmp);
     else
@@ -143,6 +145,7 @@ static long boot(void *drvr) {
     mt_gate_init(&r->gate, r, rx_cb, tick_cb, after_cb);
     mt_entry_init(&r->entry, r->d, &r->gate);
     mt_os_mac_set_gate(&r->gate);
+    mt_os_mac_set_stack(&r->stk);
     mt_timer_init(&r->timer, tm_cb, r);
 
     if (cr == MT_CFG_OK && cfg.addr) r->cfg = cfg;  /* applied at the first open (MAC known) */
@@ -152,6 +155,7 @@ static long boot(void *drvr) {
         r->enet_err = (int16_t)e;
         mt_timer_close(&r->timer);
         mt_os_mac_set_gate(0);
+        mt_os_mac_set_stack(0);
         g_res = 0;
         mt_mac_free(raw);
         return MT_BOOT_NOUNIT;

@@ -1,4 +1,7 @@
 /* HeapInfo: show system-zone FreeMem / MaxMem / size in an alert. */
+/* Pascal string literals are char *, the Toolbox wants unsigned char *; low-memory globals sit at fixed small addresses. */
+#pragma GCC diagnostic ignored "-Wpointer-sign"
+#pragma GCC diagnostic ignored "-Warray-bounds"
 #include <Quickdraw.h>
 #include <Dialogs.h>
 #include <Fonts.h>
@@ -63,6 +66,7 @@ int main(void)
     SetZone(sys);
     freeB = FreeMem();
     maxB = MaxMem(&grow);
+    (void)maxB;           /* unused in the HeapInfoOpen variant */
     size = (long)sys->bkLim - (long)sys;
     SetZone(saved);
 
