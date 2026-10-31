@@ -47,15 +47,16 @@ static int trio_by_name(const char *name) {
 
 #define T_TMPT INST_TMP_TYPE
 #define T_TMPC INST_TMP_CREATOR
-#define T_TEXT INST_FCC('T', 'E', 'X', 'T')
 
 /* the complete, loadable MoofTCP file */
 static int moof_ok(const InstEntry *e) { return !e->is_dir && e->type == T_CDEV && e->creator == T_ZTCP; }
 /* a file named MoofTCP that a crash between rename and retype left behind: ours, incomplete */
 static int moof_incomplete(const InstEntry *e) { return !e->is_dir && e->type == T_TMPT && e->creator == T_TMPC; }
-/* a temp file of ours: the non-loadable type, or what earlier builds created (loadable cdev/ztcp, TEXT/ztcp) */
-static int tmp_ours(const InstEntry *e, uint32_t old_type) {
-    return !e->is_dir && ((e->type == T_TMPT && e->creator == T_TMPC) || (e->type == old_type && e->creator == T_ZTCP));
+/* a temp file of ours: the non-loadable type, or a zero-info file (PBHCreate leaves type and creator 0
+ * until the immediate PBHSetFInfo; a crash between the two leaves exactly that). A LOADABLE cdev/ztcp
+ * of the temp's name is not ours: it is foreign (BLOCKED_COLLISION), never deleted. */
+static int tmp_ours(const InstEntry *e) {
+    return !e->is_dir && ((e->type == T_TMPT && e->creator == T_TMPC) || (e->type == 0 && e->creator == 0));
 }
 
 static int valid_field(const char *s) {
@@ -143,6 +144,7 @@ int inst_manifest_decode(const char *text, size_t len, InstManifest *m) {
     size_t i = 0, j, tab, nl, fl;
     if (!m || (!text && len)) return INST_E_MANIFEST;
     memset(m, 0, sizeof *m);
+    if (len == 0) return INST_E_MANIFEST;      /* a manifest is never empty: this is a file truncated to nothing */
     if (len >= 9 && memcmp(text, "#created\r", 9) == 0) { m->created = 1; i = 9; }
     while (i < len) {
         tab = (size_t)-1;
@@ -196,14 +198,14 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
     for (t = 0; t < 2; t++) {                   /* a folder of the manifest's name is foreign, never read */
         j = find(disabled, ndisabled, t ? INST_MANIFEST_TMP : INST_MANIFEST_NAME);
         if (j >= 0 && !disabled[j].is_dir) mani_any = 1;
-        if (j >= 0 && nmv > 0 && (disabled[j].is_dir || (t && !tmp_ours(&disabled[j], T_TEXT)))) {
+        if (j >= 0 && nmv > 0 && (disabled[j].is_dir || (t && !tmp_ours(&disabled[j])))) {
             setblock(blocker, disabled[j].name); *msg = INST_BLOCKED_COLLISION; return 0;
         }
     }
-    if (write) {                                /* step 1 of the write protocol must be able to run (before parking) */
-        j = find(sys, nsys, INST_MOOF_TMP);
-        if (j >= 0 && !tmp_ours(&sys[j], T_CDEV)) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_COLLISION; return 0; }
-        if (j >= 0 && sys[j].locked) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_LOCKED; return 0; }
+    j = find(sys, nsys, INST_MOOF_TMP);         /* always: a loadable or foreign MoofTCP.tmp must not hide behind "up to date" */
+    if (j >= 0 && !tmp_ours(&sys[j])) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_COLLISION; return 0; }
+    if (write && j >= 0 && sys[j].locked) {     /* step 2 of the write protocol must be able to run (before parking) */
+        setblock(blocker, sys[j].name); *msg = INST_BLOCKED_LOCKED; return 0;
     }
 
     if (nmv > 0) {
@@ -277,13 +279,13 @@ int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, 
     mi = find(sys, nsys, INST_MOOF_NAME);
     if (mi >= 0 && !moof_ok(&sys[mi]) && !moof_incomplete(&sys[mi])) mi = -1;
     tm = find(sys, nsys, INST_MOOF_TMP);
-    tm_bad = tm >= 0 && !tmp_ours(&sys[tm], T_CDEV);      /* a folder or a foreign type of that name */
+    tm_bad = tm >= 0 && !tmp_ours(&sys[tm]);      /* a folder or a foreign type of that name */
     if (tm_bad) { bad = tm; tm = -1; }
     if (folder_exists) {
         mx = find(disabled, ndisabled, INST_MANIFEST_NAME);
         mt = find(disabled, ndisabled, INST_MANIFEST_TMP);
         if (mx >= 0 && disabled[mx].is_dir) { dbad = mx; mx = -1; }
-        if (mt >= 0 && !tmp_ours(&disabled[mt], T_TEXT)) { dbad = mt; mt = -1; }
+        if (mt >= 0 && !tmp_ours(&disabled[mt])) { dbad = mt; mt = -1; }
     }
     mani_any = mx >= 0 || mt >= 0;
     if (mi < 0 && tm < 0 && !mani_any) { *msg = INST_NOTHING_TO_REMOVE; return 0; }

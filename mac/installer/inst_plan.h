@@ -50,22 +50,29 @@
  * type INST_TMP_TYPE ('MTMP') and creator INST_TMP_CREATOR ('mtin'); the type becomes cdev/ztcp
  * (TEXT/ztcp for the manifest) only as the LAST step. The executor writes X (the target) as:
  *   1. (manifest only) if X does not exist but X.tmp does and decodes, rename X.tmp to X (promote);
- *   2. delete X.tmp if it exists, create X.tmp (all forks complete, type MTMP/mtin, Finder flags
- *      as shipped, flushed to disk);
+ *   2. delete X.tmp if it exists; PBHCreate X.tmp and IMMEDIATELY PBHSetFInfo it to type MTMP,
+ *      creator mtin (and the Finder flags as shipped) BEFORE any fork is written (PBHCreate takes no
+ *      type/creator: the file has type 0 / creator 0 until then); write all forks, flush to disk;
  *   3. delete X if it exists;
  *   4. rename X.tmp to X;
  *   5. set X's type/creator to cdev/ztcp (manifest: TEXT/ztcp). Only now is the file "complete".
  * What a crash leaves: before 3: X old (loadable) plus a partial or complete non-loadable X.tmp
  * (harmless); between 3 and 4: X absent, X.tmp complete; between 4 and 5: X with type MTMP/mtin
  * ("incomplete": the planner treats a file named MoofTCP of that type as ours, Install rewrites it,
- * Remove deletes it); after 5: the new X. For the manifest "exists" means: X or X.tmp is in the
+ * Remove deletes it); after 5: the new X. A crash between PBHCreate and PBHSetFInfo leaves a
+ * zero-info X.tmp (type 0, creator 0): that is also OURS (non-loadable, deleted or rewritten, never
+ * blocking). For the manifest "exists" means: X or X.tmp is in the
  * Disabled folder (a FOLDER of that name is foreign and never read); the executor decodes X, else
  * X.tmp, and passes that as `prev` / `man` (NULL when neither decodes; the planner then uses the
- * known names). Temp files of ours (type MTMP/mtin, or what earlier builds made: cdev/ztcp for
- * MoofTCP.tmp, TEXT/ztcp for the manifest temp) are deleted by Remove (DELETE_TEMP, and for the System
+ * known names). Temp files of ours (type MTMP/mtin, or type 0 / creator 0) are deleted by Remove (DELETE_TEMP, and for the System
  * Folder one BEFORE the restoring MOVEs) and replaced by step 2. A temp name that is a folder or has
- * a foreign type is not ours: BLOCKED_COLLISION naming it (Install checks this, and the lock bit,
- * BEFORE it parks any MacTCP file, so step 2 cannot fail after MacTCP is parked).
+ * any other type (a LOADABLE cdev/ztcp MoofTCP.tmp included) is foreign: BLOCKED_COLLISION naming it,
+ * for Install (even when MoofTCP is otherwise up to date, so it never ends with two providers) and
+ * Remove; nothing is deleted. Install checks this, and the lock bit, BEFORE it parks any MacTCP
+ * file, so step 2 cannot fail after MacTCP is parked.
+ * Step 3's PBHDelete of the old X returns fBsyErr (-47) if X is open (the Control Panel showing it,
+ * or the INIT's resource file): the executor stops with a message to close the Control Panel and
+ * quit other programs; the state left (old X plus an MTMP temp) is harmless and re-runnable.
  * WRITE_MOOF's data: the executor (the installer application) holds the MoofTCP file as its own
  * resources plus data fork; it writes a file with the same resources and the Finder flags of the
  * shipped file (hasBundle 0x2000), the 'BNDL'/'FREF'/icon resources included, so Finder shows the
@@ -81,7 +88,8 @@
  *   INST_DELETE_MOOF     delete file `from` (the MoofTCP file, complete or incomplete).
  *   INST_DELETE_MANIFEST delete file `from`.
  *   INST_DELETE_TEMP     delete the leftover temp file `from` (never anything but our temp types).
- *   INST_RMDIR           delete the empty folder `from`. Planned only for a folder this installer
+ *   INST_RMDIR           delete the empty folder `from` with PBHDelete, which refuses a non-empty folder
+ *                        (fBsyErr, -47): that refusal is the safety net; NEVER delete recursively. Planned only for a folder this installer
  *                        created (manifest `created` flag) and only when it ends up empty.
  *
  * Return values: >= 0 = number of ops (0 together with BLOCKED_*, ALREADY_INSTALLED or
@@ -170,7 +178,7 @@ typedef struct {
  * (INST_E_MANIFEST) on a bad name or n > INST_MAN_MAX; it returns the byte count (no NUL is
  * written) or INST_E_CAP when `cap` is too small. The decoder is strict: a missing TAB, extra TAB,
  * empty or bad field, a last line without CR (a truncated write), or more than INST_MAN_MAX lines
- * return INST_E_MANIFEST. Returns the entry count. The codec is generic; the PLANNER only accepts
+ * return INST_E_MANIFEST, and so does empty text (a file truncated to nothing; the planner never writes an empty manifest). Returns the entry count. The codec is generic; the PLANNER only accepts
  * entries naming one of the three MacTCP files with folder "System Folder". */
 int inst_manifest_encode(const InstManifest *m, char *buf, size_t cap);
 int inst_manifest_decode(const char *text, size_t len, InstManifest *m);
