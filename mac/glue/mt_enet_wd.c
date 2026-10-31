@@ -53,6 +53,26 @@ uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d)
     return (d == NO_DEADLINE || d > MT_ENET_WD_SCAN_MS) ? MT_ENET_WD_SCAN_MS : d;
 }
 
+void mt_enet_init(MtEnet *e)
+{
+    uint8_t *p = (uint8_t *)e;
+    size_t n = sizeof *e;
+    while (n--) *p++ = 0;
+}
+
+void mt_enet_link_reset(MtEnet *e)
+{
+    unsigned i;
+    e->gate = NULL;
+    e->refnum = 0;
+    for (i = 0; i < 6; i++) e->mac[i] = 0;
+    e->attached = 0;
+    e->opened = 0;
+    e->reattach_req = 0;
+    e->reattach_tries = 0;
+    /* tx[], tx_started, wd_* and the counters stay: the driver may still own PBs in tx[] */
+}
+
 void mt_enet_watchdog(MtEnet *e, uint32_t now)
 {
     unsigned i;
@@ -70,14 +90,54 @@ void mt_enet_watchdog(MtEnet *e, uint32_t now)
         if (age < MT_ENET_TX_STUCK_MS) continue;
         if (c->wd_stage == 0) {
             e->tx_stuck++;
-            e->tx_killed++;
-            (void)mt_os_enet_kill(e->refnum, &c->pb);
+            e->kill_req = 1;                     /* performed by mt_enet_service at task time */
             c->wd_stage = 1;
             c->wd_t0 = now;
         } else if (c->wd_stage == 1) {
             c->wd_stage = 2;                     /* quarantined: stays started until it completes */
             if (e->tx_started) e->tx_started--;
-            if (e->opened) { e->reattach_req = 1; e->reattach_tries = 0; }
+            if (e->opened && !e->reattach_req) {
+                e->reattach_req = 1;
+                e->reattach_tries = 0;
+                e->reattach_at = now;
+            }
         }
     }
+}
+
+static int blocked(const MtEnet *e)
+{
+    return mt_os_enet_blocked(e->refnum, &e->tx[0], &e->tx[MT_ENET_TXSLOTS]);
+}
+
+void mt_enet_service(MtEnet *e, uint32_t now)
+{
+    int16_t r;
+    if (e->kill_req) {
+        e->kill_req = 0;
+        e->tx_killed++;
+        r = mt_os_enet_kill(e->refnum, NULL);
+        if (r) e->last_err = r;
+    }
+    if (!e->reattach_req || (int32_t)(now - e->reattach_at) < 0) return;
+    if (blocked(e)) {
+        e->reattach_blocked++;
+        r = MT_ENET_E_BUSY;
+    } else {
+        r = (int16_t)mt_enet_reattach_io(e);
+    }
+    if (r == 0) {
+        e->reattach++;
+        e->reattach_req = 0;
+        e->reattach_tries = 0;
+        return;
+    }
+    e->last_err = r;
+    e->reattach_fail++;
+    if (++e->reattach_tries >= MT_ENET_REATTACH_TRIES) {
+        e->reattach_req = 0;                     /* abandoned: link stays as it is */
+        e->reattach_abandoned++;
+        return;
+    }
+    e->reattach_at = now + (MT_ENET_REATTACH_BACKOFF_MS << (e->reattach_tries - 1));
 }

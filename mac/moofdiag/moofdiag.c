@@ -147,10 +147,11 @@ int main(void)
               (unsigned long)m->enet.tx_pad, (unsigned long)m->enet.tx_drop_busy,
               (unsigned long)m->enet.tx_drop_len, (unsigned long)m->enet.tx_drop_closed,
               (unsigned long)m->enet.tx_err, m->enet.last_err);
-            P("enet wd: tx_stuck %lu tx_killed %lu reattach %lu fail %lu quarantined %d\r",
+            P("enet wd: tx_stuck %lu tx_killed %lu reattach %lu fail %lu quarantined %d blocked %lu abandoned %lu\r",
               (unsigned long)m->enet.tx_stuck, (unsigned long)m->enet.tx_killed,
               (unsigned long)m->enet.reattach, (unsigned long)m->enet.reattach_fail,
-              mt_enet_tx_quarantined(&m->enet));
+              mt_enet_tx_quarantined(&m->enet), (unsigned long)m->enet.reattach_blocked,
+              (unsigned long)m->enet.reattach_abandoned);
             P("timer: fired %lu armed %u\r", (unsigned long)m->timer.fired, m->timer.armed);
             if (!(m->stk.flags & 1))
                 P("stack: not built with marks (rebuild with MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096)\r");

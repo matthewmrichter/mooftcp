@@ -5,6 +5,7 @@
 #include "mt_enet.h"
 /* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
+int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi);
 
 enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
 
@@ -64,7 +65,9 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
     int16_t r = MT_ENET_E_NODRIVER;
     int i;
 
-    zero(e, sizeof *e);
+    if (e->refnum && mt_os_enet_blocked(e->refnum, &e->tx[0], &e->tx[MT_ENET_TXSLOTS]))
+        return MT_ENET_E_BUSY;                   /* a re-open behind our stuck PB would hang */
+    mt_enet_link_reset(e);                       /* keeps tx[]: the driver may still own PBs there */
     for (i = 0; i < 2 && r != 0; i++) r = (int16_t)OpenDriver(names[i], &ref);
     if (r) { e->last_err = r; return r; }
     e->refnum = ref;
@@ -147,50 +150,50 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb)
     return (int16_t)PBKillIOSync((ParmBlkPtr)&k);
 }
 
-/* Detach, close the driver, open it again and attach again (task time, gate owned by the
- * caller). The transmit slots are not touched: PBs still in flight stay allocated and quarantined.
- * Failure leaves opened = 0 (frames are refused with tx_drop_closed); up to three attempts. */
-int mt_enet_reattach(MtEnet *e)
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory globals */
+/* The DCE of .ENET0: is one of our transmit PBs the head (active) request of its queue? */
+int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi)
 {
-    static const unsigned char *const names[2] = { (const unsigned char *)"\p.ENET0",
-                                                   (const unsigned char *)"\p.ENET" };
-    short ref = 0;
-    int16_t r = MT_ENET_E_NODRIVER;
-    int i;
+    /* UTableBase (0x11C) -> DCtlHandle[~refnum]; DCE: dCtlQHdr at 6 = qFlags(2) qHead(4) qTail(4) */
+    const uint8_t *const *const *tab = *(const uint8_t *const *const *const *)0x11C;
+    int16_t unit = (int16_t)~refnum;
+    const uint8_t *const *h;
+    const uint8_t *dce;
+    uint32_t head, l = (uint32_t)(uintptr_t)lo & 0x00FFFFFFu, u = (uint32_t)(uintptr_t)hi & 0x00FFFFFFu;
+    if (!tab || unit < 0 || unit >= *(volatile const int16_t *)0x1D2) return 0;
+    h = (const uint8_t *const *)tab[unit];
+    if (!h || !(dce = *h)) return 0;
+    head = ((uint32_t)dce[8] << 24 | (uint32_t)dce[9] << 16 | (uint32_t)dce[10] << 8 | dce[11]) & 0x00FFFFFFu;
+    return head && head >= l && head < u;
+}
 
-    if (!e->reattach_req || !e->gate) return 0;
+/* Detach both handlers, attach both again (task time, gate owned by the caller). No CloseDriver /
+ * OpenDriver. The transmit slots are not touched. Ruling (gate consistency): the handler context
+ * and gate->open follow the handlers: ctx 0 while none is attached, gate stays open so the tick
+ * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). */
+int mt_enet_reattach_io(MtEnet *e)
+{
+    int16_t r;
+    if (!e->gate) return MT_ENET_E_NODRIVER;
     if (e->attached & 2) detach(e, 0x0800);
     if (e->attached & 1) detach(e, 0x0806);
     e->attached = 0;
     e->opened = 0;
-    mt_enet_ph_set_ctx(0);
-    (void)CloseDriver(e->refnum);
-    for (i = 0; i < 2 && r != 0; i++) r = (int16_t)OpenDriver(names[i], &ref);
+    mt_enet_ph_set_ctx(e->gate);
+    r = attach(e, 0x0806);
     if (r == 0) {
-        e->refnum = ref;
-        mt_enet_ph_set_ctx(e->gate);
-        e->gate->open = 1;
-        r = attach(e, 0x0806);
-        if (r == 0) {
-            e->attached |= 1;
-            r = attach(e, 0x0800);
-            if (r == 0) e->attached |= 2;
-        }
+        e->attached |= 1;
+        r = attach(e, 0x0800);
+        if (r == 0) e->attached |= 2;
     }
     if (r) {
-        e->last_err = r;
-        e->reattach_fail++;
         if (e->attached & 2) detach(e, 0x0800);
         if (e->attached & 1) detach(e, 0x0806);
         e->attached = 0;
         mt_enet_ph_set_ctx(0);
-        if (++e->reattach_tries >= 3) e->reattach_req = 0;   /* give up; the link stays closed */
         return r;
     }
     e->opened = 1;
-    e->reattach++;
-    e->reattach_req = 0;
-    e->reattach_tries = 0;
     return 0;
 }
 

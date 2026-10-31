@@ -132,6 +132,7 @@ static long boot(void *drvr) {
     r = (MtRes *)(((uintptr_t)raw + 3u) & ~(uintptr_t)3u);   /* NewPtr is only 2-aligned (obs) */
     r->raw = raw;
     r->size = len + 4u;
+    mt_enet_init(&r->enet);                      /* the one zeroing: tx[] is never cleared again */
     r->cfg_result = (int16_t)cr;
     r->mode = mode;
 
@@ -184,16 +185,18 @@ static int16_t link_up(MtRes *r) {
     return 0;
 }
 
-/* Ethernet reattach after a write stayed stuck through KillIO (mt_enet_wd.c asks from the tick,
- * which runs at interrupt level: the Memory Manager and the driver's close/open need task time).
- * Runs from the first Control entry at task time with the gate free; the gate is owned meanwhile
- * so rx and ticks wait in the ring and link.tx is not called while opened is 0. */
-static void enet_reattach(MtRes *r) {
+/* Ethernet KillIO and reattach after a write stayed stuck (mt_enet_wd.c). The watchdog runs in the
+ * gate, possibly at interrupt time, and only sets kill_req / reattach_req: .ENET0 may not be
+ * re-entered from there (KillIO is an immediate call straight into its Control) and the
+ * detach/attach need task time. They run here, from the first Control entry at task time with the
+ * gate free; never in the goodbye call. The gate is owned meanwhile so rx and ticks wait in the
+ * ring and link.tx is not called while the handlers are detached. */
+static void enet_service(MtRes *r, const MtAnyPb *pb) {
     void *z;
-    if (sr_irq() || mt_os_gate_depth() != 0) return;   /* retried at the next entry */
+    if (pb->hdr.csCode == -1 || sr_irq() || mt_os_gate_depth() != 0) return;
     z = mt_mac_zone_sys();
     MT_GATE_ENTER(&r->gate);
-    (void)mt_enet_reattach(&r->enet);
+    mt_enet_service(&r->enet, mt_os_ms());
     MT_GATE_LEAVE(&r->gate);                     /* after_cb re-arms the timer */
     mt_mac_zone_restore(z);
 }
@@ -244,7 +247,8 @@ int16_t mt_drv_control(void *vpb, void *dce) {
     if (!(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
         n = mt_mac_dequeue(pb, dce, extra, (int)MT_DRV_PENDQ);
     if (!r) { pb->hdr.ioResult = MT_PB_NOTOPEN; return MT_PB_NOTOPEN; }
-    if (r->enet.reattach_req) enet_reattach(r);   /* watchdog asked; needs task time (Ruling) */
+    if ((r->enet.kill_req | r->enet.reattach_req) && !(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
+        enet_service(r, pb);                      /* the watchdog asked; task time only */
     res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
     for (i = 0; i < n; i++) {
         MtAnyPb *x = (MtAnyPb *)extra[i];

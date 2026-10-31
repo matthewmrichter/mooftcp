@@ -1,5 +1,6 @@
 #include <string.h>
 #include "pbfake.h"
+#include "mt_enet.h"
 #include "mt_gate.h"
 #include "mt_int.h"
 #include "mt_util.h"
@@ -30,6 +31,12 @@ void pbf_reset(void) {
     g_ncompl = g_nasr = 0;
     pbf_nlog = 0;
     pbf_kill_calls = 0;
+    pbf_kill_result = 0;
+    pbf_kill_hook = NULL;
+    pbf_dev_head = NULL;
+    pbf_blocked_calls = 0;
+    pbf_reattach_calls = 0;
+    pbf_reattach_result = 0;
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
@@ -164,11 +171,30 @@ int mt_os_app_mem(MacPtr32 p) { return p >= pbf_app_lo && p < pbf_app_hi; }
 int pbf_kill_calls;
 int16_t pbf_kill_ref;
 void *pbf_kill_pb;
+int16_t pbf_kill_result;                 /* what mt_os_enet_kill returns */
+void (*pbf_kill_hook)(void);             /* its effect (e.g. complete the stuck PB with abortErr) */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb) {
     pbf_kill_calls++;
     pbf_kill_ref = refnum;
     pbf_kill_pb = pb;
-    return 0;
+    if (pbf_kill_hook) pbf_kill_hook();
+    return pbf_kill_result;
+}
+
+const void *pbf_dev_head;                /* head of .ENET0's queue (NULL = idle) */
+int pbf_blocked_calls;
+int mt_os_enet_blocked(int16_t refnum, const void *lo, const void *hi) {
+    (void)refnum;
+    pbf_blocked_calls++;
+    return pbf_dev_head && pbf_dev_head >= lo && pbf_dev_head < hi;
+}
+
+int pbf_reattach_calls;
+int pbf_reattach_result;                 /* what the fake detach/attach returns */
+int mt_enet_reattach_io(MtEnet *e) {
+    pbf_reattach_calls++;
+    e->opened = pbf_reattach_result == 0;
+    return pbf_reattach_result;
 }
 
 /* ---- harness ---- */

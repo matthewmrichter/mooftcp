@@ -63,6 +63,9 @@ static void watchdog_ignores_slow_but_completing_write(void)
     T_EQ(E.reattach_req, 0);
 }
 
+static MtEnetTx *g_kill_target;
+static void kill_effect(void) { g_kill_target->pb.ioResult = -27; }   /* the driver aborts it */
+
 static void watchdog_kills_after_timeout(void)
 {
     uint32_t t;
@@ -71,20 +74,40 @@ static void watchdog_kills_after_timeout(void)
     s = start();
     for (t = 0; t <= MT_ENET_TX_STUCK_MS + 200; t += 50) mt_enet_watchdog(&E, t);
     T_EQ(E.tx_stuck, 1);
-    T_EQ(E.tx_killed, 1);
+    T_EQ(E.kill_req, 1);
+    T_EQ(pbf_kill_calls, 0);                               /* the watchdog itself never calls the driver */
+    T_EQ(E.tx_killed, 0);
+    /* task time: the kill is made, once, and counted apart from tx_stuck */
+    pbf_kill_result = -50;                                 /* KillIO's own OSErr is kept */
+    g_kill_target = s;
+    pbf_kill_hook = kill_effect;
+    mt_enet_service(&E, 2300);
     T_EQ(pbf_kill_calls, 1);
+    T_EQ(E.tx_killed, 1);
+    T_EQ(E.kill_req, 0);
+    T_EQ(E.last_err, -50);
     T_EQ(pbf_kill_ref, -48);
-    T_CHECK(pbf_kill_pb == (void *)&s->pb);
-    for (t = 2300; t < 2300 + MT_ENET_TX_STUCK_MS - 300; t += 50) mt_enet_watchdog(&E, t);
+    mt_enet_service(&E, 2400);
     T_EQ(pbf_kill_calls, 1);                               /* once */
     T_EQ(E.reattach_req, 0);
-    /* the kill works: the driver completes it with abortErr; counted as an error, slot is free */
-    s->pb.ioResult = -27;
-    mt_enet_watchdog(&E, 4000);
+    mt_enet_watchdog(&E, 4000);                            /* the kill worked: slot is reaped */
     T_EQ(E.tx_err, 1);
     T_EQ(E.tx_started, 0);
     T_EQ(E.reattach_req, 0);
     T_EQ(mt_enet_tx_busy(&E), 0);
+}
+
+static void watchdog_kill_not_repeated_when_service_is_late(void)
+{
+    uint32_t t;
+    setup();
+    (void)start();
+    (void)start();
+    for (t = 0; t <= MT_ENET_TX_STUCK_MS + 200; t += 50) mt_enet_watchdog(&E, t);
+    T_EQ(E.tx_stuck, 2);                                   /* two slots, one request */
+    mt_enet_service(&E, 2300);
+    T_EQ(pbf_kill_calls, 1);
+    T_EQ(E.tx_killed, 1);
 }
 
 static void watchdog_reattach_after_second_timeout(void)
@@ -95,18 +118,129 @@ static void watchdog_reattach_after_second_timeout(void)
     s = start();
     for (t = 0; t <= 2 * MT_ENET_TX_STUCK_MS + 400; t += 50) mt_enet_watchdog(&E, t);
     T_EQ(E.tx_stuck, 1);
-    T_EQ(pbf_kill_calls, 1);
+    T_EQ(pbf_kill_calls, 0);
     T_EQ(E.reattach_req, 1);
     T_EQ(mt_enet_tx_quarantined(&E), 1);
     T_EQ(E.tx_started, 0);                                 /* no longer watched: no more 100 ms ticks */
     T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu), 0xFFFFFFFFu);
-    for (t = 5000; t < 60000; t += 100) mt_enet_watchdog(&E, t);
-    T_EQ(pbf_kill_calls, 1);                               /* never killed twice, no new requests */
-    /* late completion by the driver after the reattach: the slot becomes usable again */
-    E.reattach_req = 0;
+    T_EQ(pbf_reattach_calls, 0);                           /* nothing at interrupt time */
+    mt_enet_service(&E, 4500);                             /* first task-time entry */
+    T_EQ(pbf_kill_calls, 1);
+    T_EQ(pbf_reattach_calls, 1);
+    T_EQ(E.reattach, 1);
+    T_EQ(E.reattach_req, 0);
+    T_EQ(E.opened, 1);
+    for (t = 5000; t < 60000; t += 100) { mt_enet_watchdog(&E, t); mt_enet_service(&E, t); }
+    T_EQ(pbf_kill_calls, 1);
+    T_EQ(pbf_reattach_calls, 1);                           /* no new requests */
+    /* late completion by the driver after the reattach: only now the slot becomes usable again */
+    T_EQ(s->pb.ioResult, 1);
     s->pb.ioResult = 0;
     T_CHECK(mt_enet_tx_claim(&E) != NULL);
     T_EQ(mt_enet_tx_quarantined(&E), 0);
+}
+
+static void watchdog_reattach_backoff_and_abandon(void)
+{
+    uint32_t t;
+    setup();
+    (void)start();
+    for (t = 0; t <= 2 * MT_ENET_TX_STUCK_MS + 400; t += 50) mt_enet_watchdog(&E, t);
+    pbf_reattach_result = -94;
+    mt_enet_service(&E, 5000);                             /* attempt 1 fails */
+    T_EQ(pbf_reattach_calls, 1);
+    T_EQ(E.reattach_fail, 1);
+    T_EQ(E.opened, 0);
+    mt_enet_service(&E, 5999);                             /* backoff 1 s: too early */
+    T_EQ(pbf_reattach_calls, 1);
+    mt_enet_service(&E, 6000);                             /* attempt 2 */
+    T_EQ(pbf_reattach_calls, 2);
+    mt_enet_service(&E, 7999);                             /* backoff 2 s */
+    T_EQ(pbf_reattach_calls, 2);
+    mt_enet_service(&E, 8000);                             /* attempt 3 */
+    T_EQ(pbf_reattach_calls, 3);
+    mt_enet_service(&E, 11999);                            /* backoff 4 s */
+    T_EQ(pbf_reattach_calls, 3);
+    mt_enet_service(&E, 12000);                            /* attempt 4: the last */
+    T_EQ(pbf_reattach_calls, 4);
+    T_EQ(E.reattach_req, 0);
+    T_EQ(E.reattach_abandoned, 1);
+    T_EQ(E.reattach_fail, 4);
+    mt_enet_service(&E, 99999);
+    T_EQ(pbf_reattach_calls, 4);                           /* abandoned */
+    T_EQ(E.last_err, -94);
+}
+
+static void watchdog_reattach_skipped_when_our_pb_heads_the_queue(void)
+{
+    MtEnetTx *s;
+    uint32_t t;
+    setup();
+    s = start();
+    for (t = 0; t <= 2 * MT_ENET_TX_STUCK_MS + 400; t += 50) mt_enet_watchdog(&E, t);
+    pbf_dev_head = &s->pb;                                 /* the stuck PB is the active request */
+    mt_enet_service(&E, 4500);
+    T_EQ(pbf_reattach_calls, 0);                           /* a sync call would wait forever */
+    T_EQ(E.reattach_blocked, 1);
+    T_EQ(E.reattach_fail, 1);
+    pbf_dev_head = NULL;                                   /* the queue moved on */
+    mt_enet_service(&E, 5500);
+    T_EQ(pbf_reattach_calls, 1);
+    T_EQ(E.reattach, 1);
+    pbf_dev_head = (const void *)&E;                       /* somebody else's PB does not block */
+    T_EQ(mt_os_enet_blocked(-48, &E.tx[0], &E.tx[MT_ENET_TXSLOTS]), 0);
+}
+
+static void watchdog_no_reattach_request_when_link_is_closed(void)
+{
+    uint32_t t;
+    setup();
+    E.opened = 0;
+    (void)start();
+    for (t = 0; t <= 2 * MT_ENET_TX_STUCK_MS + 400; t += 50) mt_enet_watchdog(&E, t);
+    T_EQ(E.reattach_req, 0);
+    T_EQ(E.tx_stuck, 1);
+}
+
+static void watchdog_quarantine_keeps_started_count_exact(void)
+{
+    MtEnetTx *a, *b;
+    uint32_t t;
+    setup();
+    a = start();
+    for (t = 0; t < 2 * MT_ENET_TX_STUCK_MS + 200; t += 50) mt_enet_watchdog(&E, t);
+    T_EQ(E.tx_started, 0);                                 /* a is quarantined */
+    b = start();
+    T_CHECK(b != a);
+    T_EQ(E.tx_started, 1);
+    a->pb.ioResult = 0;                                    /* a completes late, the scan reaps it */
+    mt_enet_watchdog(&E, t);
+    T_EQ(E.tx_started, 1);                                 /* b is still counted (not 0) */
+    T_EQ(b->started, 1);
+}
+
+static void open_keeps_in_flight_slots(void)
+{
+    MtEnetTx *s, *again;
+    unsigned i;
+    setup();
+    s = start();
+    E.tx_ok = 7;
+    mt_enet_link_reset(&E);                                /* what a re-open does first */
+    T_EQ(E.tx_started, 1);
+    T_EQ(s->started, 1);
+    T_EQ(s->pb.ioResult, 1);                               /* the driver's PB was not zeroed */
+    T_EQ(E.tx_ok, 7);
+    T_EQ(E.opened, 0);
+    for (i = 0; i < MT_ENET_TXSLOTS - 1; i++) {
+        again = mt_enet_tx_claim(&E);
+        T_CHECK(again && again != s);
+        again->pb.ioResult = 1;
+        again->started = 1;
+    }
+    T_CHECK(mt_enet_tx_claim(&E) == NULL);                 /* s is never handed out */
+    mt_enet_init(&E);
+    T_EQ(E.tx[0].pb.ioResult, 0);
 }
 
 static void watchdog_never_reuses_in_flight_slot(void)
@@ -147,7 +281,7 @@ static void watchdog_wrap_safe_time(void)
     (void)s;
     for (; t != end; t += 50u) mt_enet_watchdog(&E, t);
     T_EQ(E.tx_stuck, 1);
-    T_EQ(pbf_kill_calls, 1);
+    T_EQ(E.kill_req, 1);
     T_EQ(E.reattach_req, 1);
 }
 
@@ -168,5 +302,9 @@ static void watchdog_scan_period(void)
 }
 
 T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
-       watchdog_kills_after_timeout, watchdog_reattach_after_second_timeout,
-       watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time, watchdog_scan_period)
+       watchdog_kills_after_timeout, watchdog_kill_not_repeated_when_service_is_late,
+       watchdog_reattach_after_second_timeout, watchdog_reattach_backoff_and_abandon,
+       watchdog_reattach_skipped_when_our_pb_heads_the_queue,
+       watchdog_no_reattach_request_when_link_is_closed, watchdog_quarantine_keeps_started_count_exact,
+       open_keeps_in_flight_slots, watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time,
+       watchdog_scan_period)

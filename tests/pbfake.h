@@ -51,6 +51,12 @@ extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current applica
 extern int pbf_kill_calls;        /* mt_os_enet_kill calls and the last arguments */
 extern int16_t pbf_kill_ref;
 extern void *pbf_kill_pb;
+extern int16_t pbf_kill_result;          /* mt_os_enet_kill's return value and side effect */
+extern void (*pbf_kill_hook)(void);
+extern const void *pbf_dev_head;         /* head request of .ENET0's queue, for mt_os_enet_blocked */
+extern int pbf_blocked_calls;
+extern int pbf_reattach_calls;           /* the fake mt_enet_reattach_io */
+extern int pbf_reattach_result;
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */
