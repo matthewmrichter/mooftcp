@@ -35,16 +35,23 @@ void mt_pb_set_config(MtDrv *d, const mt_ifconfig *c) {
  * frame is below us: a TCPRelease made from inside one defers the core release (decision 3). */
 
 void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
+    uint8_t sv = d->co_gate;
+    d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;
     mt_os_complete(pb, err);
     d->depth--;
+    d->co_gate = sv;
 }
 
 void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason, MacPtr32 icmp) {
+    uint8_t sv;
     if (!a->proc) return;                       /* no notifyProc given: accepted (matrix 202b) */
+    sv = d->co_gate;
+    d->co_gate = (uint8_t)mt_os_gate_depth();
     d->depth++;
     mt_os_asr(a, ev, reason, icmp);
     d->depth--;
+    d->co_gate = sv;
 }
 
 /* Perform the core releases that were deferred while a glue frame was active. */
@@ -144,6 +151,24 @@ void mt_pb_tick(MtDrv *d) {
     mt_os_irq_restore(sv);
 }
 
+/* A stream belongs to the departing application if its receive buffer, its ASR or any PB it
+ * holds lies in the application's memory: its routines must never run again either way. */
+static int app_pb(const MtAnyPb *pb) { return pb && mt_os_app_mem(mt_os_addr(pb)); }
+static int app_tcp(const MtStream *s) {
+    uint8_t k;
+    if (mt_os_app_mem(s->rbuf) || (s->asr && mt_os_app_mem(s->asr))) return 1;
+    if (app_pb(s->open_pb) || app_pb(s->close_pb)) return 1;
+    for (k = 0; k < s->rq_n; k++) if (app_pb(s->rq[k].pb)) return 1;
+    for (k = 0; k < s->sq_n; k++) if (app_pb(s->sq[k].pb)) return 1;
+    return 0;
+}
+static int app_udp(const MtUdpStream *u) {
+    uint8_t k;
+    if (mt_os_app_mem(u->rbuf) || (u->asr && mt_os_app_mem(u->asr))) return 1;
+    for (k = 0; k < u->rq_n; k++) if (app_pb(u->rq[k].pb)) return 1;
+    return 0;
+}
+
 /* Goodbye kiss: drop everything the departing application owns, silently (no routine of its
  * may run any more). Generations and connection counters move on, so a stale handle or a late
  * core callback for an old connection is recognised as such. */
@@ -154,7 +179,7 @@ void mt_pb_goodbye(MtDrv *d) {
         MtStream *s = &d->tcp[i];
         uint8_t gen = s->gen;
         uint16_t conn = (uint16_t)(s->conn + 1u);
-        if (!s->used || !mt_os_app_mem(s->rbuf)) continue;   /* system-heap clients stay */
+        if (!s->used || !app_tcp(s)) continue;  /* system-heap clients stay */
         if (s->t) mt_tcp_release(s->t);         /* no callbacks; a live connection gets an RST */
         memset(s, 0, sizeof *s);
         s->gen = gen;
@@ -164,7 +189,7 @@ void mt_pb_goodbye(MtDrv *d) {
     for (i = 0; i < d->nudp; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
-        if (!u->used || !mt_os_app_mem(u->rbuf)) continue;
+        if (!u->used || !app_udp(u)) continue;
         if (u->u) mt_udp_release(u->u);
         memset(u, 0, sizeof *u);
         u->gen = gen;

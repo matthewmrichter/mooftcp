@@ -1,5 +1,6 @@
 #include <string.h>
 #include "pbfake.h"
+#include "mt_gate.h"
 #include "mt_int.h"
 #include "mt_util.h"
 
@@ -10,6 +11,7 @@ int pbf_bad;
 int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
 int pbf_mask, pbf_mask_max;
+MtGate *pbf_gate;
 MacPtr32 pbf_app_lo, pbf_app_hi;
 MacPtr32 pbf_a5;
 
@@ -31,6 +33,8 @@ void pbf_reset(void) {
     pbf_in_int = 0;
     pbf_a5 = 0x00A50000u;
     pbf_mask = pbf_mask_max = 0;
+    pbf_gate = NULL;
+    fake_tx_hook = NULL;
     pbf_app_lo = 0;
     pbf_app_hi = 0xFFFFFFFFu;
     pbf_now = 1000;
@@ -126,12 +130,14 @@ int mt_os_irq_save(void) {
     pbf_irq++;
     pbf_irq_calls++;
     if (pbf_irq > pbf_irq_max) pbf_irq_max = pbf_irq;
+    if (pbf_gate) pbf_gate->depth++;            /* as the Mac's gate enter */
     return prev;
 }
 
 void mt_os_irq_restore(int saved) {
     if (saved != pbf_irq - 1) pbf_bad++;        /* restores must nest */
     pbf_irq = saved;
+    if (pbf_gate && pbf_gate->depth) pbf_gate->depth--;
 }
 
 int mt_os_in_interrupt(void) { return pbf_in_int > 0; }
@@ -146,6 +152,8 @@ void mt_os_unmask(int saved) {
     if (saved != pbf_mask - 1) pbf_bad++;       /* must nest */
     pbf_mask = saved;
 }
+
+int mt_os_gate_depth(void) { return pbf_gate ? pbf_gate->depth : pbf_irq; }
 
 int mt_os_app_mem(MacPtr32 p) { return p >= pbf_app_lo && p < pbf_app_hi; }
 

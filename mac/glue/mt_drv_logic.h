@@ -34,7 +34,15 @@ static inline int mt_drv_may_pend(int16_t cs) {
            cs == 29;
 }
 
-/* gate_owned: MtGate.depth != 0; callout: MtDrv.depth != 0; async: ioTrap bit 10;
+/* A call is a call-out only if an application routine is running (MtDrv.depth != 0) AND the gate
+ * is still at the depth recorded when that routine was called (MtDrv.co_gate). If the routine has
+ * itself called back into the glue and is now inside a core call, the gate is deeper: a call made
+ * then comes from an interrupt that preempted it (final review, fix 1) and must not nest. */
+static inline int mt_drv_callout(unsigned gate_depth, unsigned drv_depth, unsigned co_gate) {
+    return drv_depth != 0 && gate_depth == co_gate;
+}
+
+/* gate_owned: MtGate.depth != 0; callout: mt_drv_callout; async: ioTrap bit 10;
  * irq: SR interrupt mask != 0. */
 static inline int mt_drv_route(int gate_owned, int callout, int async, int irq, int16_t cs) {
     if (gate_owned && !callout) return async ? MT_DRV_QUEUE : MT_DRV_REFUSE;

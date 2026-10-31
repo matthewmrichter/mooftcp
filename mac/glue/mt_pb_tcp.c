@@ -453,7 +453,7 @@ static int16_t do_rcv(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     }
     st = state_of(s);
     if (st == MT_TCP_CLOSED) return connectionDoesntExist;               /* matrix 503 */
-    if (!s->rq_n && unread(s) && can_serve(s, pb)) {
+    if (!s->rq_n && unread(s) && can_serve(s, pb) && d->depth < MT_PB_INLINE_MAX) {
         uint8_t g = s->gen;
         uint16_t c = s->conn;
         uint32_t u;
@@ -478,6 +478,7 @@ static int16_t do_rcv(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     s->rq[s->rq_n].timed = (uint8_t)(tmo != 0);                         /* 0 = forever (501b) */
     s->rq[s->rq_n].dl = d->now + MS(tmo);
     s->rq_n++;
+    if (s->rq_n == 1 && unread(s) && can_serve(s, pb)) d->rcv_kick = 1;   /* too deep to serve now */
     pb->hdr.ioResult = inProgress;
     return inProgress;
 }
@@ -824,6 +825,11 @@ int16_t mt_pb_tcp_control(MtDrv *d, MtAnyPb *pb) {
 
 void mt_pb_tcp_after_core(MtDrv *d) {
     uint8_t i;
+    if (d->rcv_kick && d->depth < MT_PB_INLINE_MAX) {      /* reads queued by the nesting limit */
+        d->rcv_kick = 0;
+        for (i = 0; i < d->ntcp; i++)
+            if (d->tcp[i].used == LIVE && d->tcp[i].rq_n) (void)serve_reads(&d->tcp[i], NULL);
+    }
     for (i = 0; i < d->ntcp; i++) {
         MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
@@ -872,6 +878,7 @@ void mt_pb_tcp_timers(MtDrv *d) {
 uint32_t mt_pb_tcp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
+    if (d->rcv_kick) return 0;                             /* serve the queued reads at once */
     for (i = 0; i < d->ntcp; i++) {
         const MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;

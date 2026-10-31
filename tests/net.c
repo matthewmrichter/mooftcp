@@ -7,8 +7,11 @@ const uint8_t T_ME_MAC[6]   = {0x02, 0, 0, 0, 0, 0x01};
 const uint8_t T_PEER_MAC[6] = {0x02, 0, 0, 0, 0, 0x0A};
 const uint8_t T_GW_MAC[6]   = {0x02, 0, 0, 0, 0, 0xFE};
 
+void (*fake_tx_hook)(void);
+
 static int fake_tx(void *ctx, const uint8_t *frame, uint16_t len) {
     fake_link *fl = (fake_link *)ctx;
+    if (fake_tx_hook) fake_tx_hook();
     if (fl->n >= 64 || len > 1514) return 1;
     memcpy(fl->f[fl->n], frame, len);
     fl->len[fl->n] = len;

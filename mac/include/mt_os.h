@@ -96,6 +96,12 @@ void mt_os_irq_restore(int saved);
  * Mac reads the processor's interrupt mask (SR bits 8-10, nonzero = interrupt time). */
 int  mt_os_in_interrupt(void);
 
+/* The core gate's ownership depth (mac/glue/mt_gate.h; 0 = free). mt_os_irq_save / restore
+ * move it by one. The glue records it when it calls application code (MtDrv.co_gate): a driver
+ * call that finds the gate at exactly that depth comes from the routine itself (a call-out);
+ * deeper means the routine is itself inside a core call and the caller preempted it. */
+int  mt_os_gate_depth(void);
+
 /* A real interrupt mask (level 7) around a few instructions: the driver's PB rings, filled by
  * preempting callers (mt_pb_entry.c). Never around a core call (see mt_gate.h). Nests. */
 int  mt_os_mask(void);

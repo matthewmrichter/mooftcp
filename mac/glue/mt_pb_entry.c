@@ -49,6 +49,7 @@ static void goodbye(MtEntry *e) {
          * consistent points of the core, so the core itself is in a usable state. */
         e->n_goodbye_forced++;
         d->depth = 0;
+        d->co_gate = 0;
         d->in_core = 0;
         g->in_irq = 0;
         g->depth = 0;
@@ -94,7 +95,8 @@ int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
         return 0;
     }
 
-    route = mt_drv_route(e->gate->depth != 0, d->depth != 0, async, irq, cs);
+    route = mt_drv_route(e->gate->depth != 0, mt_drv_callout(e->gate->depth, d->depth, d->co_gate),
+                         async, irq, cs);
     if (route == MT_DRV_QUEUE) {
         if (push(&e->pend, pb)) {
             pb->hdr.ioResult = inProgress;

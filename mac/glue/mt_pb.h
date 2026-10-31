@@ -186,6 +186,8 @@ struct MtDrv {
     uint8_t   configured;       /* an address is set: otherwise every call gets notOpenErr */
     uint8_t   depth;            /* > 0 while the glue is calling out (app routines, core callbacks) */
     uint8_t   in_core;          /* inside mt_input / mt_tick (they must not be re-entered) */
+    uint8_t   co_gate;          /* gate depth (mt_os_gate_depth) when the innermost call-out began */
+    uint8_t   rcv_kick;         /* a TCPRcv was queued instead of served inline: serve at the next tick */
     uint8_t   ntcp, next_slot;
     uint8_t   nudp, next_uslot;
     uint16_t  echo_seq;
@@ -216,6 +218,12 @@ struct MtDrv {
     uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
 };
 
+/* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
+ * available from a completion routine nested this deep (MtDrv.depth) is queued and served from the
+ * next tick instead, so a reader that re-issues a 1-byte read from its completion cannot grow the
+ * stack without bound (final review, fix 2). */
+#define MT_PB_INLINE_MAX 3
+
 /* Bytes needed for the MtDrv plus the core arena for `lim`. */
 uint32_t mt_pb_size(const mt_limits *lim);
 /* NULL if len is short, lim->max_tcp > MT_PB_MAX_TCP or mem is misaligned. Starts unconfigured. */
@@ -230,8 +238,8 @@ void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
 uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE */
 void     mt_pb_tick(MtDrv *d);
 /* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
- * forget every TCP and UDP stream whose receive buffer lies in the application's memory and
- * every ICMPEcho whose notify routine does (mt_os_app_mem; system-heap clients keep theirs),
+ * forget every TCP and UDP stream whose receive buffer, ASR or any pending PB lies in the
+ * application's memory and every ICMPEcho whose notify routine does (mt_os_app_mem; system-heap clients keep theirs),
  * WITHOUT calling any completion routine or ASR (the application's code and buffers are going away). Core objects are
  * released, so the core stops touching the app's buffers (a live connection gets an RST). Call
  * it at task time with no glue frame active (depth 0, not inside the core): the driver does. */

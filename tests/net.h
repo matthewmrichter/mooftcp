@@ -8,6 +8,8 @@
  * returns nonzero, once 64 are queued). */
 typedef struct { uint8_t f[64][1514]; uint16_t len[64]; int n; } fake_link;
 void fake_init(fake_link *fl, mt_link *link);
+/* Called at the start of every frame the stack transmits (NULL = none): a test's "interrupt". */
+extern void (*fake_tx_hook)(void);
 void fake_clear(fake_link *fl);
 
 #define T_ME   0xC0A832C8u   /* 192.168.50.200 */

@@ -284,6 +284,7 @@ static void entry_setup(void) {
     pbt_init(&g_x, 1);
     memset(&g_g, 0, sizeof g_g);
     mt_entry_init(&g_e, g_x.d, &g_g);
+    pbf_gate = &g_g;                                      /* irq_save/restore move g_g.depth */
 }
 
 static int ncompl(MacPtr32 pb) {
@@ -474,6 +475,7 @@ static void goodbye_keeps_system_heap_clients(void) {
     pbt_conn c;
     StreamPtr sys, sysu, app;
     pbt_init(&x, 1);
+    pbf_app_hi = PBF_BASE + PBF_SIZE;                     /* the fake procs are system code here */
     sys = pbt_est(&x, pbf_asr(asr_nop), 0, &c);           /* "system heap": below the app range */
     sysu = pbt_ucreate(&x, 7001, 4096, 0, 0, NULL);
     pbf_app_lo = pbf_a(pbf_alloc(8));                     /* everything from here on is the app's */
@@ -489,6 +491,159 @@ static void goodbye_keeps_system_heap_clients(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* ---- final review fix 1: a call-out is only a call at the recorded gate depth ---- */
+
+static void callout_needs_recorded_gate_depth(void) {
+    T_CHECK(mt_drv_callout(1, 1, 1));                     /* the routine itself calls */
+    T_CHECK(mt_drv_callout(2, 2, 2));                     /* a routine inside a routine */
+    T_CHECK(!mt_drv_callout(2, 1, 1));                    /* the routine is mid core call */
+    T_CHECK(!mt_drv_callout(1, 0, 1));                    /* no routine running */
+    T_CHECK(!mt_drv_callout(0, 1, 1));
+}
+
+/* An owner runs a completion (gate depth 1); the routine issues TCPSend (a legit call-out: it
+ * runs); while that TCPSend is inside the core (the frame goes out), an "interrupt" calls the
+ * driver: async TCPRcv is queued, sync TCPStatus refused, neither enters the core. */
+static StreamPtr g_fs;
+static TCPiopb *g_fsend, *g_frcv, *g_fstat;
+static int16_t g_fsend_r, g_frcv_r, g_fstat_r;
+static int g_fhooked;
+static void preempt_hook(void) {
+    if (g_fhooked++) return;
+    g_frcv = pbt_pb(TCPRcv, g_fs);
+    g_frcv->csParam.receive.commandTimeoutValue = 10;
+    g_frcv->csParam.receive.rcvBuff = pbf_a(pbf_alloc(16));
+    g_frcv->csParam.receive.rcvBuffLen = 16;
+    g_frcv_r = mt_entry_control(&g_e, (MtAnyPb *)g_frcv, TRAP_ASYNC, 1);
+    g_fstat = pbt_pb(TCPStatus, g_fs);
+    g_fstat_r = mt_entry_control(&g_e, (MtAnyPb *)g_fstat, TRAP_SYNC, 1);
+}
+static void send_from_completion(MtAnyPb *pb) {
+    wdsEntry *w = (wdsEntry *)pbf_alloc(2 * sizeof(wdsEntry));
+    uint8_t *data = (uint8_t *)pbf_alloc(4);
+    (void)pb;
+    memcpy(data, "ping", 4);
+    w[0].length = 4;
+    w[0].ptr = pbf_a(data);
+    g_fsend = pbt_pb(TCPSend, g_fs);
+    g_fsend->csParam.send.wdsPtr = pbf_a(w);
+    g_fsend->csParam.send.pushFlag = 1;
+    fake_tx_hook = preempt_hook;
+    g_fsend_r = mt_entry_control(&g_e, (MtAnyPb *)g_fsend, TRAP_ASYNC, 0);
+    fake_tx_hook = NULL;
+}
+
+static void preemption_inside_nested_core_call_is_not_a_callout(void) {
+    pbt_conn c;
+    TCPiopb *trig;
+    entry_setup();
+    g_fs = pbt_est(&g_x, pbf_asr(asr_nop), 0, &c);
+    T_CHECK(g_fs != 0);
+    g_fhooked = 0;
+    fake_clear(&g_x.fl);
+    g_g.depth = 1;                                        /* owner T: tick / after callback */
+    trig = pbt_pb(TCPStatus, g_fs);
+    trig->ioCompletion = pbf_compl(send_from_completion);
+    mt_pb_call_complete(g_x.d, (MtAnyPb *)trig, 0);       /* as mt_entry_drain does */
+    T_EQ(g_fhooked, 1);                                   /* the frame did go out */
+    T_EQ(g_fsend_r, 0);                                   /* the routine's own call ran */
+    T_EQ(g_fsend->ioResult, inProgress);                  /* (waits for the ACK) */
+    T_EQ(g_frcv_r, 0);
+    T_EQ(g_frcv->ioResult, inProgress);
+    T_EQ(g_e.pend.queued, 1);                             /* queued, not run */
+    T_EQ(g_fstat_r, MT_DRV_REFUSED);                      /* sync: refused, not run */
+    T_EQ(g_fstat->ioResult, MT_DRV_REFUSED);
+    T_EQ(g_g.depth, 1);
+    T_EQ(g_x.d->depth, 0);
+    mt_entry_drain(&g_e);                                 /* the owner runs it afterwards */
+    T_EQ(g_e.n_pend_run, 1);
+    T_EQ(g_frcv->ioResult, inProgress);                   /* a read pending on the stream now */
+    T_EQ(pbf_bad, 0);
+}
+
+/* ---- final review fix 2: a chained 1-byte reader has bounded nesting ---- */
+
+static uint8_t g_rd[4096];
+static int g_rdn, g_rdepth, g_rdmax;
+static void chained_read(MtAnyPb *pb) {
+    g_rdepth++;
+    if (g_rdepth > g_rdmax) g_rdmax = g_rdepth;
+    if (pb->hdr.ioResult == 0 && pb->tcp.csParam.receive.rcvBuffLen == 1) {
+        const uint8_t *b = (const uint8_t *)pbf_p(pb->tcp.csParam.receive.rcvBuff);
+        if (g_rdn < (int)sizeof g_rd) g_rd[g_rdn] = b[0];
+        g_rdn++;
+        pb->tcp.csParam.receive.rcvBuffLen = 1;           /* re-issue the same PB */
+        pb->tcp.csParam.receive.commandTimeoutValue = 0;
+        (void)pbt_call(&g_x, (TCPiopb *)pb);
+    }
+    g_rdepth--;
+}
+
+static void chained_one_byte_reader_is_bounded(void) {
+    pbt_conn c;
+    StreamPtr s;
+    TCPiopb *pb;
+    uint8_t data[2800];
+    int i, ticks = 0;
+    pbt_init(&g_x, 1);
+    s = pbt_est(&g_x, pbf_asr(asr_nop), 0, &c);
+    T_CHECK(s != 0);
+    for (i = 0; i < (int)sizeof data; i++) data[i] = (uint8_t)(i * 7 + i / 251);
+    pbt_peer(&g_x, c.lport, c.ps, c.ms, TF_ACK | TF_PSH, 8192, data, 1400);
+    pbt_peer(&g_x, c.lport, c.ps + 1400, c.ms, TF_ACK | TF_PSH, 8192, data + 1400, 1400);
+    g_rdn = g_rdepth = g_rdmax = 0;
+    pb = pbt_pb(TCPRcv, s);
+    pb->ioCompletion = pbf_compl(chained_read);
+    pb->csParam.receive.rcvBuff = pbf_a(pbf_alloc(4));
+    pb->csParam.receive.rcvBuffLen = 1;
+    (void)pbt_call(&g_x, pb);
+    T_CHECK(g_rdmax <= MT_PB_INLINE_MAX);
+    T_CHECK(g_rdn < (int)sizeof data);                    /* the rest waits for the tick */
+    T_EQ(mt_pb_next_deadline_ms(g_x.d), 0);               /* ...which is due at once */
+    while (g_rdn < (int)sizeof data && ticks < 100) {
+        mt_pb_tick(g_x.d);
+        ticks++;
+    }
+    T_EQ(g_rdn, (int)sizeof data);
+    T_CHECK(memcmp(g_rd, data, sizeof data) == 0);        /* every byte, in order */
+    T_CHECK(g_rdmax <= MT_PB_INLINE_MAX);
+    T_CHECK(ticks <= 3);                                  /* the tick serves iteratively */
+    T_EQ(pb->ioResult, inProgress);                       /* the last read waits for more data */
+    T_EQ(pbf_bad, 0);
+}
+
+/* ---- final review fix 5: a stream with the app's ASR or a pending app PB is the app's ---- */
+
+static void goodbye_drops_streams_holding_app_routines_or_pbs(void) {
+    pbt x;
+    pbt_conn c;
+    StreamPtr a, b, cc, u;
+    TCPiopb *rcv;
+    UDPiopb *up;
+    pbt_init(&x, 1);
+    pbf_app_hi = PBF_BASE + PBF_SIZE;                     /* procs outside the app for now */
+    a = pbt_est(&x, 0, 0, &c);                            /* system buffers, no ASR */
+    b = pbt_est(&x, 0, 0, &c);
+    cc = pbt_est(&x, pbf_asr(asr_nop), 0, &c);
+    u = pbt_ucreate(&x, 7002, 4096, 0, 0, NULL);
+    T_CHECK(a && b && cc && u);
+    pbf_app_lo = pbf_a(pbf_alloc(8));                     /* from here on: the app's memory */
+    rcv = pbt_rcv(&x, a, 100, 0);                         /* an app PB pending on stream a */
+    T_EQ(rcv->ioResult, inProgress);
+    up = (UDPiopb *)pbt_pb(UDPRead, u);                   /* and on the UDP stream */
+    T_EQ(pbt_call(&x, (TCPiopb *)up), inProgress);
+    pbf_app_hi = 0xFFFFFFFFu;                             /* stream cc's ASR is app code now */
+    mt_pb_goodbye(x.d);
+    T_EQ(rcv->ioResult, inProgress);                      /* silently: no completion */
+    T_EQ(up->ioResult, inProgress);
+    T_EQ(pbt_simple(&x, TCPStatus, a), invalidStreamPtr);
+    T_EQ(pbt_simple(&x, TCPStatus, cc), invalidStreamPtr);
+    T_EQ(pbt_simple(&x, TCPStatus, b), 0);                /* nothing of the app's: kept */
+    up = (UDPiopb *)pbt_pb(UDPRelease, u);
+    T_EQ(pbt_call(&x, (TCPiopb *)up), invalidStreamPtr);
+    T_EQ(pbf_bad, 0);
+}
+
 T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, route_callout_nests,
        route_sync_pending_at_interrupt_refused, may_pend_covers_every_pending_cscode,
        pend_ring_fifo_and_full, cfg_full_record, cfg_optional_fields, cfg_rejects_bad_records,
@@ -497,4 +652,6 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        entry_queues_while_preempted_and_drain_runs, entry_sync_refusals_complete_at_once,
        entry_async_refusal_deferred_to_owner, entry_refusal_retry_is_bounded,
        entry_killio_answers_zero, entry_goodbye_from_inside_a_routine,
-       goodbye_keeps_system_heap_clients)
+       goodbye_keeps_system_heap_clients, callout_needs_recorded_gate_depth,
+       preemption_inside_nested_core_call_is_not_a_callout, chained_one_byte_reader_is_bounded,
+       goodbye_drops_streams_holding_app_routines_or_pbs)

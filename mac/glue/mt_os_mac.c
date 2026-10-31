@@ -78,3 +78,8 @@ int mt_os_app_mem(MacPtr32 p)
     }
     return p >= lo && p < hi;
 }
+
+int mt_os_gate_depth(void)
+{
+    return g_gate ? g_gate->depth : 0;
+}
