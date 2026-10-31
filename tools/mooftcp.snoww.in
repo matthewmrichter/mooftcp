@@ -4,7 +4,7 @@
   "ethernet_link_type": "@ETH_LINK@",
   "model": null,
   "init_args": {
-    "audio_disabled": false,
+    "audio_disabled": true,
     "monitor": null,
     "mouse_mode": "Absolute",
     "start_fastforward": false,
