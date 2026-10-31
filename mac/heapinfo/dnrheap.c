@@ -14,8 +14,23 @@
 #include <Resources.h>
 #include <OSUtils.h>
 #include <Files.h>
+#include <stdio.h>
+#include <string.h>
 
 QDGlobals qd;
+
+/* Append one line to HeapInfo.out beside the app (scripts/mem-check.sh reads it back; the alerts stay). */
+static void out_line(const char *buf)
+{
+    short ref;
+    long n = (long)strlen(buf);
+    Create("\pHeapInfo.out", 0, 'ttxt', 'TEXT');
+    if (FSOpen("\pHeapInfo.out", 0, &ref)) return;
+    SetFPos(ref, fsFromLEOF, 0);
+    FSWrite(ref, &n, buf);
+    FSClose(ref);
+    FlushVol(0, 0);
+}
 
 #define OPENRESOLVER  1L
 #define CLOSERESOLVER 2L
@@ -117,6 +132,12 @@ int main(void)
         s3 = sysFree(); a3 = appFree();
     }
 
+    {
+        char b[200];
+        sprintf(b, "DNR %ld %ld %ld %ld %ld %ld %ld %ld %ld\r", rcOpen, rcLook, s0 - s1, a0 - a1, s0 - s2, a0 - a2,
+                s0 - s3, a0 - a3, (long)hi.addr[0]);
+        out_line(b);   /* open/lookup rc, sys/app taken: open, looked-up, closed; addr */
+    }
     /* Alert 1: results and absolute starting values */
     line2("open/lookup err: ", rcOpen, rcLook, l1);
     i = 0; l2[++i] = 13; put(l2, &i, "addr: ");

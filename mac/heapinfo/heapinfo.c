@@ -8,8 +8,27 @@
 #include <Memory.h>
 #include <Events.h>
 #include <Devices.h>
+#include <Files.h>
+#include <stdio.h>
+#include <string.h>
 
 QDGlobals qd;
+
+/* Append one line to HeapInfo.out beside the app (scripts/mem-check.sh reads it back; the alert stays). */
+static void out_line(const char *tag, long a, long b, long c, long d)
+{
+    char buf[160];
+    short ref;
+    long n;
+    sprintf(buf, "%s %ld %ld %ld %ld\r", tag, a, b, c, d);
+    n = (long)strlen(buf);
+    Create("\pHeapInfo.out", 0, 'ttxt', 'TEXT');
+    if (FSOpen("\pHeapInfo.out", 0, &ref)) return;
+    SetFPos(ref, fsFromLEOF, 0);
+    FSWrite(ref, &n, buf);
+    FSClose(ref);
+    FlushVol(0, 0);
+}
 
 /* Build Pascal string "\r<label><value>" in out. */
 static void line(const char *label, long v, unsigned char *out)
@@ -60,6 +79,7 @@ int main(void)
         freeA = FreeMem();
         size = (long)sys->bkLim - (long)sys;
         SetZone(saved);
+        out_line("OPEN", (long)err, freeB, freeA, size);   /* err, FreeMem before, after, zone size */
         line("OpenDriver(.IPP) err: ", (long)err, e);
         line("FreeMem before: ", freeB, a);
         line("FreeMem after: ", freeA, b);
@@ -67,6 +87,7 @@ int main(void)
         ParamText(e, a, b, c);
     }
 #else
+    out_line("HEAP", freeB, maxB, size, 0);                 /* FreeMem, MaxMem, zone size */
     line("FreeMem: ", freeB, a);
     line("MaxMem: ", maxB, b);
     line("Zone size: ", size, c);
