@@ -246,13 +246,25 @@ static void get_tcp_global_info_counts_open(void) {
     T_EQ(st->tcpConnAttempts, 1);                         /* mt_stats.tcp_active_opens */
     T_EQ(st->tcpOutputPkts, mt_get_stats(x.d->s)->tcp_out);
     T_EQ(st->tcpInputPkts, mt_get_stats(x.d->s)->tcp_in);
+    T_EQ(st->tcpConnOpened, 1);                           /* Task 12: glue-kept counters (Watcher) */
+    T_EQ(st->tcpOctetsIn, 0);
+    /* 5 bytes in, 3 bytes out and ACKed */
+    pbt_peer(&x, c.lport, c.ps, c.ms, TF_ACK | TF_PSH, 8192, "hello", 5);
+    c.ps += 5;
+    pbt_send(&x, conn, "abc", 3, 1);
+    pbt_peer(&x, c.lport, c.ps, c.ms + 3, TF_ACK, 8192, NULL, 0);
     T_EQ(pbt_simple(&x, TCPAbort, conn), 0);
     T_EQ(mt_tcp_count_open(x.d->s), 0);
     pb = pbt_pb(TCPGlobalInfo, 0);
     T_EQ(pbt_call(&x, pb), 0);
     cdb = (MacPtr32 *)pbf_p(pb->csParam.globalInfo.tcpCDBTable[0]);
+    st = (TCPStats *)pbf_p(pb->csParam.globalInfo.tcpStatsPtr);
     T_CHECK(cdb[0] == idle || cdb[0] == conn);
     T_EQ(cdb[2], 0);
+    T_EQ(st->tcpOctetsIn, 5);
+    T_EQ(st->tcpOctetsOut, 3);
+    T_EQ(st->tcpConnAborted, 1);                          /* TCPAbort: ULP abort */
+    T_EQ(st->tcpConnClosed, 0);
 }
 
 static void icmp_stats_and_lap_stats_fields_from_mt_stats(void) {

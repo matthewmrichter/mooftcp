@@ -243,6 +243,7 @@ static void send_done(void *ud, int status) {
     s->req_h = (uint8_t)((s->req_h + 1u) % MT_SENDQ_MAX);
     s->req_n--;
     if (status != MT_OK) return;              /* termination: TCPTerminate fails the PBs in order */
+    s->d->oct_out += r->len;                  /* TCPStats.tcpOctetsOut (bytes the peer ACKed) */
     s->acked = r->end;
     if (send_progress(s)) feed(s);
 }
@@ -502,6 +503,7 @@ static int16_t do_bfr_return(MtStream *s, MtAnyPb *pb) {
 static void on_established(MtStream *s) {
     MtAnyPb *pb = s->open_pb;
     mt_tcp_info in;
+    s->d->n_opened++;                                    /* TCPStats.tcpConnOpened */
     if (!pb) return;
     s->open_pb = NULL;
     s->open_timed = 0;
@@ -517,6 +519,7 @@ static void on_established(MtStream *s) {
 static void on_data(MtStream *s, uint32_t n) {
     uint32_t u;
     int served = 0;
+    s->d->oct_in += n;                                    /* TCPStats.tcpOctetsIn */
     if (!send_progress(s) || !serve_reads(s, &served)) return;
     if (served || s->rq_n) return;   /* after_read reported what the reads left; 400/502: none pending */
     u = unread(s);
@@ -530,6 +533,8 @@ static void on_terminate(MtStream *s, uint32_t reason) {
     int16_t close_err = reason == MT_TERM_ULP_CLOSE ? 0 : connectionTerminated;
     uint8_t g = s->gen;
     uint16_t c = s->conn;
+    if (reason == MT_TERM_ULP_CLOSE) s->d->n_closed++;  /* TCPStats.tcpConnClosed / Aborted */
+    else if (reason != MT_TERM_OPEN_FAILED) s->d->n_aborted++;
     if (!send_progress(s) || !same(s, g, c)) return;
     fail_all(s, open_err, close_err, mt_pb_term_reason((int)reason), 0);
 }
@@ -761,6 +766,11 @@ static int16_t do_global_info(MtDrv *d, MtAnyPb *pb) {
     memset(&d->gstats, 0, sizeof d->gstats);
     d->gstats.tcpConnAttempts = st->tcp_active_opens;
     d->gstats.tcpConnAccepted = st->tcp_passive_opens;
+    d->gstats.tcpConnOpened = d->n_opened;
+    d->gstats.tcpConnClosed = d->n_closed;
+    d->gstats.tcpConnAborted = d->n_aborted;
+    d->gstats.tcpOctetsIn = d->oct_in;
+    d->gstats.tcpOctetsOut = d->oct_out;
     d->gstats.tcpInputPkts = st->tcp_in;
     d->gstats.tcpOutputPkts = st->tcp_out;
     d->gstats.tcpRetransPkts = st->tcp_rexmt;

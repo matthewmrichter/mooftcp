@@ -193,6 +193,9 @@ struct MtDrv {
     uint32_t  now;
     uint32_t  reenter_drops;    /* input/tick calls refused because the core was already running */
     uint32_t  early_done;       /* TCPSend PBs completed before their merged core request's done */
+    uint32_t  n_opened, n_closed, n_aborted;   /* TCPGlobalInfo TCPStats the core does not count: */
+    uint32_t  oct_in, oct_out;  /* connections established / ended by close / other ends; data bytes
+                                 * arrived and ACKed (MacTCP Watcher shows them, Task 12) */
     MtStream  tcp[MT_PB_MAX_TCP];
     TCPParam  gparam;           /* TCPGlobalInfo hands out pointers to these */
     TCPStats  gstats;
