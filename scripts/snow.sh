@@ -4,7 +4,8 @@
 #   snow.sh stop                     kill Snow (and our Xvfb) by recorded PID
 #   snow.sh status                   exit 0 running / 1 stopped
 #   snow.sh shot <png>               screenshot the whole Xvfb screen
-# MT_ETH_LINK overrides the Ethernet link type of the workspace (default NAT; Down = cable unplugged).
+# MT_ETH_LINK overrides the Ethernet link type of the workspace (default NAT; Down = cable unplugged;
+# NATHttpsStripping; tap:<dev> = Snow's TapBridge on a TAP device made by scripts/tap-up.sh, EMULATOR.md "TAP").
 # MT_DISPLAY overrides the display (default :142). Only :140-:149 are accepted: :0/:1 are
 # the owner's desktop, and other displays (:97, :99, ...) belong to other sessions.
 set -euo pipefail
@@ -54,7 +55,17 @@ cmd_start() {
   need Xvfb xvfb; need xdpyinfo x11-utils
   [ -x "$MT_HOME/snow/snowemu" ] || die "missing $MT_HOME/snow/snowemu (run scripts/fetch-snow.sh)"
   [ -f "$MT_HOME/disks/work.hda" ] || die "missing work.hda (run scripts/fresh-disk.sh)"
-  sed -e "s#@MT_HOME@#$MT_HOME#g" -e "s#@ETH_LINK@#${MT_ETH_LINK:-NAT}#g" "$ROOT/tools/mooftcp.snoww.in" > "$WS"
+  local link="${MT_ETH_LINK:-NAT}" linkjson
+  case "$link" in
+    NAT|Down|NATHttpsStripping) linkjson="\"$link\"";;
+    tap:*)  # Snow's TapBridge: the TAP device scripts/tap-up.sh made (name must start with tap or snow)
+      local dev="${link#tap:}"
+      [[ "$dev" =~ ^(tap|snow)[A-Za-z0-9_]{0,10}$ ]] || die "MT_ETH_LINK=tap:<dev>: bad device name '$dev'"
+      [ -e "/sys/class/net/$dev" ] || die "no network device $dev (owner runs: sudo scripts/tap-up.sh)"
+      linkjson="{\"TapBridge\": \"$dev\"}";;
+    *) die "MT_ETH_LINK must be NAT, Down, NATHttpsStripping or tap:<dev>";;
+  esac
+  sed -e "s#@MT_HOME@#$MT_HOME#g" -e "s#\"@ETH_LINK@\"#$linkjson#g" "$ROOT/tools/mooftcp.snoww.in" > "$WS"
 
   if ! xdpyinfo -display "$MT_DISPLAY" >/dev/null 2>&1; then
     Xvfb "$MT_DISPLAY" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &
