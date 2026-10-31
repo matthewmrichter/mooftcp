@@ -2,7 +2,7 @@
 #
 # mtcdev68k: the portable field logic (cfg_edit.c), built so the Retro68 gate compiles it with
 # -m68000 -Werror (the host tests are tests/test_cfg_edit.c).
-add_library(mtcdev68k STATIC cfg_edit.c)
+add_library(mtcdev68k STATIC cfg_edit.c cdev_logic.c)
 target_include_directories(mtcdev68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../glue ${CMAKE_CURRENT_SOURCE_DIR}/../../core)
 target_compile_options(mtcdev68k PRIVATE
@@ -15,7 +15,7 @@ target_compile_options(mtcdev68k PRIVATE
 # between messages. -fno-tree-switch-conversion: a switch must not become a table of pointers (data
 # relocations). The POST_BUILD step fails the build if any object of ours carries an absolute
 # relocation (R_68K_32), i.e. something that would need Retro68Relocate.
-add_executable(MoofCdev cdev_start.s cdev_main.c cfg_edit.c)
+add_executable(MoofCdev cdev_start.s cdev_main.c cdev_logic.c cfg_edit.c)
 set_target_properties(MoofCdev PROPERTIES OUTPUT_NAME MoofCdev.flt LINKER_LANGUAGE C)
 target_include_directories(MoofCdev PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../glue ${CMAKE_CURRENT_SOURCE_DIR}/../include

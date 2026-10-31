@@ -41,8 +41,8 @@ if(MT_GLUE_SRC)
 endif()
 
 # Control panel field logic (mac/cdev/cfg_edit.c, portable), host-built.
-add_library(mtcdev STATIC ${CMAKE_SOURCE_DIR}/mac/cdev/cfg_edit.c)
-target_include_directories(mtcdev PUBLIC ${CMAKE_SOURCE_DIR}/mac/cdev ${CMAKE_SOURCE_DIR}/mac/glue)
+add_library(mtcdev STATIC ${CMAKE_SOURCE_DIR}/mac/cdev/cfg_edit.c ${CMAKE_SOURCE_DIR}/mac/cdev/cdev_logic.c)
+target_include_directories(mtcdev PUBLIC ${CMAKE_SOURCE_DIR}/mac/cdev ${CMAKE_SOURCE_DIR}/mac/glue ${CMAKE_SOURCE_DIR}/mac/include)
 target_link_libraries(mtcdev PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtcdev)
 
@@ -54,5 +54,6 @@ foreach(src ${MT_TEST_SRC})
   target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(${name} ${MT_TEST_LIBS})
   set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  target_compile_definitions(${name} PRIVATE MT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME ${name} COMMAND ${name})
 endforeach()

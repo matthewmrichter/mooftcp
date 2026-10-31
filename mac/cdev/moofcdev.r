@@ -33,10 +33,11 @@ data 'nrct' (-4064) {
     $"0001 FFFF 0057 00FF 0142"
 };
 
-/* Item order is cdev_main.c's IT_* enum. Rows: label at x 95, field at x 186, 24 px apart. */
+/* Item order is cdev_main.c's IT_* enum (Save is last: added in the Task 8 fix round). Rows:
+ * label at x 95, field at x 186, 24 px apart; Revert, Save and the version along the bottom. */
 resource 'DITL' (-4064) {
     {
-        {224, 95, 244, 165}, Button { enabled, "Revert" };
+        {224, 95, 244, 160}, Button { enabled, "Revert" };
         {9, 186, 25, 314}, EditText { enabled, "" };
         {33, 186, 49, 314}, EditText { enabled, "" };
         {57, 186, 73, 314}, EditText { enabled, "" };
@@ -50,12 +51,13 @@ resource 'DITL' (-4064) {
         {132, 95, 148, 316}, StaticText { disabled, "" };
         {150, 95, 182, 316}, StaticText { disabled, "" };
         {186, 95, 218, 316}, StaticText { disabled, "Changes take effect after you restart." };
-        {228, 186, 244, 316}, StaticText { disabled, "Version 1.0rc1" };
+        {228, 250, 244, 320}, StaticText { disabled, "v1.0rc1" };
+        {224, 170, 244, 235}, Button { enabled, "Save" };
     }
 };
 
 resource 'ALRT' (-4048) {
-    {60, 60, 170, 420},
+    {50, 40, 196, 472},
     -4048,
     {
         OK, visible, sound1,
@@ -68,13 +70,13 @@ resource 'ALRT' (-4048) {
 
 resource 'DITL' (-4048) {
     {
-        {78, 280, 98, 345}, Button { enabled, "OK" };
-        {10, 70, 70, 350}, StaticText { disabled, "^0" };
+        {114, 352, 134, 417}, Button { enabled, "OK" };
+        {10, 70, 106, 420}, StaticText { disabled, "^0" };
     }
 };
 
 resource 'ALRT' (-4047) {
-    {60, 60, 170, 420},
+    {50, 40, 196, 472},
     -4047,
     {
         OK, visible, sound1,
@@ -87,9 +89,9 @@ resource 'ALRT' (-4047) {
 
 resource 'DITL' (-4047) {
     {
-        {78, 265, 98, 345}, Button { enabled, "Save" };
-        {78, 165, 98, 255}, Button { enabled, "Don't Save" };
-        {10, 70, 70, 350}, StaticText { disabled, "^0" };
+        {114, 337, 134, 417}, Button { enabled, "Save" };
+        {114, 237, 134, 327}, Button { enabled, "Don't Save" };
+        {10, 70, 106, 420}, StaticText { disabled, "^0" };
     }
 };
 
