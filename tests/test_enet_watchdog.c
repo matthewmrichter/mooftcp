@@ -232,6 +232,50 @@ static void watchdog_blocked_by_any_head_request(void)
     (void)t;
 }
 
+static void watchdog_closed_link_is_repaired_even_if_the_slot_completed(void)
+{
+    MtEnetTx *s;
+    setup();
+    s = start();
+    to_quarantine();
+    pbf_reattach_result = -94;
+    mt_enet_service(&E, 5000);                             /* kill */
+    mt_enet_service(&E, 7000);                             /* attach fails: opened 0 */
+    T_EQ(E.opened, 0);
+    s->pb.ioResult = 0;                                    /* the slot completes meanwhile */
+    pbf_reattach_result = 0;
+    mt_enet_service(&E, 8000);                             /* must NOT be cancelled: the link is down */
+    T_EQ(pbf_reattach_calls, 2);
+    T_EQ(E.opened, 1);
+    T_EQ(E.reattach, 1);
+    T_EQ(E.reattach_req, 0);
+}
+
+static void watchdog_blocked_on_a_closed_link_never_gives_up(void)
+{
+    static const int foreign = 0;
+    uint32_t t = 8000;
+    unsigned i;
+    setup();
+    (void)start();
+    to_quarantine();
+    pbf_reattach_result = -94;
+    mt_enet_service(&E, 5000);
+    mt_enet_service(&E, 7000);                             /* attach fails: opened 0 */
+    T_EQ(E.opened, 0);
+    T_EQ(pbf_reattach_calls, 1);
+    pbf_dev_head = &foreign;
+    for (i = 0; i < 3 * MT_ENET_BLOCKED_TRIES; i++, t += MT_ENET_BLOCKED_RETRY_MS) mt_enet_service(&E, t);
+    T_EQ(pbf_reattach_calls, 1);                           /* no sync call while blocked */
+    T_EQ(E.reattach_abandoned, 0);
+    T_EQ(E.reattach_req, 1);
+    T_CHECK(E.reattach_blocked > MT_ENET_BLOCKED_TRIES);   /* keeps rising */
+    pbf_dev_head = NULL;
+    pbf_reattach_result = 0;
+    mt_enet_service(&E, t);
+    T_EQ(E.opened, 1);                                     /* and recovers when the queue drains */
+}
+
 static void watchdog_blocked_forever_gives_up_with_an_intact_link(void)
 {
     static const int foreign = 0;
@@ -366,6 +410,8 @@ T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_reattach_after_second_timeout, watchdog_reattach_cancelled_when_the_kill_freed_the_slot,
        watchdog_failed_attach_is_retried_from_control_entries, watchdog_blocked_by_any_head_request,
        watchdog_blocked_forever_gives_up_with_an_intact_link,
+       watchdog_closed_link_is_repaired_even_if_the_slot_completed,
+       watchdog_blocked_on_a_closed_link_never_gives_up,
        watchdog_no_reattach_request_when_link_is_closed, watchdog_quarantine_keeps_started_count_exact,
        open_keeps_in_flight_slots, watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time,
        watchdog_scan_period)
