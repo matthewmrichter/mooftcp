@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Host FTP server for the Fetch and NCSA Telnet tests (docs/dev/APPS.md), unprivileged port.
-    scripts/testftp.py [port]          (default 17021; 0.0.0.0; Ctrl-C stops it)
-Root: $MT_HOME/ftp (created) with big10m.bin (10 MiB of seeded pseudo-random bytes, made once;
-SHA-256 printed) and a writable incoming/ for uploads. Users: anonymous (read, upload) and
-moof/moof (everything). Passive ports 17100-17199. Active mode (PORT) connects back to the guest,
-which only works on a TAP link (scripts/tap-up.sh), not through Snow's NAT. On TAP the guest reaches
-it as 10.0.0.1:21 through tap-up.sh's redirect (Fetch 2.1.2 cannot change the port).
-Needs pyftpdlib: python3 -m pip install --target "$MT_HOME/pylib" pyftpdlib"""
+    scripts/testftp.py [--bind ADDR] [port]     (default 10.0.0.1:17021; Ctrl-C stops it)
+Binds the TAP host address by default (scripts/tap-up.sh; the guest's 10.0.0.1:21 is REDIRECTed
+there: REDIRECT rewrites the destination to the incoming interface's address, so 127.0.0.1 would
+not receive it). --bind 0.0.0.0 for a NAT-mode test (passive mode only).
+Root: $MT_HOME/ftp with big10m.bin (10 MiB of deterministic pseudo-random bytes, made once;
+SHA-256 printed) and incoming/. Users: anonymous (read only) and moof/moof (read, upload into
+existing folders; no delete, rename or chmod). Passive ports 17100-17199. Active mode (PORT, the
+only mode Fetch 2.1.2 has) connects back to the guest, which works only on the TAP link.
+Needs Python >= 3.6 and pyftpdlib: python3 -m pip install --target "$MT_HOME/pylib" pyftpdlib"""
 import hashlib
 import logging
 import os
-import random
 import sys
 
 MT_HOME = os.environ.get("MT_HOME", os.path.expanduser("~/.local/share/mooftcp"))
@@ -23,21 +24,33 @@ except ImportError:
     sys.exit('testftp.py: pyftpdlib missing: python3 -m pip install --target "%s/pylib" pyftpdlib'
              % MT_HOME)
 
+args = sys.argv[1:]
+bind = "10.0.0.1"
+if len(args) >= 2 and args[0] == "--bind":
+    bind, args = args[1], args[2:]
+port = int(args[0]) if args else 17021
+
 root = os.path.join(MT_HOME, "ftp")
 os.makedirs(os.path.join(root, "incoming"), exist_ok=True)
 big = os.path.join(root, "big10m.bin")
-if not os.path.isfile(big) or os.path.getsize(big) != 10 * 1024 * 1024:
-    rnd = random.Random(12)
-    with open(big, "wb") as f:
-        for _ in range(10 * 16):
-            f.write(rnd.randbytes(65536))
-print("big10m.bin sha256", hashlib.sha256(open(big, "rb").read()).hexdigest(), flush=True)
+SIZE = 10 * 1024 * 1024
+if not os.path.isfile(big) or os.path.getsize(big) != SIZE:
+    with open(big, "wb") as f:                     # SHA-256 counter stream: same bytes everywhere
+        for i in range(SIZE // 32):
+            f.write(hashlib.sha256(b"mooftcp-big10m-%d" % i).digest())
+h = hashlib.sha256()
+with open(big, "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+print("big10m.bin sha256", h.hexdigest(), flush=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 auth = DummyAuthorizer()
-auth.add_user("moof", "moof", root, perm="elradfmwMT")
-auth.add_anonymous(root, perm="elrw")
+auth.add_user("moof", "moof", root, perm="elrw")
+auth.add_anonymous(root, perm="elr")
 FTPHandler.authorizer = auth
 FTPHandler.passive_ports = range(17100, 17200)
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 17021
-FTPServer(("0.0.0.0", port), FTPHandler).serve_forever()
+try:
+    FTPServer((bind, port), FTPHandler).serve_forever()
+except OSError as e:
+    sys.exit("testftp.py: cannot listen on %s:%d (%s); without TAP use --bind 0.0.0.0" % (bind, port, e))

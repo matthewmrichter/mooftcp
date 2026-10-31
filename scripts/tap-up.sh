@@ -17,6 +17,9 @@
 # Only the 10.0.0.0/24 route is added, so other 10.x networks on the host are not shadowed.
 # It also redirects guest -> 10.0.0.1 ports 21 (TCP) and 7 (TCP, UDP) to the unprivileged host test
 # servers on 17021 (FTP) and 17007 (testnet.py echo); see redirects() below.
+# Note: with NAT on, the guest can reach the owner's whole LAN, not only the internet.
+# Rules are added only if absent (iptables -C) and removed wherever present, so re-running is safe.
+# Only one MoofTCP TAP device at a time (shared subnet and saved ip_forward): a second is refused.
 # Snow then runs with: MT_ETH_LINK=tap:<dev> scripts/snow.sh start
 set -euo pipefail
 dev="tap0"; user="${SUDO_USER:-${USER:-}}"; dry=""; down=""; nat=1
@@ -29,7 +32,7 @@ while [ $# -gt 0 ]; do
     --dev) [ $# -ge 2 ] || die "--dev needs a name"; dev="$2"; shift 2;;
     --user) [ $# -ge 2 ] || die "--user needs a name"; user="$2"; shift 2;;
     --no-nat) nat=""; shift;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0;;
     *) die "unknown argument $1 (see --help)";;
   esac
 done
@@ -42,38 +45,61 @@ if [ -z "$dry" ] && [ "$(id -u)" != 0 ]; then
 fi
 uplink() { ip -4 route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1; }
 
-fw_rules() {  # fw_rules <-I|-D>: the three rules, inserted (-I) or deleted (-D)
-  local op="$1"
-  if [ "$op" = -I ]; then
-    run iptables -I FORWARD 1 -i "$dev" -s "$NET" -m comment --comment "$TAG" -j ACCEPT
-    run iptables -I FORWARD 1 -o "$dev" -d "$NET" -m conntrack --ctstate RELATED,ESTABLISHED \
+# Idempotent rule handling: add only when `iptables -C` does not find the rule (a second run or a
+# half-finished earlier run never duplicates it); delete every copy that is present.
+ipt_add() {  # ipt_add <table> <chain> <I|A> <rule...>
+  local tbl="$1" chain="$2" how="$3"; shift 3
+  if [ -z "$dry" ] && iptables -t "$tbl" -C "$chain" "$@" 2>/dev/null; then
+    echo "= present: iptables -t $tbl $chain $*"; return 0
+  fi
+  if [ "$how" = I ]; then run iptables -t "$tbl" -I "$chain" 1 "$@"; else run iptables -t "$tbl" -A "$chain" "$@"; fi
+}
+ipt_del() {  # ipt_del <table> <chain> <rule...>
+  local tbl="$1" chain="$2" n=0; shift 2
+  if [ -n "$dry" ]; then echo "+ iptables -t $tbl -D $chain $* (while present)"; return 0; fi
+  while [ $n -lt 8 ] && iptables -t "$tbl" -C "$chain" "$@" 2>/dev/null; do
+    echo "+ iptables -t $tbl -D $chain $*"; iptables -t "$tbl" -D "$chain" "$@"; n=$((n+1))
+  done
+}
+
+# The FORWARD rules let the guest reach anything the host can route to, including the owner's
+# whole LAN (and the LAN can answer); only connections the guest starts are let back in.
+fw_rules() {  # fw_rules <add|del>
+  if [ "$1" = add ]; then
+    ipt_add filter FORWARD I -i "$dev" -s "$NET" -m comment --comment "$TAG" -j ACCEPT
+    ipt_add filter FORWARD I -o "$dev" -d "$NET" -m conntrack --ctstate RELATED,ESTABLISHED \
       -m comment --comment "$TAG" -j ACCEPT
-    run iptables -t nat -A POSTROUTING -s "$NET" ! -o "$dev" -m comment --comment "$TAG" -j MASQUERADE
+    ipt_add nat POSTROUTING A -s "$NET" ! -o "$dev" -m comment --comment "$TAG" -j MASQUERADE
   else
-    try iptables -D FORWARD -i "$dev" -s "$NET" -m comment --comment "$TAG" -j ACCEPT
-    try iptables -D FORWARD -o "$dev" -d "$NET" -m conntrack --ctstate RELATED,ESTABLISHED \
+    ipt_del filter FORWARD -i "$dev" -s "$NET" -m comment --comment "$TAG" -j ACCEPT
+    ipt_del filter FORWARD -o "$dev" -d "$NET" -m conntrack --ctstate RELATED,ESTABLISHED \
       -m comment --comment "$TAG" -j ACCEPT
-    try iptables -t nat -D POSTROUTING -s "$NET" ! -o "$dev" -m comment --comment "$TAG" -j MASQUERADE
+    ipt_del nat POSTROUTING -s "$NET" ! -o "$dev" -m comment --comment "$TAG" -j MASQUERADE
   fi
 }
 
 # Well-known ports the test apps cannot change, redirected to the unprivileged host test servers
 # (no root needed to run those): guest -> 10.0.0.1:21 goes to the FTP server on 17021 (Fetch 2.1.2
 # has no port field and no passive mode), guest -> 10.0.0.1:7 (TCP and UDP) to testnet.py's echo on
-# 17007 (MacTCP Watcher's UDP/TCP tests always use port 7).
-redirects() {  # redirects <-A|-D>
-  local op="$1" f=run; [ "$op" = -D ] && f=try
-  $f iptables -t nat "$op" PREROUTING -i "$dev" -d 10.0.0.1 -p tcp --dport 21 \
-    -m comment --comment "$TAG" -j REDIRECT --to-ports 17021
-  $f iptables -t nat "$op" PREROUTING -i "$dev" -d 10.0.0.1 -p tcp --dport 7 \
-    -m comment --comment "$TAG" -j REDIRECT --to-ports 17007
-  $f iptables -t nat "$op" PREROUTING -i "$dev" -d 10.0.0.1 -p udp --dport 7 \
-    -m comment --comment "$TAG" -j REDIRECT --to-ports 17007
+# 17007 (MacTCP Watcher's UDP/TCP tests always use port 7). REDIRECT delivers to 10.0.0.1 itself,
+# so scripts/testftp.py binds 10.0.0.1.
+redirects() {  # redirects <add|del>
+  local r
+  for r in "tcp 21 17021" "tcp 7 17007" "udp 7 17007"; do
+    set -- $r
+    if [ "$OP" = add ]; then
+      ipt_add nat PREROUTING A -i "$dev" -d 10.0.0.1 -p "$1" --dport "$2" \
+        -m comment --comment "$TAG" -j REDIRECT --to-ports "$3"
+    else
+      ipt_del nat PREROUTING -i "$dev" -d 10.0.0.1 -p "$1" --dport "$2" \
+        -m comment --comment "$TAG" -j REDIRECT --to-ports "$3"
+    fi
+  done
 }
 
 if [ -n "$down" ]; then
-  redirects -D
-  fw_rules -D
+  OP=del redirects
+  fw_rules del
   if [ -f "$STATE" ] || [ -n "$dry" ]; then
     prev="$( [ -f "$STATE" ] && cat "$STATE" || echo 0)"
     run sysctl -q -w "net.ipv4.ip_forward=$prev"
@@ -88,15 +114,28 @@ fi
 [ -n "$user" ] || die "no user to own $dev (use --user NAME)"
 id "$user" >/dev/null 2>&1 || die "no such user $user"
 if [ -z "$dry" ] && [ -e "/sys/class/net/$dev" ]; then die "$dev already exists (run --down first)"; fi
+# One MoofTCP TAP device at a time: the subnet, the redirects and the saved ip_forward value are
+# shared, so a second device would fight the first and --down of one would restore ip_forward
+# under the other.
+if [ -z "$dry" ]; then
+  for f in /run/mooftcp-tap.*; do
+    if [ -e "$f" ] && [ "$f" != "$STATE" ]; then
+      die "another MoofTCP TAP device is up (${f#/run/mooftcp-tap.}); take it down first"
+    fi
+  done
+  if ip -4 -o addr show | grep -q ' 10\.0\.0\.1/'; then
+    die "10.0.0.1 is already on a host interface; refusing"
+  fi
+fi
 run ip tuntap add dev "$dev" mode tap user "$user"
 run ip addr add "$HOSTIP" dev "$dev"
 run ip link set "$dev" up
-redirects -A
+OP=add redirects
 if [ -n "$nat" ]; then
   if [ -z "$dry" ]; then sysctl -n net.ipv4.ip_forward > "$STATE"; fi
   echo "+ sysctl -n net.ipv4.ip_forward > $STATE"
   run sysctl -q -w net.ipv4.ip_forward=1
-  fw_rules -I
+  fw_rules add
   echo "tap-up.sh: guest traffic to the internet leaves via $(uplink || echo '?') (MASQUERADE)"
 fi
 echo "tap-up.sh: $dev up, host 10.0.0.1 (guest 10.0.0.2/8, gateway 10.0.0.1)."

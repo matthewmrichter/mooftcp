@@ -9,6 +9,8 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPS="$MT_HOME/media/apps"
 die() { echo "fetch-apps.sh: $*" >&2; exit 1; }
+tmp=""
+trap 'if [ -n "$tmp" ]; then rm -rf "$tmp"; fi' EXIT     # also when die fires mid-unpack
 for t in curl unar hexbin python3; do command -v "$t" >/dev/null || die "missing $t"; done
 DM="https://discmaster.textfiles.com/file"
 
@@ -45,6 +47,6 @@ for row in "${LIST[@]}"; do
     unar -q -k visible -o "$tmp/u" "$src" >/dev/null || die "$app: unar failed"
     python3 -I "$ROOT/scripts/ad2bin.py" "$tmp/u/$inner" "$d/$bin" >/dev/null
   fi
-  rm -rf "$tmp"
+  rm -rf "$tmp"; tmp=""
   echo "ok  $app -> $d/$bin ($(sha256sum "$d/$bin" | cut -c1-16)...)"
 done
