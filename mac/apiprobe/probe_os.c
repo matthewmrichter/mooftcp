@@ -91,6 +91,7 @@ void *os_load_dnr(short *err)
     *err = 0;
     SysEnvirons(1, &world);
     ref = OpenRFPerm("\pMacTCP DNR", world.sysVRefNum, fsRdPerm);
+    if (ref == -1) ref = OpenRFPerm("\pMoofTCP", world.sysVRefNum, fsRdPerm);   /* the release has no "MacTCP DNR" */
     if (ref == -1) { *err = (short)ResError(); if (!*err) *err = -1; return 0; }
     code = Get1IndResource('dnrp', 1);
     if (code) DetachResource(code); else *err = -2;

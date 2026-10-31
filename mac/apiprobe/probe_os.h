@@ -17,7 +17,7 @@ void          os_out_flush(void);             /* FlushVol: survive a crash of th
 void          os_out_close(void);
 void          os_done_alert(void);
 int           os_read_cfg(const char *pname, char *buf, int max);   /* bytes read, 0 if absent */
-/* DNR: load the 'dnrp' resource of "MacTCP DNR" (System Folder), locked; NULL on failure (err gets the
+/* DNR: load the 'dnrp' resource of "MacTCP DNR" (System Folder; else of the "MoofTCP" file), locked; NULL on failure (err gets the
  * OSErr). os_free_dnr disposes it. os_set_a5 sets A5 (returns the old one); os_get_sr reads SR. */
 void         *os_load_dnr(short *err);
 void          os_free_dnr(void *code);

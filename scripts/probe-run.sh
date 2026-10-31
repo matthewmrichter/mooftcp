@@ -3,7 +3,7 @@
 # ApiProbe.out into build-mac/probe/<label>.out.
 #   probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] [--base N] <label>
 #     --moof          run against MoofTCP instead of MacTCP: after fresh-disk.sh, scripts/install-moof.sh
-#                     parks the MacTCP files and installs build-mac/moof/MacTCP.bin (built first) and a
+#                     parks the MacTCP files and installs build-mac/moof/MoofTCP.bin (built first) and a
 #                     "MoofTCP Prefs" for 10.0.0.2/8 (with --unconfigured: no prefs file)
 #     --unconfigured  after fresh-disk.sh, reinstall the factory MacTCP file on work.hda
 #                     (scripts/probe-unconfig.py --mode factory) and boot Snow with the Ethernet
@@ -11,7 +11,7 @@
 #                     runs its unconfigured suite
 #     --keep-disk     do not run fresh-disk.sh (use the current work.hda as is)
 #     --groups        case groups to run (default "1 2 3 4 5 6 7 8 9 0"; 0 = group 10, see apiprobe.c;
-#                     D = the DNR suite (apiprobe_dnr.inc, needs the file "MacTCP DNR"); Q = the app quits
+#                     D = the DNR suite (apiprobe_dnr.inc: dnrp of "MacTCP DNR", else of "MoofTCP"); Q = the app quits
 #                     with a DNR lookup pending and the run checks that the machine is still alive)
 #     --base N        testnet.py ports at N+7, N+9, ... instead of 17007.. (ApiProbe.cfg "B<N>"): use it when
 #                     another project's testnet holds 17007 (its UDP echo does not reach the guest through
@@ -72,7 +72,7 @@ bin="$ROOT/build-mac/apiprobe/ApiProbe.bin"
 [ -f "$bin" ] || die "build did not produce $bin"
 if [ -n "$moof" ]; then
   scripts/build-mac.sh MoofTCP >/dev/null
-  [ -f "$ROOT/build-mac/moof/MacTCP.bin" ] || die "build did not produce build-mac/moof/MacTCP.bin"
+  [ -f "$ROOT/build-mac/moof/MoofTCP.bin" ] || die "build did not produce build-mac/moof/MoofTCP.bin"
 fi
 
 started_testnet=""

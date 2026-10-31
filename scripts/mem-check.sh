@@ -48,7 +48,7 @@ if [ -n "$build" ]; then
   for t in HeapInfo HeapInfoOpen HeapInfoDNR ApiProbe MoofDiag MoofTCP; do scripts/build-mac.sh "$t" >/dev/null; done
 fi
 for f in build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
-         build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin build-mac/moof/MacTCP.bin; do
+         build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin build-mac/moof/MoofTCP.bin; do
   [ -f "$f" ] || die "missing $f"
 done
 

@@ -1,7 +1,11 @@
 /*
- * mt_init.c - MoofTCP's boot-time loader, resource INIT 0 of the interim cdev file "MacTCP"
+ * mt_init.c - MoofTCP's boot-time loader, resource INIT 0 of the control panel file "MoofTCP"
  * (mac/moof/moof.r). INIT 31 calls it with the cdev file as the current resource file.
  *
+ *   0. Back off (Review Focus 2): if the unit table already holds a driver named ".ipp" (the real
+ *      MacTCP's INIT ran first, or a second copy of MoofTCP did), do nothing at all: no load, no
+ *      icon. A manual copy of MoofTCP next to MacTCP therefore never replaces MacTCP's driver
+ *      (mac/include/mt_units.h; the control panel reads the same table for its status line).
  *   1. Get1Resource('DRVR', 22): the driver (sysheap + locked attributes: it loads into the
  *      system heap), detach it from the file, make it unpurgeable and locked: it stays where it is
  *      for the rest of the session (its code is relocated in place, the unit table, the protocol
@@ -20,6 +24,7 @@
 #include <OSUtils.h>
 #include <Memory.h>
 #include <Retro68Runtime.h>
+#include "mt_units.h"
 
 #define kParadeH     (*(short *)0x092C)
 #define kParadeCheck (*(short *)0x092E)
@@ -83,6 +88,10 @@ void _start(void)
     long r = -1;
 
     RETRO68_RELOCATE();
+    if (mt_units_find_ipp() != NULL) {             /* MacTCP (or another MoofTCP) owns .ipp */
+        Retro68FreeGlobals();
+        return;
+    }
     h = Get1Resource('DRVR', kDrvrID);
     if (h) {
         char *drvr;

@@ -1,10 +1,14 @@
-/* moof.r - the interim MoofTCP cdev file "MacTCP" (type cdev, creator ztcp: the real MacTCP
- * file's, docs/dev/MACTCP-INTERFACE.md "File and resource layout"). Task 11 adds 'dnrp' 0.
+/* moof.r - the MoofTCP control panel file "MoofTCP" (type cdev, creator ztcp: the real MacTCP
+ * file's, docs/dev/MACTCP-INTERFACE.md "File and resource layout"; Plan 3 Task 8 renamed it from
+ * the interim "MacTCP" and added the control panel).
  *
- *   INIT 0     sysheap, locked   boot loader (mac/init/mt_init.c)
+ *   INIT 0     sysheap, locked   boot loader (mac/init/mt_init.c; backs off if .ipp exists)
  *   DRVR 22    ".ipp", sysheap, locked   the driver: header + stubs here, code from MoofDrvr.flt
+ *   dnrp 0     "DNR", locked     the resolver (dnrp.r)
  *   sysz 0     system-heap bytes the INIT needs (measured, MACTCP-INTERFACE.md "sysz")
- *   vers 1, ICN# 128 (parade icon)
+ *   ICN# 128   parade icon
+ *   the control panel: cdev/mach/nrct/DITL -4064, alerts, BNDL/FREF, icons, vers 1/2
+ *              (mac/cdev/moofcdev.r)
  */
 #include "Retro68.r"
 #include "MacTypes.r"
@@ -55,12 +59,6 @@ data 'sysz' (0) {
     $"0003 0000"
 };
 
-resource 'vers' (1) {
-    0x00, 0x10, development, 0x00, verUS,
-    "0.1d0",
-    "MoofTCP 0.1d0 (interim, Plan 2)"
-};
-
 /* Parade icon: 128 bytes of image, then 128 bytes of mask. */
 data 'ICN#' (128) {
     $"00000000 3FFFFFFC 40000002 40000002"
@@ -81,3 +79,5 @@ data 'ICN#' (128) {
     $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
     $"00200400 00FFFC00 00000000 00000000"
 };
+
+#include "../cdev/moofcdev.r"

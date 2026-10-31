@@ -1,6 +1,7 @@
 /* HeapInfoDNR: measure MacTCP DNR memory from inside an application.
- * Loads the 'dnrp' code resource from "MacTCP DNR" in the System Folder itself
- * (own glue, no Apple source), then records system- and application-zone FreeMem
+ * Loads the 'dnrp' code resource from "MacTCP DNR" in the System Folder (or, if there is none, from
+ * the "MoofTCP" control panel file, which the MoofTCP release ships alone; Plan 3 Task 8)
+ * with its own glue (no Apple source), then records system- and application-zone FreeMem
  * at: start, after OpenResolver, after a successful StrToAddr, while still open,
  * and after CloseResolver (and disposing the code). */
 /* Pascal string literals are char *, the Toolbox wants unsigned char *; low-memory globals sit at fixed small addresses. */
@@ -110,6 +111,7 @@ int main(void)
 
     SysEnvirons(1, &world);
     ref = OpenRFPerm("\pMacTCP DNR", world.sysVRefNum, fsRdPerm);
+    if (ref == -1) ref = OpenRFPerm("\pMoofTCP", world.sysVRefNum, fsRdPerm);   /* the release has no "MacTCP DNR" */
     if (ref != -1) {
         code = Get1IndResource('dnrp', 1);
         if (code) DetachResource(code);
