@@ -120,8 +120,12 @@ int main(void)
         pb.csCode = MT_DRV_STATUS_RES;
         r = PBStatusSync((ParmBlkPtr)&pb);
         memcpy(&m, &pb.csParam[0], 4);
-        P("Status('MT') = %d block %08lx\r", r, (unsigned long)s24(m));
-        if (r == 0 && m) {
+        P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
+        if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
+            /* another layout: do not read a single field of it */
+            P("VERSION MISMATCH: the driver's Status layout is version %u (block says %u), this MoofDiag reads version %d. Rebuild MoofDiag and the driver from the same sources.\r",
+              (unsigned)pb.csParam[2], (unsigned)m->version, MT_STATUS_VERSION);
+        } else if (r == 0 && m) {
             const mt_stats *st;
             mt_stack *s;
             P("boot: refnum %d cfg_result %d enet_err %d mode %u size %lu raw %08lx\r", m->refnum,
@@ -173,6 +177,22 @@ int main(void)
               (unsigned long)st->tcp_fast_rexmt, (unsigned long)st->tcp_resets_in, (unsigned long)st->tcp_resets_out,
               (unsigned long)st->tcp_conns_open, (unsigned long)st->tcp_active_opens, (unsigned long)st->tcp_passive_opens,
               (unsigned long)st->tcp_tx_stalls, (unsigned long)st->ip_lo_out, (unsigned long)st->ip_lo_drops);
+            P("log: prefs flags %02x (bit 0 = diagnostic log on)\r", m->cfg_flags);
+            {
+                mt_logrec rec[16];
+                uint16_t got, tot = 0;
+                static const char *const nm[] = { "?", "TCP_STATE", "TCP_TERM", "TCP_REXMT", "DROP", "ARP_FAIL", "DNS_FAIL" };
+                /* mt_log_read at task time = the one reader context; the driver writes at gate time */
+                while ((got = mt_log_read(s, rec, 16)) != 0) {
+                    uint16_t i;
+                    for (i = 0; i < got; i++)
+                        P("log: t %lu %s a %u b %u\r", (unsigned long)rec[i].t,
+                          nm[rec[i].code < 7 ? rec[i].code : 0], rec[i].a, rec[i].b);
+                    tot = (uint16_t)(tot + got);
+                    if (tot >= 1000) break;
+                }
+                P("log: %u records\r", tot);
+            }
             P("sizes: MtRes %lu MtGate %lu MtEnet %lu MtTimer %lu\r", (unsigned long)sizeof(MtRes),
               (unsigned long)sizeof(MtGate), (unsigned long)sizeof(MtEnet), (unsigned long)sizeof(MtTimer));
             pass = ref == -49;

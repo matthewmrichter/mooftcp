@@ -5,6 +5,7 @@
 #     --keep-disk     do not run fresh-disk.sh
 #     --no-install    do not run install-moof.sh (whatever stack the image has)
 #     --no-prefs      install MoofTCP without "MoofTCP Prefs" (unconfigured)
+#     --log           install prefs with the diagnostic log flag (mkprefs.sh --log); MoofDiag then lists the log records
 #     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
 #                     is then not fetched
 # Same launch and screen checks as scripts/enetspike-run.sh. Exit status 0 when MoofDiag.out was fetched
@@ -17,14 +18,15 @@ DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${MOOFDIAG_TIMEOUT:-300}"
 die() { echo "moofdiag-run.sh: $*" >&2; exit 1; }
 
-keepdisk=""; install=1; prefs=""; keeprun=""
+keepdisk=""; install=1; prefs=""; keeprun=""; logp=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
     --no-install) install=""; shift;;
     --no-prefs) prefs="--no-prefs"; shift;;
     --keep-running) keeprun=1; shift;;
-    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--no-prefs] [--keep-running]" >&2; exit 2;;
+    --log) logp=1; shift;;
+    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--no-prefs] [--log] [--keep-running]" >&2; exit 2;;
   esac
 done
 
@@ -112,7 +114,13 @@ launch_app() {
 echo "== disk"
 snow_stop
 [ -n "$keepdisk" ] || scripts/fresh-disk.sh
-[ -z "$install" ] || scripts/install-moof.sh $prefs
+pargs=()
+[ -z "$prefs" ] || pargs=("$prefs")
+if [ -n "$logp" ] && [ -z "$prefs" ]; then
+  scripts/mkprefs.sh --ip 10.0.0.2 --mask 255.0.0.0 --gw 10.0.0.1 --dns 1.1.1.1 --log >/dev/null
+  pargs=(--prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin")
+fi
+[ -z "$install" ] || scripts/install-moof.sh ${pargs[@]+"${pargs[@]}"}
 scripts/deploy.sh "$bin" --to ":MoofTCP Test:" >/dev/null
 with_volume del_out
 

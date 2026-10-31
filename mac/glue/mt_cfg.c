@@ -9,12 +9,13 @@
 #pragma GCC diagnostic ignored "-Warray-bounds"
 #define LM_BOOTDRIVE (*(volatile int16_t *)0x210)   /* working directory of the System Folder */
 
-int mt_cfg_load(mt_ifconfig *c, uint8_t *mode) {
+int mt_cfg_load(mt_ifconfig *c, uint8_t *mode, uint8_t *flags) {
     short saved = CurResFile(), ref;
     Handle h;
     int r = MT_CFG_NORES;
     memset(c, 0, sizeof *c);
     *mode = 0;
+    *flags = 0;
     ref = OpenRFPerm((ConstStringPtr)"\pMoofTCP Prefs", LM_BOOTDRIVE, fsRdPerm);
     if (ref == -1) {
         UseResFile(saved);
@@ -23,7 +24,7 @@ int mt_cfg_load(mt_ifconfig *c, uint8_t *mode) {
     h = Get1Resource('MCFG', 128);
     if (h) {
         HLock(h);
-        if (mt_cfg_parse((const uint8_t *)*h, (uint32_t)GetHandleSize(h), c, mode) == 0) r = MT_CFG_OK;
+        if (mt_cfg_parse_flags((const uint8_t *)*h, (uint32_t)GetHandleSize(h), c, mode, flags) == 0) r = MT_CFG_OK;
         HUnlock(h);
         ReleaseResource(h);
     }

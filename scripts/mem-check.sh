@@ -25,12 +25,13 @@ IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 die() { echo "mem-check.sh: $*" >&2; exit 1; }
 
-keepdisk=""; build=1
+keepdisk=""; build=1; logp=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
     --no-build) build=""; shift;;
-    *) echo "usage: mem-check.sh [--keep-disk] [--no-build]" >&2; exit 2;;
+    --log) logp=1; shift;;   # install prefs with the diagnostic log flag; MoofDiag.out then lists "log:" records
+    *) echo "usage: mem-check.sh [--keep-disk] [--no-build] [--log]" >&2; exit 2;;
   esac
 done
 cd "$ROOT"
@@ -165,7 +166,12 @@ run_alert_app() {  # run_alert_app <app> <alerts>: launch from the Finder, click
 echo "== disk"
 snow_stop
 [ -n "$keepdisk" ] || scripts/fresh-disk.sh >/dev/null
-scripts/install-moof.sh >/dev/null
+if [ -n "$logp" ]; then
+  scripts/mkprefs.sh --ip 10.0.0.2 --mask 255.0.0.0 --gw 10.0.0.1 --dns 1.1.1.1 --log >/dev/null
+  scripts/install-moof.sh --prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin" >/dev/null
+else
+  scripts/install-moof.sh >/dev/null
+fi
 scripts/deploy.sh build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
   build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin --to ":MoofTCP Test:" >/dev/null
 with_volume put_cfg

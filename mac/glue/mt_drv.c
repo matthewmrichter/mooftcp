@@ -112,7 +112,7 @@ static long boot(void *drvr) {
     mt_limits lim;
     mt_link link;
     mt_ifconfig cfg;
-    uint8_t mode = 0;
+    uint8_t mode = 0, cflags = 0;
     uint32_t len, off, ea, eb;
     uint8_t *raw;
     MtRes *r;
@@ -123,7 +123,7 @@ static long boot(void *drvr) {
     if (g_res) return MT_BOOT_AGAIN;
     if (mt_mac_unit_find((const uint8_t *)"\p.ipp")) return MT_BOOT_TAKEN;   /* MacTCP is there */
 
-    cr = mt_cfg_load(&cfg, &mode);
+    cr = mt_cfg_load(&cfg, &mode, &cflags);
     mt_limits_default(&lim);
     off = ((uint32_t)sizeof(MtRes) + 7u) & ~7u;
     len = off + mt_pb_size(&lim);
@@ -135,6 +135,8 @@ static long boot(void *drvr) {
     mt_enet_init(&r->enet);                      /* the one zeroing: tx[] is never cleared again */
     r->cfg_result = (int16_t)cr;
     r->mode = mode;
+    r->version = MT_STATUS_VERSION;
+    r->cfg_flags = cflags;
 
     link.ctx = &r->enet;
     link.tx = mt_enet_write;
@@ -142,6 +144,11 @@ static long boot(void *drvr) {
     if (!r->d) { mt_mac_free(raw); return MT_BOOT_NOMEM; }
     mt_mac_entropy(&ea, &eb);
     mt_set_entropy(r->d->s, ea, eb);
+    /* Diagnostic log (prefs flag): switched on while nothing else can enter the stack, i.e. before
+     * g_res is set and the gate opens (one writer context from then on). The log is read by MoofDiag
+     * at task time straight from the resident block (mt_log_read: one reader context; the gate is
+     * not needed, the writer never touches log_rd). */
+    if (cflags & MT_CFG_FLAG_LOG) mt_log_enable(r->d->s, 1);
 
     g_res = r;
     mt_gate_init(&r->gate, r, rx_cb, tick_cb, after_cb);
@@ -226,7 +233,9 @@ int16_t mt_drv_status(void *vpb, void *dce) {
     (void)dce;
     if (pb->hdr.csCode == MT_DRV_STATUS_RES && g_res) {   /* private: diagnostics (MoofDiag) */
         uint32_t p = (uint32_t)(uintptr_t)g_res;
+        uint16_t v = MT_STATUS_VERSION;
         memcpy((uint8_t *)pb + 28, &p, 4);
+        memcpy((uint8_t *)pb + 32, &v, 2);
         return 0;
     }
     return -18;                                  /* statusErr: .IPP answers only Control */

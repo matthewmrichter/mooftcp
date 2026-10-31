@@ -16,6 +16,7 @@ struct MtDrv;
 /* Everything the driver keeps, in ONE non-relocatable system-heap block allocated at boot; the
  * MtDrv and the core arena follow it (8-aligned offset) in the same block. */
 typedef struct MtRes {
+    uint16_t       version;      /* MT_STATUS_VERSION; FIRST, so a reader can check it before trusting the rest */
     MtGate         gate;         /* input ring + core ownership */
     MtEnet         enet;         /* .ENET0, transmit slots */
     MtTimer        timer;        /* Time Manager task */
@@ -30,6 +31,8 @@ typedef struct MtRes {
     uint8_t        pad;
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
+    uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */
+    uint8_t        pad2;
 } MtRes;
 
 /* mt_drv_boot results (the INIT draws its icon only for MT_BOOT_OK) */
@@ -47,9 +50,15 @@ typedef struct MtRes {
 long    mt_drv_boot(void *drvr);
 MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
 
-/* Private Status csCode ('MT'): csParam (PB offset 28) receives the MtRes pointer, for the
- * diagnostics app mac/moofdiag. Every other Status call gets statusErr (-18). */
+/* Private Status csCode ('MT'): csParam (PB offset 28) receives the MtRes pointer, csParam+4 (PB
+ * offset 32) receives MT_STATUS_VERSION (uint16), for the diagnostics app mac/moofdiag and the
+ * control panel. A client checks the version (the second value, or MtRes.version, the block's first
+ * word) BEFORE reading anything else; any layout change of MtRes that moves or removes a field bumps
+ * it (new fields appended at the end keep the version). Every other Status call gets statusErr (-18).
+ * Version 1 = Plan 3 Task 6 (adds version first, cfg_flags last; Task 1 stack marks, Task 2 stall
+ * counter, Task 3 loopback counters and Task 5 watchdog counters are all kept). */
 #define MT_DRV_STATUS_RES 0x4D54
+#define MT_STATUS_VERSION 1
 
 int16_t mt_drv_open(void *pb, void *dce);
 int16_t mt_drv_prime(void *pb, void *dce);
