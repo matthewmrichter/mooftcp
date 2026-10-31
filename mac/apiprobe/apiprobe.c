@@ -63,6 +63,13 @@ uint32_t g_u_a5; uint16_t g_u_sr;
 uint32_t g_asr_target, g_uasr_target;
 volatile int g_inpoll;
 
+/* Case 509: a reader that re-issues a 1-byte TCPRcv from its completion routine. */
+static void *volatile g_chain;      /* the Slot being chained (Slot is defined below) */
+static volatile int g_ch_n, g_ch_depth, g_ch_max, g_ch_bad, g_ch_end;
+static volatile short g_ch_last;
+static char g_chbuf[4];
+static void chain_step(void);
+
 extern void compl_stub(void);
 extern void asr_stub(void);
 extern void uasr_stub(void);
@@ -144,7 +151,9 @@ uint32_t g_n_user, g_n_opt, g_n_ptrrel; uint8_t g_n_head[8];   /* Task 12: icmpE
 
 void compl_c(void *a0, void *stk)
 {
-    int k = slot_idx(a0), via = 0;
+    int k, via = 0;
+    if (g_chain && (a0 == (void *)g_chain || stk == (void *)g_chain)) { chain_step(); return; }
+    k = slot_idx(a0);
     if (k < 0) {
         k = slot_idx(stk); via = 1;
         if (k < 0 && a0 && !((uintptr_t)a0 & 1)) {   /* ICMP notify: MacTCP's own block */
@@ -977,6 +986,48 @@ static void c_remote_close(int async)
     emit(TCPClose, r);
 }
 
+/* 509: chained 1-byte reads over the 5000-byte burst (A..Z). Each completion re-issues the
+ * read; maxDepth is how deeply completions nest (MoofTCP serves inline reads at most 3 deep, the
+ * rest from its tick: final review fix 2). */
+static void chain_step(void)
+{
+    Slot *s = (Slot *)g_chain;
+    g_ch_depth++;
+    if (g_ch_depth > g_ch_max) g_ch_max = g_ch_depth;
+    if (s->t.ioResult == 0 && s->t.csParam.receive.rcvBuffLen == 1) {
+        if (g_chbuf[0] != (char)(65 + g_ch_n % 26)) g_ch_bad++;
+        g_ch_n++;
+        s->t.csParam.receive.rcvBuffLen = 1;
+        s->t.ioResult = 1;
+        (void)os_control_async(s);
+    } else {
+        g_ch_last = s->t.ioResult;
+        g_ch_end = 1;
+    }
+    g_ch_depth--;
+}
+
+static void c_chain_rcv(void)
+{
+    Slot *s = &slots[0]; StreamPtr sp; long t0;
+    BEGIN("509", "rcv_chained_1byte", 1);
+    kv("open", connect_to(1, HOST, P_BURST, &sp, 1));
+    delay(60);
+    g_ch_n = g_ch_depth = g_ch_max = g_ch_bad = g_ch_end = 0; g_ch_last = 1;
+    pb_init(s, TCPRcv); s->t.tcpStream = sp;
+    s->t.csParam.receive.commandTimeoutValue = 10;
+    s->t.csParam.receive.rcvBuff = P32(g_chbuf); s->t.csParam.receive.rcvBuffLen = 1;
+    t0 = (long)os_ticks();
+    g_chain = s;
+    (void)issue(s, 1);
+    while (!g_ch_end && (long)os_ticks() - t0 < TK(40)) { }
+    g_chain = 0;
+    kv("n", g_ch_n); kv("maxDepth", g_ch_max); kv("bad", g_ch_bad); kv("end", g_ch_end);
+    kt("dt", (long)os_ticks() - t0);
+    kv("abort", tcall(TCPAbort, sp)); kv("rel", rel(sp));
+    emit(TCPRcv, g_ch_last);
+}
+
 static void c_abort(int async)
 {
     Slot *rs = &slots[1], *as = &slots[2]; short r, c; StreamPtr sp;
@@ -1603,6 +1654,7 @@ int main(void)
         both(c_close_pending);
         both(c_remote_close);
         both(c_abort);
+        c_chain_rcv();
     }
     if (grp(5)) {
         note("G5", "release, remote reset, burst, passive open");
