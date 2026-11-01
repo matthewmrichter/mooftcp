@@ -67,7 +67,24 @@ def parse_macbinary(path):
                (d[73] << 8) | d[101], d[128:128 + dl], d[roff:roff + rl])
 
 
-def expected():
+
+def apply_diaglog(txt, on):
+    """The one rule for the diagnostic-log block (switch: scripts/release.conf DIAGLOG_TEXT)."""
+    if on:
+        return re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+    return re.sub(rb"(?ms)^\[BEGIN DIAGNOSTIC LOG TEXT[^\n]*\n.*?^\[END DIAGNOSTIC LOG TEXT[^\n]*\n(\n){0,2}", b"", txt)
+
+
+def diaglog_switch():
+    m = re.search(r"(?m)^DIAGLOG_TEXT=([01])\s*$", open(os.path.join(ROOT, "scripts", "release.conf")).read())
+    if not m:
+        raise Fail("scripts/release.conf has no DIAGLOG_TEXT=0|1 line")
+    return m.group(1) == "1"
+
+
+def expected(switch=None):
+    if switch is None:
+        switch = diaglog_switch()
     if not os.path.isfile(INSTALLER_BIN):
         raise Fail("missing reference " + INSTALLER_BIN)
     inst = parse_macbinary(INSTALLER_BIN)
@@ -76,10 +93,13 @@ def expected():
     if not inst["flags"] & 0x2000:
         raise Fail("reference installer lacks the bundle bit")
     txt = open(README_SRC, "rb").read()
-    txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+    txt = apply_diaglog(txt, switch)
     if txt.endswith(b"\n") is False:
         txt += b"\n"
     txt = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")
+    low = txt.lower()
+    if (b"diagnostic log" in low or b"keep a" in low) != switch:
+        raise Fail("Read Me text and DIAGLOG_TEXT=%d disagree" % switch)
     readme = rec("Read Me", "ttro", "ttxt", 0, txt, b"")
     return inst, readme
 
@@ -258,9 +278,9 @@ def fix_crc(h):
     h[124:126] = struct.pack(">H", crc16x(bytes(h[:124])))
 
 
-def readme_macbinary(path):
+def readme_macbinary(path, switch):
     txt = open(README_SRC, "rb").read()
-    txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+    txt = apply_diaglog(txt, switch)
     if not txt.endswith(b"\n"):
         txt += b"\n"
     data = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")
@@ -300,7 +320,7 @@ def wrong_archive_cases(tmp, paths):
     roff = 128 + ((dl + 127) // 128) * 128
     mk = mksit_path()
     rm = os.path.join(tmp, "Read Me.bin")
-    rdata = readme_macbinary(rm)
+    rdata = readme_macbinary(rm, diaglog_switch())
     cases = []
 
     def inst_variant(name, mutate):
@@ -355,7 +375,36 @@ def wrong_archive_cases(tmp, paths):
     finally:
         subprocess.run(["humount"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     cases.append(("dsk with an extra invisible file", dict(paths, dsk=inv), "dsk via hfsutils"))
+    # a Read Me made with the OPPOSITE diagnostic-log switch (valid archive, wrong text)
+    rm2 = os.path.join(tmp, "Read Me.bin")
+    readme_macbinary(rm2, not diaglog_switch())
+    sit = os.path.join(tmp, "w-diag.sit")
+    run([mk, sit, INSTALLER_BIN, rm2])
+    cases.append(("sit whose Read Me disagrees with DIAGLOG_TEXT", dict(paths, sit=sit), "sit via unar"))
     return cases
+
+
+def switch_tests():
+    """The DIAGLOG_TEXT rule itself: OFF removes the whole block and says nothing about the log, ON keeps it."""
+    src = open(README_SRC, "rb").read()
+    off, on = apply_diaglog(src, False), apply_diaglog(src, True)
+    good = True
+    for name, cond in (
+            ("OFF text has no 'diagnostic log' / 'Keep a' and no marker", b"diagnostic log" not in off.lower() and b"keep a" not in off.lower() and b"DIAGNOSTIC LOG TEXT" not in off),
+            ("OFF text has no empty 'REPORTING PROBLEMS' heading", b"REPORTING PROBLEMS" not in off),
+            ("ON text has the block and no marker", b"Keep a diagnostic log" in on and b"DIAGNOSTIC LOG TEXT" not in on),
+            ("OFF is shorter than ON", len(off) < len(on))):
+        print("SELF-TEST %s: %s" % ("ok" if cond else "FAIL", name))
+        good = good and cond
+    # expected() holds either way: ON needs the block in the source, OFF needs it gone
+    for sw in (False, True):
+        try:
+            expected(sw)
+            print("SELF-TEST ok: expected(%s) is consistent with ReadMe.txt" % sw)
+        except Fail as e:
+            print("SELF-TEST FAIL: expected(%s): %s" % (sw, e))
+            good = False
+    return good
 
 
 def self_test(paths, inst, readme):
@@ -411,7 +460,7 @@ def self_test(paths, inst, readme):
                 print("SELF-TEST ok: corrupted %s fails (%s): %s" % (name, label, res[0][2][:110]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return good
+    return good and switch_tests()
 
 
 def main():

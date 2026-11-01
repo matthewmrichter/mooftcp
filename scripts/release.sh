@@ -73,13 +73,18 @@ PY
 
 # 3. Stage: installer + "Read Me" as MacBinary.
 cp "$app" "$stage/MoofTCP Installer.bin"
-python3 -I - "$ROOT/docs/release/ReadMe.txt" "$stage/Read Me.bin" <<'PY'
+diaglog="$(sed -n 's/^DIAGLOG_TEXT=\([01]\)[[:space:]]*$/\1/p' "$ROOT/scripts/release.conf")"
+case "$diaglog" in 0|1) ;; *) die "scripts/release.conf has no DIAGLOG_TEXT=0|1 line";; esac
+python3 -I - "$ROOT/docs/release/ReadMe.txt" "$stage/Read Me.bin" "$diaglog" <<'PY'
 import re, struct, sys, time
-src, dst = sys.argv[1:3]
+src, dst, diaglog = sys.argv[1:4]
 txt = open(src, "rb").read()
 if any(b > 126 or (b < 32 and b not in (10, 13)) for b in txt):
     sys.exit("ReadMe.txt must be plain ASCII")
-txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+if diaglog == "1":      # DIAGLOG_TEXT in scripts/release.conf: keep the block, drop the marker lines
+    txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+else:                   # drop the whole block, markers included
+    txt = re.sub(rb"(?ms)^\[BEGIN DIAGNOSTIC LOG TEXT[^\n]*\n.*?^\[END DIAGNOSTIC LOG TEXT[^\n]*\n(\n){0,2}", b"", txt)
 if not txt.endswith(b"\n"):
     txt += b"\n"
 data = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")

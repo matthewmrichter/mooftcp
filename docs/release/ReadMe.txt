@@ -69,9 +69,9 @@ THINGS YOU MAY NOTICE
     the Installer again; it repairs itself.
 
 
+[BEGIN DIAGNOSTIC LOG TEXT: shipped only if DIAGLOG_TEXT=1 in scripts/release.conf]
 REPORTING PROBLEMS
 
-[BEGIN DIAGNOSTIC LOG TEXT: edit with the control panel checkbox]
 MoofTCP can keep a diagnostic log of what it did. It is off by
 default. To turn it on, open the MoofTCP control panel, tick
 "Keep a diagnostic log", save, and restart. Include the log
