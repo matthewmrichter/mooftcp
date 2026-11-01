@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Stage files for a real-hardware session (BlueSCSI shared folder).
-#   stage-hw.sh [--spec <file.md>] <session-name> <file.bin>...
+#   stage-hw.sh [--spec <file.md>] [--release <version>] <session-name> <file.bin>...
 #   stage-hw.sh --verify <session-name>
 # Stage: writes dist/hw/<session-name>/ with each file as MacBinary (.bin) and BinHex
 # (.hqx, via macutils binhex), a README.txt (ASCII, CR line endings, for TeachText) and
 # CHECKLIST.md rendered from docs/dev/hw-checklist-template.md. A failed run removes the
 # half-made session directory. The staged session is verified automatically.
+# --release <version> (Plan 3 Task 11) adds dist/MoofTCP-<version>.{dsk,hqx,sit} (scripts/release.sh; copied
+# as they are, the .hqx is only decode-checked with hexbin) and the diagnostic apps from build-mac/ (HeapInfo,
+# HeapInfoOpen, HeapInfoDNR, MoofDiag, ApiProbe as .bin + .hqx). Further <file.bin> arguments are optional then.
 # Spec file (markdown) supplies the owner-facing steps as "## Install", "## Try" and
 # "## Undo" sections. Without --spec those sections say no steps were given.
 # Verify: round-trips every .hqx with hexbin and checks it equals the .bin (name,
@@ -40,12 +43,15 @@ verify_session() {
   for hqx in "$dir"/*.hqx; do
     [ -e "$hqx" ] || die "no .hqx files in $dir"
     stem="$(basename "$hqx" .hqx)"
-    [ -f "$dir/$stem.bin" ] || die "$stem.hqx has no matching $stem.bin"
     mkdir "$tmp/$stem"
     (cd "$tmp/$stem" && hexbin "$hqx" >/dev/null) || { rm -rf "$tmp"; die "hexbin failed on $stem.hqx"; }
     set -- "$tmp/$stem"/*.bin
     [ -f "$1" ] || { rm -rf "$tmp"; die "hexbin of $stem.hqx produced no MacBinary file"; }
-    python3 -I -c "$PYCMP" "$1" "$dir/$stem.bin" || { rm -rf "$tmp"; die "$stem: round-trip mismatch"; }
+    if [ -f "$dir/$stem.bin" ]; then
+      python3 -I -c "$PYCMP" "$1" "$dir/$stem.bin" || { rm -rf "$tmp"; die "$stem: round-trip mismatch"; }
+    else   # a release .hqx has no .bin of its own (it is the installer's BinHex): decode check only
+      echo "$stem.hqx decodes with hexbin (no matching .bin; scripts/release-verify.sh compares it)"
+    fi
     n=$((n+1))
   done
   rm -rf "$tmp"
@@ -63,14 +69,34 @@ if [ "${1:-}" = "--verify" ]; then
   exit 0
 fi
 
-spec=""
-if [ "${1:-}" = "--spec" ]; then
-  [ $# -ge 2 ] || die "--spec needs a file"
-  spec="$2"; shift 2
-  [ -f "$spec" ] || die "no such spec: $spec"
+spec=""; release=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --spec)
+      [ $# -ge 2 ] || die "--spec needs a file"
+      spec="$2"; shift 2
+      [ -f "$spec" ] || die "no such spec: $spec";;
+    --release)
+      [ $# -ge 2 ] || die "--release needs a version"
+      release="$2"; shift 2;;
+    *) break;;
+  esac
+done
+if [ -n "$release" ]; then
+  [ $# -ge 1 ] || die "usage: stage-hw.sh [--spec file.md] [--release ver] <session-name> [file.bin]..."
+else
+  [ $# -ge 2 ] || die "usage: stage-hw.sh [--spec file.md] [--release ver] <session-name> <file.bin>..."
 fi
-[ $# -ge 2 ] || die "usage: stage-hw.sh [--spec file.md] <session-name> <file.bin>..."
 session="$1"; shift
+rel_files=()
+if [ -n "$release" ]; then
+  case "$release" in ""|.*|*[!A-Za-z0-9._-]*) die "bad release version";; esac
+  for e in dsk hqx sit; do rel_files+=("$ROOT/dist/MoofTCP-$release.$e"); done
+  for f in "$ROOT/build-mac/heapinfo/HeapInfo.bin" "$ROOT/build-mac/heapinfo/HeapInfoOpen.bin" \
+           "$ROOT/build-mac/heapinfo/HeapInfoDNR.bin" "$ROOT/build-mac/moofdiag/MoofDiag.bin" \
+           "$ROOT/build-mac/apiprobe/ApiProbe.bin"; do set -- "$@" "$f"; done
+  for f in "${rel_files[@]}"; do [ -f "$f" ] || die "missing $f (run scripts/release.sh $release)"; done
+fi
 case "$session" in
   ""|.*|*[!A-Za-z0-9._-]*) die "session name must match [A-Za-z0-9._-] and not start with '.'";;
 esac
@@ -87,7 +113,10 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$out"
 
-names=()
+names=(); relnames=()
+for f in "${rel_files[@]}"; do
+  cp "$f" "$out/$(basename "$f")"; relnames+=("$(basename "$f")")
+done
 for f in "$@"; do
   base="$(basename "$f")"
   case "$base" in *.bin) ;; *) die "$f is not a MacBinary .bin file";; esac
@@ -106,6 +135,7 @@ readme_lf="$(mktemp)"
   echo "Staged: $(date +%Y-%m-%d)"
   echo
   echo "Files in this folder (each in two formats):"
+  for n in "${relnames[@]}"; do echo "  $n   release file (already in its final format)"; done
   for n in "${names[@]}"; do echo "  $n.bin   MacBinary"; echo "  $n.hqx   BinHex"; done
   echo
   echo "Copy ONE format of each file to the BlueSCSI shared folder on the SD card."
@@ -122,6 +152,7 @@ tpl="$ROOT/docs/dev/hw-checklist-template.md"
 [ -f "$tpl" ] || die "missing template $tpl"
 [ -n "$spec" ] || echo "stage-hw.sh: warning: no --spec; Install/Try/Undo will say no steps were given" >&2
 list=""
+for n in "${relnames[@]}"; do list+="- \`$n\`"$'\n'; done
 for n in "${names[@]}"; do list+="- \`$n.bin\` (or \`$n.hqx\`)"$'\n'; done
 python3 -I - "$tpl" "$out/CHECKLIST.md" "$session" "$(date +%Y-%m-%d)" "$list" "$spec" <<'PY'
 import re, sys

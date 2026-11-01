@@ -1,0 +1,10 @@
+tools/sit: StuffIt 1.5.1-compatible (Classic SIT, stored) archive writer for MoofTCP releases.
+
+Origin: SitStill (local checkout ~/projects/sitstill), MIT License,
+Copyright (c) 2026 SitStill contributors; the license text is in LICENSE next to this file.
+Copied unchanged: classic_sit_writer.c, stream.c, sitstill/classic_sit.h, sitstill/stream.h.
+Trimmed: classic_sit_internal.h (decoder declarations removed).
+Extracted: sit_crc.c (the CRC-16 functions of classic_sit_codecs.c, so the decoders are not needed).
+Written for MoofTCP: mksit.c (driver: MacBinary files -> one stored .sit with several entries).
+"StuffIt" is a trademark of its respective owner; the name only describes format compatibility.
+Nothing is linked from outside the repository at build time.

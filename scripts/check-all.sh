@@ -3,6 +3,7 @@
 #   check-all.sh [--snow]
 # 1. host build + ctest (ASan/UBSan)           -> build/
 # 2. scripts/gate-check.sh                      Retro68 compile gate (-Werror) + -mshort probe
+#    scripts/test-sit.sh                        tools/sit/mksit round trip, read back with unar (Task 11)
 # With --snow (needs Snow, the golden image and the owner media; about 10 minutes):
 # 3. scripts/mem-check.sh                       resident-memory cap rules 1-3 and the stack rule 4
 # 4. scripts/moofdiag-run.sh                    MoofDiag RESULT PASS
@@ -40,6 +41,7 @@ unconf_probe() {   # MoofTCP unconfigured: same rows as the recorded run (timing
 
 step "host tests"  host_tests
 step "compile gate" scripts/gate-check.sh
+step ".sit writer round trip" scripts/test-sit.sh
 if [ -n "$snow" ]; then
   step "mem-check (rules 1-4)" scripts/mem-check.sh
   step "MoofDiag" scripts/moofdiag-run.sh
