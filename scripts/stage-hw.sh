@@ -123,7 +123,10 @@ for f in "$@"; do
   stem="${base%.bin}"
   case "$stem" in *[!A-Za-z0-9._-]*) die "file name '$base' has characters other than [A-Za-z0-9._-]";; esac
   cp "$f" "$out/$base"
-  binhex "$out/$base" > "$out/$stem.hqx" || die "binhex failed for $base"
+  # macutils' own first comment line is replaced by the standard one so unar can list the file
+  binhex "$out/$base" > "$out/$stem.body" || die "binhex failed for $base"
+  { echo "(This file must be converted with BinHex 4.0)"; sed '1{/^(/d;}' "$out/$stem.body"; } > "$out/$stem.hqx"
+  rm -f "$out/$stem.body"
   [ -s "$out/$stem.hqx" ] || die "binhex produced an empty file for $base"
   names+=("$stem")
 done

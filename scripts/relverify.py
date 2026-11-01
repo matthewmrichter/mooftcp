@@ -15,6 +15,9 @@ and compares every file found with what it must be:
 Compared Finder flags: all 16 bits except 0x0100 (kHasBeenInited: the Finder sets it by itself when
 it first shows a file, so a copy that was looked at may differ). 0x2000 (hasBundle) is compared.
 Dates are not compared (HFS, SIT and BinHex store them differently, and hfsutils stamps its own).
+The .dsk root is listed with `hls -a` (invisible files such as a stray Desktop file count as extra files).
+hfsck (hfsutils' volume checker) is not installed on this host and is not used; the structure check is
+hmount (MDB) plus a successful hcopy of every file.
 The .hqx holds the installer only; the .sit and the .dsk hold both files, and the .dsk must hold
 nothing else at its root and have the volume name "MoofTCP" and 819200 bytes.
 
@@ -24,6 +27,7 @@ FAIL. Exit 0 only if all of that holds. Without --self-test: exit 0 only if ever
 """
 import hashlib
 import json
+import re
 import os
 import shutil
 import struct
@@ -72,6 +76,7 @@ def expected():
     if not inst["flags"] & 0x2000:
         raise Fail("reference installer lacks the bundle bit")
     txt = open(README_SRC, "rb").read()
+    txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
     if txt.endswith(b"\n") is False:
         txt += b"\n"
     txt = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")
@@ -108,7 +113,9 @@ def read_unar(archive):
     out = {}
     for e in meta:
         nm = e["XADFileName"]
-        o = out.setdefault(nm, dict(type=None, creator=None, flags=0))
+        o = out.setdefault(nm, dict(type=None, creator=None, flags=0, need_data=False, need_rsrc=False))
+        if e.get("XADFileSize", 0) > 0:
+            o["need_rsrc" if e.get("XADIsResourceFork") else "need_data"] = True
         if "XADFileType" in e:
             o["type"], o["creator"] = cc(e["XADFileType"]), cc(e["XADFileCreator"])
             o["flags"] |= e.get("XADFinderFlags", 0)
@@ -118,8 +125,12 @@ def read_unar(archive):
         res = []
         for nm, o in out.items():
             p = os.path.join(tmp, nm)
-            data = open(p, "rb").read() if os.path.isfile(p) else b""
             rp = p + ".rsrc"
+            if o["need_data"] and not os.path.isfile(p):
+                raise Fail("unar listed a data fork for %r but extracted no file" % nm)
+            if o["need_rsrc"] and not os.path.isfile(rp):
+                raise Fail("unar listed a resource fork for %r but extracted no .rsrc file" % nm)
+            data = open(p, "rb").read() if os.path.isfile(p) else b""
             rsrc = appledouble_rsrc(rp) if os.path.isfile(rp) else b""
             res.append(rec(nm, o["type"], o["creator"], o["flags"], data, rsrc))
         extra = [f for f in os.listdir(tmp) if f not in out and not (f.endswith(".rsrc") and f[:-5] in out)]
@@ -152,7 +163,7 @@ def read_dsk(dsk):
         mounted = True
         if 'Volume name is "%s"' % VOLNAME not in out:
             raise Fail("volume name is not %r: %s" % (VOLNAME, out.splitlines()[:1]))
-        names = [n for n in run(["hls", "-1", ":"]).decode("mac_roman").split("\n") if n]
+        names = [n for n in run(["hls", "-a", "-1", ":"]).decode("mac_roman").split("\n") if n]
         res = []
         for i, nm in enumerate(names):
             p = os.path.join(tmp, "f%d.bin" % i)
@@ -234,6 +245,119 @@ def find_unique(path, needle):
     return i
 
 
+def crc16x(b):
+    c = 0
+    for x in b:
+        c ^= x << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
+
+
+def fix_crc(h):
+    h[124:126] = struct.pack(">H", crc16x(bytes(h[:124])))
+
+
+def readme_macbinary(path):
+    txt = open(README_SRC, "rb").read()
+    txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
+    if not txt.endswith(b"\n"):
+        txt += b"\n"
+    data = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")
+    h = bytearray(128)
+    h[1] = 7
+    h[2:9] = b"Read Me"
+    h[65:69] = b"ttro"
+    h[69:73] = b"ttxt"
+    h[83:87] = struct.pack(">I", len(data))
+    h[122] = h[123] = 129
+    fix_crc(h)
+    open(path, "wb").write(bytes(h) + data + b"\0" * (-len(data) % 128))
+    return data
+
+
+def mksit_path():
+    exe = os.path.join(ROOT, "build", "sit", "mksit")
+    if not os.path.isfile(exe):
+        os.makedirs(os.path.dirname(exe), exist_ok=True)
+        src = os.path.join(ROOT, "tools", "sit")
+        run(["gcc", "-std=c99", "-O2", "-I" + src, "-o", exe] +
+            [os.path.join(src, f) for f in ("mksit.c", "classic_sit_writer.c", "stream.c", "sit_crc.c")])
+    return exe
+
+
+def binhex_file(binfile, out):
+    body = run(["binhex", binfile]).decode("latin-1").split("\n")
+    if body and body[0].startswith("("):
+        body = body[1:]
+    open(out, "w", newline="").write("(This file must be converted with BinHex 4.0)\n" + "\n".join(body))
+
+
+def wrong_archive_cases(tmp, paths):
+    """CRC-valid wrong artifacts: the readers accept them, only the comparison can reject them."""
+    ref = bytearray(open(INSTALLER_BIN, "rb").read())
+    dl, rl = struct.unpack(">II", bytes(ref[83:91]))
+    roff = 128 + ((dl + 127) // 128) * 128
+    mk = mksit_path()
+    rm = os.path.join(tmp, "Read Me.bin")
+    rdata = readme_macbinary(rm)
+    cases = []
+
+    def inst_variant(name, mutate):
+        b = bytearray(ref)
+        b = mutate(b)
+        f = os.path.join(tmp, name)
+        open(f, "wb").write(bytes(b))
+        return f
+
+    def creator(b):
+        b[69:73] = b"XXXX"
+        fix_crc(b)
+        return b
+
+    def swap_rsrc(b):
+        data = bytes(b[128:128 + dl]) + b"\0" * (-dl % 128) if dl else b""
+        h = bytearray(b[:128])
+        h[87:91] = struct.pack(">I", len(rdata))
+        fix_crc(h)
+        return bytearray(bytes(h) + data + rdata + b"\0" * (-len(rdata) % 128))
+
+    def flags(b):
+        b[73] = 0
+        fix_crc(b)
+        return b
+
+    for nm, mut, lbl in (("creator", creator, "sit creator XXXX"), ("swap", swap_rsrc, "sit resource fork swapped for Read Me bytes"),
+                         ("flags", flags, "sit bundle bit cleared")):
+        f = inst_variant("inst-%s.bin" % nm, mut)
+        sit = os.path.join(tmp, "w-%s.sit" % nm)
+        run([mk, sit, f, rm])
+        cases.append((lbl, dict(paths, sit=sit), "sit via unar"))
+    sit = os.path.join(tmp, "w-drop.sit")
+    run([mk, sit, INSTALLER_BIN])
+    cases.append(("sit without the Read Me entry", dict(paths, sit=sit), "sit via unar"))
+    f = inst_variant("inst-hq.bin", creator)
+    hq = os.path.join(tmp, "w-creator.hqx")
+    binhex_file(f, hq)
+    cases.append(("hqx of a creator-XXXX file", dict(paths, hqx=hq), "hqx via hexbin"))
+    cases.append(("hqx of a creator-XXXX file", dict(paths, hqx=hq), "hqx via unar"))
+    trunc = os.path.join(tmp, "trunc.dsk")
+    shutil.copy(paths["dsk"], trunc)
+    os.truncate(trunc, 819199)
+    cases.append(("dsk truncated to 819199 bytes", dict(paths, dsk=trunc), "dsk via hfsutils"))
+    # dsk with an extra invisible file
+    inv = os.path.join(tmp, "inv.dsk")
+    shutil.copy(paths["dsk"], inv)
+    run(["hmount", inv])
+    try:
+        run(["hcopy", "-m", rm, ":Desktop"])
+        run(["hattrib", "+i", ":Desktop"])
+    finally:
+        subprocess.run(["humount"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cases.append(("dsk with an extra invisible file", dict(paths, dsk=inv), "dsk via hfsutils"))
+    return cases
+
+
 def self_test(paths, inst, readme):
     ok = report(verify_all(paths, inst, readme))
     if not ok:
@@ -277,6 +401,7 @@ def self_test(paths, inst, readme):
         open(c["hqx"], "wb").write(d)
         cases.append(("hqx body character", c, "hqx via hexbin"))
         cases.append(("hqx body character", c, "hqx via unar"))
+        cases += wrong_archive_cases(tmp, paths)
         for name, cpaths, label in cases:
             res = [r for r in verify_all(cpaths, inst, readme) if r[0] == label]
             if res[0][1]:

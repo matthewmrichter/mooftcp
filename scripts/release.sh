@@ -74,11 +74,12 @@ PY
 # 3. Stage: installer + "Read Me" as MacBinary.
 cp "$app" "$stage/MoofTCP Installer.bin"
 python3 -I - "$ROOT/docs/release/ReadMe.txt" "$stage/Read Me.bin" <<'PY'
-import struct, sys, time
+import re, struct, sys, time
 src, dst = sys.argv[1:3]
 txt = open(src, "rb").read()
 if any(b > 126 or (b < 32 and b not in (10, 13)) for b in txt):
     sys.exit("ReadMe.txt must be plain ASCII")
+txt = re.sub(rb"(?m)^\[(BEGIN|END) DIAGNOSTIC LOG TEXT[^\n]*\n", b"", txt)
 if not txt.endswith(b"\n"):
     txt += b"\n"
 data = txt.replace(b"\r\n", b"\n").replace(b"\n", b"\r")

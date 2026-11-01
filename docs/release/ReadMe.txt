@@ -2,19 +2,24 @@ MoofTCP 1.0rc1
 ==============
 
 MoofTCP is a replacement for MacTCP. Programs that use MacTCP
-(Fetch, NCSA Telnet, Eudora, Flynn, and so on) run with it
-unchanged. It keeps its settings in its own file and does not
-need MacTCP's.
+should work with it unchanged. It keeps its settings in its own
+file and does not need MacTCP's.
 
-This is a release candidate. Please report problems.
+This is a release candidate. It was developed and tested in an
+emulator of a Mac Classic with 4 MB; testing on real hardware
+is in progress. Please report problems.
+
+Tested with MoofTCP in the emulator: Flynn, Wikipedia Reader,
+MacTCP Watcher, NCSA Telnet, Fetch and TurboGopher (they
+connect and work). Eudora starts; its mail was not tried.
 
 
 WHAT YOU NEED
 
-  - A Mac with System 6.0.x (made and tested on a Mac Classic
-    with 4 MB).
+  - A Mac with System 6.0.8 (the only version tested).
   - An Ethernet adapter on the SCSI bus that uses the DaynaPORT
-    driver (a BlueSCSI with DaynaPORT, for example).
+    driver (a BlueSCSI with DaynaPORT, for example). It is the
+    only adapter MoofTCP was tested with.
   - Nothing else. You do not need MacTCP's settings; MoofTCP
     has its own.
 
@@ -66,15 +71,17 @@ THINGS YOU MAY NOTICE
 
 REPORTING PROBLEMS
 
+[BEGIN DIAGNOSTIC LOG TEXT: edit with the control panel checkbox]
 MoofTCP can keep a diagnostic log of what it did. It is off by
-default and is switched on by a flag in the "MoofTCP Prefs" file
-(there is no switch for it in the control panel yet). If you were
-asked to turn it on, include the log with your report, together
-with the program you used and what you did.
+default. To turn it on, open the MoofTCP control panel, tick
+"Keep a diagnostic log", save, and restart. Include the log
+with your report, together with the program you used and what
+you did.
+[END DIAGNOSTIC LOG TEXT]
 
 
 KNOWN LIMITS
 
   - No DHCP yet: you must enter the address yourself.
   - No IPv6.
-  - Only the DaynaPORT Ethernet driver is supported.
+  - Tested only with the DaynaPORT Ethernet driver.
