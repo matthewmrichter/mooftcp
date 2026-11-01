@@ -23,8 +23,10 @@ static MtAnyPb *pop(MtDrvPend *q) {
     return pb;
 }
 
-/* Keep only the PBs that do not live in the application's memory (PB or completion routine in m;
- * a live new tenant of the range keeps its own, mt_pb_in_gone). */
+/* Keep only the PBs that do not live in the application's memory (PB or completion routine in m). The
+ * queued PBs carry no age (born 0: mt_pb_in_gone decides by the range alone), so a live new tenant's PB
+ * queued by preemption while the dead previous occupant was still recorded is dropped with the dead
+ * owner's and stays inProgress (RC item 12 (e); rare: queued means issued at interrupt time over a held gate). */
 static uint32_t drop_app(const MtDrv *d, MtDrvPend *q, const MtAppMem *m) {
     void *keep[MT_DRV_PENDQ];
     uint32_t n = 0, k, dropped = 0;

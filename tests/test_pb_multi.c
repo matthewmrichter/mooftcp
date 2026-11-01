@@ -1247,6 +1247,121 @@ static void tenant_of_unswept_block_keeps_its_objects(void) {
     }
 }
 
+/* Round 5 (MINOR 2): directed mt_pb_unstick. A dead chain is abandoned only when the gate stands exactly
+ * where its innermost routine died: one level more is a live frame above it (postponed, counted), one
+ * level less proves nothing either; the exact level releases it. */
+static void unstick_waits_under_a_live_gate_frame(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    g_x.d->depth = 1;                                     /* a chain on B's stack that died inside the gate */
+    g_x.d->co_gate = 1;
+    co_ctx_is(b);
+    pbf_mf_quit(b);
+    T_EQ(mt_pb_unstick(g_x.d, NULL, 2), 0);               /* a live frame holds the gate above it */
+    T_EQ(g_x.d->n_unstick_wait, 1);
+    T_EQ(g_x.d->depth, 1);
+    T_EQ(g_x.d->co_n, 1);
+    T_EQ(mt_pb_unstick(g_x.d, NULL, 0), 0);               /* fewer levels than the chain entered: not it */
+    T_EQ(g_x.d->n_unstick_wait, 2);
+    T_EQ(g_x.d->depth, 1);
+    T_EQ(mt_pb_unstick(g_x.d, NULL, 1), 1);               /* exactly the chain's level */
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(g_x.d->co_gate, 0);
+    T_EQ(g_x.d->co_n, 0);
+    T_EQ(g_x.d->n_unstuck, 1);
+    to(a);
+    T_EQ(status(sa), 0);
+    T_EQ(status(sb), invalidStreamPtr);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Round 5 (MINOR 2): a process listed for a nested call-out is dropped again when that nested chain has
+ * returned (co_done), so a later quit of the chain's first process is provable. B's routine runs; inside
+ * it A becomes current and makes a call whose completion runs nested (A listed at depth 1) and returns;
+ * then B quits inside its routine. A's next call must abandon the chain (only B is listed). Without the
+ * pop A (alive) stays listed and the driver stalls for good. */
+static int g_popa, g_popb;
+static void nested_then_quit(MtAnyPb *pb) {
+    TCPiopb *st = (TCPiopb *)pbf_mf_alloc(g_popa, sizeof(MtAnyPb));
+    (void)pb;
+    to(g_popa);                                           /* MultiFinder switched to A inside the routine */
+    st->ioCompletion = g_compl[g_popa];
+    st->csCode = TCPStatus;
+    st->tcpStream = 0;
+    st->ioResult = inProgress;
+    (void)mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_SYNC, 0);
+    T_EQ(g_x.d->co_n, 1);                                 /* A's nested chain returned: popped */
+    T_EQ(g_x.d->co_ctx[0].lo, pbf_parts[g_popb].lo);
+    to(g_popb);
+    g_quitpart = g_popb;
+    quit_in_routine(pb);
+}
+static void nested_context_pops_when_its_chain_returns(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    TCPiopb *pb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    g_popa = a; g_popb = b;
+    pb = (TCPiopb *)apb(TCPStatus, sb);
+    pb->ioCompletion = pbf_mf_compl(b, nested_then_quit);
+    if (!setjmp(g_quitjmp)) { ecall(pb, 1); T_CHECK(0); }
+    T_EQ(g_x.d->depth, 1);
+    T_EQ(g_x.d->co_n, 1);
+    pbf_irq = 0;
+    pbf_in_int = 0;
+    to(a);
+    T_EQ(status(sa), 0);                                  /* B dead, A was popped: abandoned and swept */
+    T_EQ(g_x.d->n_unstuck, 1);
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(status(sb), invalidStreamPtr);
+    T_CHECK(echoes(sa, &ca, "A"));
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Round 5 (MINOR 6): a completion without a routine (every sync call) records no context, a call-out with
+ * one records the current process; the behaviour of the chain accounting is otherwise unchanged. */
+static void sync_calls_without_completion_track_nothing(void) {
+    int a, b;
+    pbt_conn ca;
+    StreamPtr sa;
+    TCPiopb *pb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    T_CHECK(sa != 0);
+    b = launch();                                         /* B current, never calls */
+    to(a);
+    g_x.d->co_n = 0;
+    pb = (TCPiopb *)apb(TCPStatus, sa);
+    pb->ioCompletion = 0;
+    T_EQ(ecall(pb, 0), 0);
+    T_EQ(g_x.d->co_n, 0);                                 /* nothing to track */
+    T_EQ(g_x.d->depth, 0);
+    pb = (TCPiopb *)apb(TCPStatus, sa);                   /* with a routine: the current process (A) */
+    T_EQ(ecall(pb, 0), 0);
+    T_EQ(g_x.d->co_n, 1);
+    T_EQ(g_x.d->co_ctx[0].lo, pbf_parts[a].lo);
+    T_EQ(g_x.d->co_ctx[0].name, pbf_parts[a].name);
+    T_EQ(g_x.d->depth, 0);
+    (void)b;
+    T_EQ(pbf_bad, 0);
+}
+
 /* ---- randomized: up to three applications launching, calling, quitting without a goodbye, a new one
  * reusing a dead one's memory, data for every connection (also the dead ones' before the sweep), ticks.
  * Invariants: no routine or PB of a quit partition is ever run (pbf_dead_calls), after a sweep tick no
@@ -1631,4 +1746,6 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        reused_block_unsticks_abandoned_routine, xapp_routine_during_other_apps_drain,
        routine_resuming_after_unstick_keeps_accounting, gate_held_while_abandoned_routines_process_quits,
        interrupt_time_routine_is_never_abandoned, tenant_of_unswept_block_keeps_its_objects,
+       unstick_waits_under_a_live_gate_frame, nested_context_pops_when_its_chain_returns,
+       sync_calls_without_completion_track_nothing,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)

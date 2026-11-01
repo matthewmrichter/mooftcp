@@ -16,7 +16,9 @@
 #                  async TCPStatus (MfEcho option Y); the short copy spins on sync TCPStatus calls (option S) so
 #                  it holds the gate and drains the long copy's replies at task time: the long copy's routine then
 #                  runs with the short copy current and calls the driver. The long copy must echo 100% and count
-#                  cross-app >= 1; MoofDiag must show depth 0 and no abandoned frames
+#                  cross-app >= 1; MoofDiag must show depth 0 and no abandoned frames. In Snow only a deferred tick,
+#                  not a frame, is drained that way (see docs/dev/EMULATOR.md), so the short copy runs T100 here
+#                  (about one of the long copy's 1 s probe reads in fifty lands in such a drain)
 #     --xkill      round 4: like --xapp, but the first time the long copy's completion runs cross-app it calls
 #                  _ExitToShell (option Z), which ends the CURRENT process: the short copy dies inside its own
 #                  driver call (the launch loop then relaunches it, see below). The long copy must echo 100%
@@ -57,6 +59,8 @@ case "$long" in A|B) ;; *) usage;; esac
 longcfg="T120 B$base $xapp $xkill"
 shortT=T30; spin=""
 if [ -n "$xapp$xkill" ]; then spin=S; fi
+if [ -n "$xapp" ]; then shortT=T100; fi           # the cross-app drain is statistical (about one probe window in
+                                                  # fifty hits it): 100 s of overlap, still quitting before the long copy
 if [ -n "$xkill" ]; then shortT=T120; fi          # the short copy is ended by the long copy's routine
 shortcfg="$shortT B$base U $rel $pend $xq $spin"
 if [ "$long" = A ]; then cfgA="$longcfg"; cfgB="$shortcfg"; else cfgA="$shortcfg"; cfgB="$longcfg"; fi

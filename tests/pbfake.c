@@ -213,15 +213,11 @@ void mt_os_complete(MtAnyPb *pb, int16_t err) {
     log_add(&e);
     if (!c) return;
     if (code_find(c) >= 0) {
-        pbf_in_int++;
         if (g_code[code_find(c)].c) g_code[code_find(c)].c(pb); else pbf_bad++;
-        pbf_in_int--;
         return;
     }
     if (c < PROC_BASE || c >= PROC_BASE + 4u * NPROC || (c & 3u)) { pbf_bad++; return; }
-    pbf_in_int++;
     if (g_compl[(c - PROC_BASE) / 4u]) g_compl[(c - PROC_BASE) / 4u](pb);
-    pbf_in_int--;
 }
 
 void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 icmp) {
@@ -238,20 +234,16 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
     log_add(&e);
     if (in_dead(c)) pbf_dead_calls++;
     if (code_find(c) >= 0) {
-        pbf_in_int++;
         if (g_code[code_find(c)].a) g_code[code_find(c)].a(a->stream, event, a->user, reason, icmp);
         else pbf_bad++;
-        pbf_in_int--;
         return;
     }
     if (c < PROC_BASE + 0x1000u || c >= PROC_BASE + 0x1000u + 4u * NPROC || (c & 3u)) {
         pbf_bad++;                              /* the glue must never call ASR 0 or garbage */
         return;
     }
-    pbf_in_int++;
     if (g_asr[(c - PROC_BASE - 0x1000u) / 4u])
         g_asr[(c - PROC_BASE - 0x1000u) / 4u](a->stream, event, a->user, reason, icmp);
-    pbf_in_int--;
 }
 
 int mt_os_irq_save(void) {

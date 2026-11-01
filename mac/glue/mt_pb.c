@@ -112,7 +112,8 @@ void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     uint8_t sv = d->co_gate, gen;
     if (d->n_own && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
         return;                                 /* its application quit (MultiFinder): the sweep forgets it */
-    co_note(d);
+    if (pb->hdr.ioCompletion) co_note(d);       /* no routine, nothing can quit inside it: skip the context
+                                                 * (every sync call completes through here; round 5) */
     gen = d->co_gen;
     d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;

@@ -12,7 +12,9 @@
  *  - Every mt_os_complete and mt_os_asr call is appended to pbf_log in order (also those
  *    the Device Manager model pbt_call makes for immediate results), so tests can assert the
  *    order of completions and ASRs.
- *  - The clock is pbf_now (ms); interrupts are a nesting counter. */
+ *  - The clock is pbf_now (ms); interrupts are a nesting counter (pbf_in_int, what mt_os_in_interrupt
+ *    reports). Completion routines and ASRs run at the CALLER's level, as the driver runs them (inline, no
+ *    SR change): a test that delivers a frame at interrupt time raises pbf_in_int itself (round 5). */
 
 #include <stdint.h>
 #include "mt_os.h"

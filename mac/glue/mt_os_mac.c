@@ -158,13 +158,15 @@ static int mf_running(void)
  * partition is validated before it is trusted: an in-use block (tag 0x80 relocatable / 0x40
  * nonrelocatable), its end above the zone's bkLim and above CurrentA5, below BufPtr; anything
  * else falls back to ApplZone..BufPtr (the classic range). */
-/* FNV-1a of CurApName (Str31 at 0x910). */
+/* Hash of CurApName (Str31 at 0x910): rotate-by-5 and xor (no multiply: a 32-bit multiply is a __mulsi3
+ * library call on the 68000, which made the FNV-1a of round 1 cost about 0.4 ms per task-time call-out;
+ * round 5). The value only has to tell two applications apart within one boot. */
 static uint32_t app_name_hash(void)
 {
     const volatile uint8_t *p = (const volatile uint8_t *)0x910;
-    uint32_t h = 2166136261u;
+    uint32_t h = 0x9E3779B9u;
     uint8_t n = p[0] < 31 ? p[0] : 31, i;
-    for (i = 0; i <= n; i++) h = (h ^ p[i]) * 16777619u;
+    for (i = 0; i <= n; i++) h = ((h << 5) | (h >> 27)) ^ p[i];
     return h;
 }
 
