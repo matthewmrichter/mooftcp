@@ -12,6 +12,6 @@ add_subdirectory(asmtest)
 add_subdirectory(enetspike)
 add_subdirectory(dnr)
 add_subdirectory(cdev)
-add_subdirectory(installer)
 add_subdirectory(moof)
+add_subdirectory(installer)   # after moof: it embeds build-mac/moof/MoofTCP.bin
 add_subdirectory(moofdiag)

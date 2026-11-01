@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Build MoofDiag (mac/moofdiag) and MoofTCP, install MoofTCP on a fresh work.hda (scripts/install-moof.sh),
 # boot Snow, run MoofDiag and collect build-mac/moofdiag/MoofDiag.out (Task 10).
-#   moofdiag-run.sh [--keep-disk] [--no-install] [--no-prefs] [--keep-running]
+#   moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--keep-running]
 #     --keep-disk     do not run fresh-disk.sh
 #     --no-install    do not run install-moof.sh (whatever stack the image has)
+#     --installed     the image already has MoofTCP from the installer app ("MoofTCP Installer", Task 10):
+#                     --keep-disk --no-install, and refuse unless ":System Folder:MoofTCP" is cdev/ztcp
 #     --no-prefs      install MoofTCP without "MoofTCP Prefs" (unconfigured)
 #     --log           install prefs with the diagnostic log flag (mkprefs.sh --log); MoofDiag then lists the log records
 #     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
@@ -18,15 +20,16 @@ DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${MOOFDIAG_TIMEOUT:-300}"
 die() { echo "moofdiag-run.sh: $*" >&2; exit 1; }
 
-keepdisk=""; install=1; prefs=""; keeprun=""; logp=""
+keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
     --no-install) install=""; shift;;
+    --installed) installed=1; install=""; keepdisk=1; shift;;
     --no-prefs) prefs="--no-prefs"; shift;;
     --keep-running) keeprun=1; shift;;
     --log) logp=1; shift;;
-    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--no-prefs] [--log] [--keep-running]" >&2; exit 2;;
+    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--log] [--keep-running]" >&2; exit 2;;
   esac
 done
 
@@ -67,6 +70,7 @@ with_volume() {  # with_volume <cmd...>: mount work.hda (Snow stopped), run, unm
   return $rc
 }
 fetch_out() { hcopy -t ":MoofTCP Test:MoofDiag.out" "$1"; }
+has_moof() { hls -l ":System Folder:" | grep -E "^f +cdev/ztcp .* MoofTCP$" >/dev/null; }
 del_out() { hdel ":MoofTCP Test:MoofDiag.out" 2>/dev/null || true; }
 
 click() {  # click x y [dbl]
@@ -121,6 +125,7 @@ if [ -n "$logp" ] && [ -z "$prefs" ]; then
   pargs=(--prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin")
 fi
 [ -z "$install" ] || scripts/install-moof.sh ${pargs[@]+"${pargs[@]}"}
+if [ -n "$installed" ]; then with_volume has_moof || die "--installed: no cdev/ztcp MoofTCP in the System Folder"; fi
 scripts/deploy.sh "$bin" --to ":MoofTCP Test:" >/dev/null
 with_volume del_out
 

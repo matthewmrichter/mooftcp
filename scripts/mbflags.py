@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Set the Finder flags of a MacBinary II file and fix its header CRC.
 
-    scripts/mbflags.py <file.bin> <flags>      e.g. 0x2000 (hasBundle)
+    scripts/mbflags.py <file.bin> <flags> [name]   e.g. 0x2000 (hasBundle)
+
+name (optional) also sets the file name in the header (1..63 bytes; the installer app is built as
+target MoofInstaller but must be called "MoofTCP Installer" on the Mac).
 
 Retro68's Rez writes MacBinary with Finder flags 0; the MoofTCP control panel needs hasBundle
 (0x2000) so the Finder reads its BNDL and shows its icon (the real MacTCP file has 0x2000 once
@@ -21,12 +24,18 @@ def crc16(data):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
     path, flags = sys.argv[1], int(sys.argv[2], 0)
     d = bytearray(open(path, "rb").read())
     if len(d) < 128 or d[0] != 0 or d[74] != 0:
         sys.exit("mbflags.py: %s is not a MacBinary file" % path)
+    if len(sys.argv) == 4:
+        name = sys.argv[3].encode("mac_roman")
+        if not 1 <= len(name) <= 63 or b":" in name:
+            sys.exit("mbflags.py: bad file name")
+        d[1] = len(name)
+        d[2:65] = name + bytes(63 - len(name))
     d[73] = (flags >> 8) & 0xFF
     d[101] = flags & 0xFF
     c = crc16(bytes(d[:124]))

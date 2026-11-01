@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Put MoofTCP instead of MacTCP on $MT_HOME/disks/work.hda (Snow must be stopped).
+# Put MoofTCP instead of MacTCP on $MT_HOME/disks/work.hda (Snow must be stopped). The DEV installer:
+# the release installer is the Mac application "MoofTCP Installer" (mac/installer, Task 10); this script
+# stays for test runs that need an image without booting it, and uses the same file layout, so the
+# application's Remove undoes it too.
 #   install-moof.sh [--no-prefs | --prefs <MoofTCP Prefs.bin>] [--cdev <MoofTCP.bin>] [--dnr] [--keep-mactcp]
-# 1. Moves the real "MacTCP", "MacTCP DNR" and "MacTCP Prep" from :System Folder: into
-#    ":MacTCP Parked:" (hrename keeps forks and type/creator; EMULATOR.md "Method" step 3), and removes
-#    MoofTCP files of an earlier install (MoofTCP, MoofTCP Prefs, the interim "MacTCP" if already parked).
+# 1. Moves the real "MacTCP", "MacTCP DNR" and "MacTCP Prep" (matched by name and type/creator, as the
+#    application does) from :System Folder: into ":System Folder:MacTCP (Disabled):" (hrename keeps forks,
+#    type/creator, Finder info and dates; EMULATOR.md "Method" step 3) and writes the application's
+#    manifest "MoofTCP Manifest" there (TEXT/ztcp, mac/installer/inst_plan.h: "#created" when this script
+#    made the folder, then "name<TAB>System Folder" per parked file). It removes MoofTCP files of an earlier
+#    install (MoofTCP, MoofTCP Prefs; a set file in the System Folder whose name is already parked is
+#    MoofTCP's own, e.g. the test-only "MacTCP DNR", and is deleted).
 # 2. Copies the MoofTCP control panel (default build-mac/moof/MoofTCP.bin, `scripts/build-mac.sh MoofTCP`)
 #    and the prefs file (default: built by scripts/mkprefs.sh for Snow's NAT: 10.0.0.2/8,
 #    gateway 10.0.0.1, DNS 1.1.1.1) into :System Folder:. --no-prefs leaves MoofTCP unconfigured.
@@ -64,18 +71,42 @@ vol="$(hmount "$IMG" "$part" | sed -n 's/^Volume name is "\(.*\)"$/\1/p')"
 [ -n "$vol" ] || die "hmount failed"
 # exists <folder:> <name>: hls exits 0 even for a missing path, so look the name up in the listing
 exists() { hls -1a "$1" 2>/dev/null | grep -Fxq -- "$2"; }
-exists ":" "MacTCP Parked" || hmkdir ":MacTCP Parked:"
-for f in "MacTCP" "MacTCP DNR" "MacTCP Prep" "MoofTCP" "MoofTCP Prefs"; do
-  case "$f" in MoofTCP*) ;; *) [ -z "$keepmac" ] || continue;; esac   # --keep-mactcp: leave MacTCP's
-  if exists ":System Folder:" "$f"; then
-    if exists ":MacTCP Parked:" "$f" || [ "${f#MoofTCP}" != "$f" ]; then
-      hdel ":System Folder:$f"            # already parked: this one is MoofTCP's from an earlier install
-      echo "removed :System Folder:$f"
-    else
-      hrename ":System Folder:$f" ":MacTCP Parked:$f"
-      echo "parked :System Folder:$f"
-    fi
-  fi
+SF=":System Folder:"; DIS=":System Folder:MacTCP (Disabled):"
+# setfile <folder:> <name> <type/creator>: the file is there with that type/creator (hls -l: "f  TYPE/CRTR ...")
+setfile() { hls -l "$1" 2>/dev/null | grep -E "^f +$3 .* $2\$" >/dev/null; }
+created=""
+for f in "MoofTCP" "MoofTCP Prefs"; do
+  if exists "$SF" "$f"; then hdel "$SF$f"; echo "removed $SF$f"; fi
 done
+if [ -z "$keepmac" ]; then
+  for spec in "MacTCP:cdev/ztcp" "MacTCP DNR:cdev/mtcp" "MacTCP Prep:mtpp/mtcp"; do
+    f="${spec%%:*}"; tc="${spec#*:}"
+    setfile "$SF" "$f" "$tc" || continue
+    if ! exists "$SF" "MacTCP (Disabled)"; then hmkdir "${DIS%:}"; created=1; fi
+    if exists "$DIS" "$f"; then
+      hdel "$SF$f"; echo "removed $SF$f (already parked: this one is MoofTCP's)"
+    else
+      hrename "$SF$f" "$DIS$f"; echo "parked $SF$f"
+    fi
+  done
+  if exists "$SF" "MacTCP (Disabled)"; then        # the manifest lists every set file parked there
+    man="$(mktemp)"
+    if [ -z "$created" ] && exists "$DIS" "MoofTCP Manifest"; then
+      hcopy -r "${DIS}MoofTCP Manifest" "$man.old"; head -c 9 "$man.old" | grep -q '^#created' && created=1
+      rm -f "$man.old"
+    fi
+    { [ -z "$created" ] || printf '#created\r'
+      for spec in "MacTCP:cdev/ztcp" "MacTCP DNR:cdev/mtcp" "MacTCP Prep:mtpp/mtcp"; do
+        f="${spec%%:*}"; tc="${spec#*:}"
+        if setfile "$DIS" "$f" "$tc"; then printf '%s\tSystem Folder\r' "$f"; fi
+      done; } > "$man"
+    hdel "${DIS}MoofTCP Manifest" 2>/dev/null || true
+    if [ -s "$man" ]; then
+      hcopy -r "$man" "${DIS}MoofTCP Manifest"
+      hattrib -t TEXT -c ztcp "${DIS}MoofTCP Manifest"
+    fi
+    rm -f "$man"
+  fi
+fi
 humount >/dev/null 2>&1 || true; vol=""
 "$ROOT/scripts/deploy.sh" "$cdev" ${prefs:+"$prefs"} ${dnrfile:+"$dnrfile"} --to ":System Folder:" | grep -E "copied|MacTCP|MoofTCP" || true

@@ -46,8 +46,8 @@ target_include_directories(mtcdev PUBLIC ${CMAKE_SOURCE_DIR}/mac/cdev ${CMAKE_SO
 target_link_libraries(mtcdev PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtcdev)
 
-# Installer planner (mac/installer/inst_plan.c, portable), host-built.
-add_library(mtinst STATIC ${CMAKE_SOURCE_DIR}/mac/installer/inst_plan.c)
+# Installer planner and executor (mac/installer/inst_plan.c, inst_exec.c, portable), host-built.
+add_library(mtinst STATIC ${CMAKE_SOURCE_DIR}/mac/installer/inst_plan.c ${CMAKE_SOURCE_DIR}/mac/installer/inst_exec.c)
 target_include_directories(mtinst PUBLIC ${CMAKE_SOURCE_DIR}/mac/installer)
 target_link_libraries(mtinst PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtinst)

@@ -2,6 +2,9 @@
 # Build Classic Mac targets inside the Retro68 container. Usage: build-mac.sh [target]
 # Retro68's add_application(Foo ...) makes target Foo (the 68k code) plus Foo_APPL
 # (the MacBinary Foo.bin); for an application target we build both.
+# Build order: the installer (target MoofInstaller -> build-mac/installer/MoofTCP Installer.bin) embeds
+# build-mac/moof/MoofTCP.bin, and CMake builds MoofTCP first (mac/installer/CMakeLists.txt), so
+# `build-mac.sh MoofInstaller` alone is enough.
 set -e
 cd "$(dirname "$0")/.."
 R68_TOOLCHAIN=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.cmake
