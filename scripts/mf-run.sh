@@ -7,7 +7,8 @@
 #     --long A|B   which copy runs long (default A: MfEchoA, launched first, T120; the other T30 + a UDP
 #                  stream); B = the first-launched one quits and the second keeps going
 #     --pending    the short one quits with an async TCPRcv + UDPRead (completion routines) and ASRs
-#                  installed, and the host answers 3 s after the quit (MfEcho option P, testnet "LATE")
+#                  installed; the host answers "LATE" after MF_LATE_MS (default 50) ms, i.e. right around the
+#                  quit, so the input path's check (not the 250 ms timer) does the forgetting (MfEcho option P)
 #     --release    the short one releases its streams before quitting (default: it quits with them live,
 #                  so the driver's per-application cleanup must forget them)
 #     --keep-disk  do not run fresh-disk.sh / install-moof.sh
@@ -49,7 +50,7 @@ scripts/build-mac.sh MoofDiag >/dev/null
 
 started_testnet=""
 if ! (exec 3<>/dev/tcp/127.0.0.1/$((base + 7))) 2>/dev/null; then
-  scripts/testnet.py --base "$base" > "$out/testnet.log" 2>&1 &
+  scripts/testnet.py --base "$base" --late-ms "${MF_LATE_MS:-50}" > "$out/testnet.log" 2>&1 &
   started_testnet=$!
   sleep 1
 fi
@@ -194,8 +195,10 @@ grep -h "^RESULT" "$out/$L.out.txt" "$out/$S.out.txt"
 shandle="$(sed -n "s/^TCPCreate 0 stream \([0-9a-f]*\).*/\1/p" "$out/$S.out.txt")"
 # the short copy's own table line for that stream: handle + rbuf + A5 + connection serial (conn moves on
 # at every open and at every forget), so a later stream in the same slot can never match it
-sline="$(sed -n '/^connected: goodbye/,/^[^ ]/p' "$out/$S.out.txt" | grep "handle $shandle " | head -1 | sed 's/^ *tcp\[[0-9]*\] //')"
+sline="$(sed -n '/^connected: goodbye/,/^t[0-9]/p' "$out/$S.out.txt" | grep "handle $shandle " | head -1 | sed 's/^ *tcp\[[0-9]*\] //' || true)"
 tail -n 30 "$out/$L.out.txt" | grep "^end: goodbye" || true
+# which path forgot the short copy: the long copy logs the sweep counters every 10 s
+grep -E "^(connected|t[0-9]+ ok[0-9]+ bad[0-9]+|end): swept" "$out/$L.out.txt" | sed "s/^/  /" || true
 ok=1
 grep -q "^RESULT PASS" "$out/$L.out.txt" || { echo "FAIL: the long copy lost echoes"; ok=""; }
 [ -n "$sline" ] || { echo "FAIL: the short copy's stream line was not found"; ok=""; }
@@ -212,7 +215,7 @@ if [ -n "$pend" ]; then
   grep -h "^pending\|^TCPSend LATE\|^UDPWrite LATE" "$out/$S.out.txt" || true
   grep -q "late burst sent" "$out/testnet.log" 2>/dev/null && echo "host: late burst sent after the quit" || echo "host: (shared testnet, no log)"
   if [ -n "$mf" ]; then
-    grep -E "^(owners|tcp\[|udp\[)" "$out/MoofDiag.out.txt" || true
+    grep -E "^(owners|swept|tcp\[|udp\[)" "$out/MoofDiag.out.txt" || true
     grep -q "^owners: .* gone [1-9]" "$out/MoofDiag.out.txt" || { echo "FAIL: MoofDiag shows no gone owner"; ok=""; }
   fi
 fi

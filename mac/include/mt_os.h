@@ -142,7 +142,9 @@ int  mt_os_app_mem(MtAppMem *m);
  * words, no Toolbox call: legal at interrupt time. */
 #ifdef MT_OS_MAC
 static inline int mt_os_app_alive(const MtAppMem *m) {   /* one load: per frame while owners exist */
-    return *(volatile const uint32_t *)((m->lo & 0x00FFFFFFu) - 8u) == m->h0;
+    uint32_t lo = *(volatile const MacPtr32 *)&m->lo;    /* one snapshot: a slot cleared under us reads 0 */
+    if (!lo) return 0;
+    return *(volatile const uint32_t *)((lo & 0x00FFFFFFu) - 8u) == m->h0;
 }
 #else
 int  mt_os_app_alive(const MtAppMem *m);

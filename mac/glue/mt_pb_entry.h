@@ -38,7 +38,11 @@ void    mt_entry_init(MtEntry *e, struct MtDrv *d, MtGate *g);
 int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq);
 /* MultiFinder per-application cleanup (Plan 3 Task 12): mt_pb_sweep with the entry's queues. note = the
  * current call is a task-time application call (its partition is recorded). The timer calls it with 0. */
-void    mt_entry_sweep(MtEntry *e, int note);
+enum { MT_SWEEP_CALL = 0, MT_SWEEP_TIMER = 1, MT_SWEEP_RX = 2 };   /* who swept (MtDrv.n_gone_*) */
+int     mt_entry_sweep(MtEntry *e, int note, int why);
+/* The input path (why MT_SWEEP_RX) and the timer (MT_SWEEP_TIMER) call this before the core: 0 = an
+ * owner is gone and could not be swept now: drop the frame / skip the tick (MtDrv.n_dead_drops). */
+int     mt_entry_core_ok(MtEntry *e, int why);
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
 void    mt_entry_drain(MtEntry *e);
 

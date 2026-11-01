@@ -233,6 +233,8 @@ struct MtDrv {
     uint32_t  n_own_gone;       /* owners found gone and swept */
     uint32_t  n_own_full;       /* callers not recorded: the table was full (their objects are never swept) */
     uint32_t  n_dead_calls;     /* routines of a gone owner not called (the sweep had not run yet) */
+    uint32_t  n_dead_drops;     /* frames dropped / ticks skipped: an owner was gone and the sweep could not run */
+    uint32_t  n_gone_call, n_gone_timer, n_gone_rx;   /* owners swept from a Control entry / the timer / the input path */
     uint8_t   n_own;            /* used entries of own[] */
     uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
 };
@@ -282,6 +284,11 @@ int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem 
 /* 1 while every recorded owner's partition header is unchanged (the input path's per-frame check,
  * no gate needed: reads only). */
 int      mt_pb_owners_alive(const MtDrv *d);
+
+/* Owner table slots are written so that a reader without the gate (quiet() at task time, the input
+ * path) sees either a whole owner or an empty slot: a new owner's lo is stored LAST, a dropped owner's
+ * lo is cleared FIRST (compiler barriers between), readers snapshot lo once and treat 0 as empty, and
+ * every reader loop is bounded by MT_PB_OWNERS (n_own is only a hint). */
 
 /* The one table each for core -> MacTCP codes (exported so every row is tested). */
 uint16_t mt_pb_event_code(int core_ev);        /* mt_tcp_event -> TCP ASR eventCode, 0 = none */

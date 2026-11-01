@@ -3,6 +3,12 @@
 #include <string.h>
 #include "mt_pb.h"
 
+#if defined(__GNUC__)
+#define OWN_BARRIER() __asm__ volatile("" ::: "memory")
+#else
+#define OWN_BARRIER() ((void)0)
+#endif
+
 #define DRV_ROUND(n) (((n) + 7u) & ~7u)   /* the core arena starts 8-aligned after the MtDrv */
 
 uint32_t mt_pb_size(const mt_limits *lim) {
@@ -234,9 +240,20 @@ void mt_pb_forget(MtDrv *d, const MtAppMem *m) {
     mt_os_irq_restore(sv);
 }
 
+/* See mt_pb.h "Owner table slots": lo first, so a concurrent reader sees an empty slot. */
 static void own_drop(MtDrv *d, uint8_t i) {
-    memset(&d->own[i], 0, sizeof d->own[i]);
-    d->n_own--;
+    *(volatile MacPtr32 *)&d->own[i].lo = 0;
+    OWN_BARRIER();
+    d->own[i].hi = d->own[i].h0 = d->own[i].name = 0;
+    if (d->n_own) d->n_own--;
+}
+static void own_set(MtDrv *d, uint8_t i, const MtAppMem *m) {
+    d->own[i].hi = m->hi;
+    d->own[i].h0 = m->h0;
+    d->own[i].name = m->name;
+    OWN_BARRIER();
+    *(volatile MacPtr32 *)&d->own[i].lo = m->lo;    /* last: the slot becomes visible whole */
+    d->n_own++;
 }
 
 /* Goodbye kiss: the current application (its partition under MultiFinder, else ApplZone..BufPtr). */
@@ -276,10 +293,10 @@ static int same(const MtAppMem *a, const MtAppMem *b) {
  * overlapping the caller, and the caller (if any) already recorded. */
 static int quiet(const MtDrv *d, const MtAppMem *cur) {
     const MtAppMem *o = d->own;
-    uint8_t left = d->n_own;
+    uint8_t left = d->n_own, i;
     int known = 0;
-    for (; left; o++) {                          /* stops after the n_own occupied slots */
-        if (!o->lo) continue;
+    for (i = 0; left && i < MT_PB_OWNERS; i++, o++) {   /* bounded: n_own is only a hint */
+        if (!*(volatile const MacPtr32 *)&o->lo) continue;
         left--;
         if (cur && same(o, cur)) { known = 1; continue; }
         if (!mt_os_app_alive(o) || (cur && overlaps(o, cur))) return 0;
@@ -291,9 +308,9 @@ static int quiet(const MtDrv *d, const MtAppMem *cur) {
  * partition still there? Inline header loads only; the full sweep runs when one is gone. */
 int mt_pb_owners_alive(const MtDrv *d) {
     const MtAppMem *o = d->own;
-    uint8_t left = d->n_own;
-    for (; left; o++) {
-        if (!o->lo) continue;
+    uint8_t left = d->n_own, i;
+    for (i = 0; left && i < MT_PB_OWNERS; i++, o++) {
+        if (!*(volatile const MacPtr32 *)&o->lo) continue;
         left--;
         if (!mt_os_app_alive(o)) return 0;
     }
@@ -340,8 +357,7 @@ int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), 
     }
     if (part && !known) {
         if (fr < MT_PB_OWNERS) {
-            d->own[fr] = cur;
-            d->n_own++;
+            own_set(d, fr, &cur);
         } else {
             d->n_own_full++;
         }

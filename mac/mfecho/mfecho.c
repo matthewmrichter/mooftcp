@@ -72,6 +72,8 @@ static void tables(const char *tag)
     os_out("%s: goodbye %lu forced %lu dropped %lu owners %u gone %lu full %lu dead-calls %lu\r", tag,
            (unsigned long)gb, (unsigned long)gf, (unsigned long)dr, d->n_own, (unsigned long)d->n_own_gone,
            (unsigned long)d->n_own_full, (unsigned long)d->n_dead_calls);
+    os_out("%s: swept call %lu timer %lu rx %lu dead-drops %lu\r", tag, (unsigned long)d->n_gone_call,
+           (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx, (unsigned long)d->n_dead_drops);
     for (i = 0; i < MT_PB_OWNERS; i++)
         if (d->own[i].lo)
             os_out("  owner[%u] %08lx-%08lx hdr %08lx\r", i, (unsigned long)d->own[i].lo,

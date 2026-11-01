@@ -78,10 +78,24 @@ static int ncompl(const void *pb) {
 static void tick(uint32_t ms) {
     pbf_now += ms;
     g_g.depth++;
-    mt_entry_sweep(&g_e, 0);
-    mt_entry_drain(&g_e);
-    mt_pb_tick(g_x.d);
+    mt_entry_sweep(&g_e, 0, MT_SWEEP_TIMER);
+    if (!g_x.d->n_own || mt_entry_core_ok(&g_e, MT_SWEEP_TIMER)) {
+        mt_entry_drain(&g_e);
+        mt_pb_tick(g_x.d);
+    }
     g_g.depth--;
+}
+/* The input path's check (mt_drv.c rx_cb), optionally while an application routine runs (glue depth
+ * 1, gate free: an Ethernet interrupt took the gate). 1 = the frame may be delivered. */
+static int rx_check(int depth) {
+    int ok;
+    uint8_t sv = g_x.d->depth;
+    g_g.depth++;
+    g_x.d->depth = (uint8_t)depth;
+    ok = !g_x.d->n_own || mt_entry_core_ok(&g_e, MT_SWEEP_RX);
+    g_x.d->depth = sv;
+    g_g.depth--;
+    return ok;
 }
 
 /* TCPCreate (buffer, ASR in the current partition) + ActiveOpen to the peer + SYN-ACK. */
@@ -595,6 +609,98 @@ static void sweep_waits_for_glue_frames(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* Fix round 2 (1): a frame that arrives while an application routine runs (glue depth 1, gate free)
+ * when an owner is gone cannot sweep; it is dropped, never delivered into the dead partition. The next
+ * frame at depth 0 sweeps and is delivered. The timer skips its core work the same way. */
+static void frame_dropped_when_dead_owner_cannot_be_swept(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    pbf_mf_quit(b);
+    to(a);
+    T_EQ(rx_check(1), 0);                                 /* dropped */
+    T_EQ(g_x.d->n_dead_drops, 1);
+    T_EQ(g_x.d->n_own_gone, 0);
+    g_x.d->depth = 1;                                     /* the timer during that routine: no core work */
+    g_g.depth++;
+    T_EQ(mt_entry_core_ok(&g_e, MT_SWEEP_TIMER), 0);
+    g_g.depth--;
+    g_x.d->depth = 0;
+    T_EQ(g_x.d->n_dead_drops, 2);
+    T_EQ(rx_check(0), 1);                                 /* routine done: swept, delivered */
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_gone_rx, 1);
+    T_EQ(status(sb), invalidStreamPtr);
+    T_CHECK(echoes(sa, &ca, "ok"));
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 2 (2): an interrupt sweep that drops owners while a gateless reader (quiet() at task
+ * time, the input path's check) walks the table: the readers stop at MT_PB_OWNERS and never read a
+ * torn slot (fails on the loops bounded only by n_own). */
+static void concurrent_drop(void) { mt_pb_sweep(g_x.d, 0, NULL, NULL); }
+static void readers_survive_concurrent_owner_drop(void) {
+    int a, b, c, pass;
+    pbt_conn ca, cb, cc;
+    for (pass = 0; pass < 2; pass++) {
+        msetup();
+        a = launch();
+        T_CHECK(est(&ca) != 0);
+        b = launch();
+        T_CHECK(est(&cb) != 0);
+        c = launch();
+        T_CHECK(est(&cc) != 0);
+        T_EQ(g_x.d->n_own, 3);
+        pbf_mf_quit(b);
+        pbf_mf_quit(c);
+        to(a);
+        pbf_own_tab = g_x.d->own;
+        pbf_alive_hook = concurrent_drop;                 /* fires inside the first alive check */
+        if (pass == 0) {
+            T_EQ(mt_pb_sweep(g_x.d, 1, NULL, NULL), 0);   /* quiet() at task time, then the full path */
+        } else {
+            T_EQ(mt_pb_owners_alive(g_x.d), 1);           /* the input path's check */
+        }
+        T_CHECK(pbf_alive_hook == NULL);                  /* the "interrupt" did run */
+        T_EQ(g_x.d->n_own, 1);
+        T_EQ(pbf_bad, 0);
+        pbf_own_tab = NULL;
+    }
+}
+
+/* Fix round 2 (3): the same application relaunched into the identical block before a sweep (the
+ * documented limit) has overwritten the old app's pending TCPRcv PB; data for the old stream must not
+ * make the glue fill a PB that no longer looks like a read (it was a NULL memcpy). */
+static void rewritten_pending_pb_is_never_filled(void) {
+    int b, c;
+    pbt_conn cb;
+    StreamPtr sb;
+    TCPiopb *rb;
+    MacPtr32 blo;
+    uint32_t bname;
+    msetup();
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sb != 0);
+    rb = rcv(sb, 32);
+    T_EQ(rb->ioResult, inProgress);
+    blo = pbf_parts[b].lo;
+    bname = pbf_parts[b].name;
+    pbf_mf_quit(b);
+    pbf_mf_forget(b);
+    c = pbf_mf_launch_at(blo, PART, bname);               /* zeroes the old PB: csCode 0, no buffer */
+    (void)c;
+    pbt_peer(&g_x, cb.lport, cb.ps, cb.ms, TF_ACK | TF_PSH, 8192, "late", 4);
+    T_EQ(ncompl(rb), 0);
+    T_EQ(pbf_bad, 0);
+}
+
 /* ---- randomized: up to three applications launching, calling, quitting without a goodbye, a new one
  * reusing a dead one's memory, data for every connection (also the dead ones' before the sweep), ticks.
  * Invariants: no routine or PB of a quit partition is ever run (pbf_dead_calls), after a sweep tick no
@@ -668,12 +774,18 @@ static int pick_live(void) {
     return -1;
 }
 
-/* The driver's input path (mt_drv.c rx_cb): before every frame while owners exist. */
-static void rx(void) {
-    g_g.depth++;
-    if (g_x.d->n_own && !mt_pb_owners_alive(g_x.d)) mt_entry_sweep(&g_e, 0);
-    g_g.depth--;
+/* The driver's input path (mt_drv.c rx_cb): before every frame while owners exist; half of the
+ * frames arrive while some application routine runs (depth 1: the sweep cannot run, the frame must
+ * then be dropped). rx() checks; rx_end() restores depth after the delivery. */
+static int g_rxdepth;
+static int rx(void) {
+    int ok;
+    g_rxdepth = (int)rn(2);
+    ok = rx_check(g_rxdepth);
+    if (ok && g_rxdepth) g_x.d->depth = 1;       /* the frame is delivered inside that routine's time */
+    return ok;
 }
+static void rx_end(void) { g_x.d->depth = 0; }
 /* The quit: MultiFinder frees the partition (no goodbye); from now on nothing may write into it. */
 static void fquit(int a, int step) {
     pbf_mf_quit(F[a].part);
@@ -732,9 +844,9 @@ static void fuzz_one(uint32_t seed) {
             break;
         case 4: {                                          /* data for any connection, dead ones too */
             int b = (int)rn((uint32_t)g_nf), k = (int)rn(FS);
-            if (F[b].s[k]) {
-                rx();
+            if (F[b].s[k] && rx()) {
                 pbt_peer(&g_x, F[b].c[k].lport, F[b].c[k].ps, F[b].c[k].ms, TF_ACK | TF_PSH, 8192, "datadata", 8);
+                rx_end();
                 F[b].c[k].ps += 8;
             }
             break;
@@ -742,15 +854,14 @@ static void fuzz_one(uint32_t seed) {
         case 5:
             if (!F[a].u) ucreate(&F[a].u, &F[a].uport);
             else if (rn(2)) (void)uread(F[a].u);
-            else { rx(); pbt_udp_in(&g_x, 9, F[a].uport, "u", 1); }
+            else if (rx()) { pbt_udp_in(&g_x, 9, F[a].uport, "u", 1); rx_end(); }
             break;
         case 6:
             (void)echo(T_PEER);
             if (rn(2)) {
                 uint16_t id, sq;
                 last_echo(&id, &sq);
-                rx();
-                pbt_echo_reply(&g_x, T_PEER, id, sq, NULL, 0);
+                if (rx()) { pbt_echo_reply(&g_x, T_PEER, id, sq, NULL, 0); rx_end(); }
             }
             break;
         case 7:
@@ -820,5 +931,6 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        sweep_with_loans_dns_echo_of_both_apps, new_app_in_dead_apps_partition_is_not_the_old_owner,
        identical_relaunch_before_a_sweep_is_not_detected, classic_system6_records_no_owner,
        different_app_in_identical_block_is_told_apart, echo_without_notify_is_capped,
-       timer_sweep_bailing_does_not_spin,
+       timer_sweep_bailing_does_not_spin, frame_dropped_when_dead_owner_cannot_be_swept,
+       readers_survive_concurrent_owner_drop, rewritten_pending_pb_is_never_filled,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)

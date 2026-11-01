@@ -48,9 +48,29 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* MultiFinder per-application cleanup (mt_pb_sweep): from every Control entry (note = a task-time
  * call: record the caller's partition) and from the timer. Skipped while the gate is held by a frame
  * below us or a glue frame is active (mt_pb_sweep checks the latter). */
-void mt_entry_sweep(MtEntry *e, int note) {
-    if (!note && !e->d->n_own) return;
-    mt_pb_sweep(e->d, note, drop_queues, e);
+int mt_entry_sweep(MtEntry *e, int note, int why) {
+    MtDrv *d = e->d;
+    int n;
+    if (!note && !d->n_own) return 0;
+    n = mt_pb_sweep(d, note, drop_queues, e);
+    if (why == MT_SWEEP_RX) d->n_gone_rx += (uint32_t)n;
+    else if (why == MT_SWEEP_TIMER) d->n_gone_timer += (uint32_t)n;
+    else d->n_gone_call += (uint32_t)n;
+    return n;
+}
+
+/* Before the core runs from the input path or the timer: 1 = go on. If an owner's partition is gone
+ * and the sweep cannot forget it now (a glue frame is active: an application routine runs with the
+ * gate free and an interrupt took it), the frame is dropped / the tick skipped (counted): the core
+ * would otherwise write into (or send from) the freed partition. TCP retransmits; the next entry,
+ * frame or tick (MT_PB_SWEEP_RETRY_MS) sweeps. */
+int mt_entry_core_ok(MtEntry *e, int why) {
+    MtDrv *d = e->d;
+    if (!d->n_own || mt_pb_owners_alive(d)) return 1;
+    mt_entry_sweep(e, 0, why);
+    if (mt_pb_owners_alive(d)) return 1;
+    d->n_dead_drops++;
+    return 0;
 }
 
 static void goodbye(MtEntry *e) {
@@ -108,8 +128,8 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     }
     /* MultiFinder sends no goodbye kiss when an application quits: notice gone partitions here (and
      * from the timer). Only a task-time call outside any frame of ours names its caller reliably. */
-    if (!irq && !e->gate->depth) mt_entry_sweep(e, 1);
-    else if (e->d->n_own && !e->gate->depth) mt_entry_sweep(e, 0);
+    if (!irq && !e->gate->depth) mt_entry_sweep(e, 1, MT_SWEEP_CALL);
+    else if (e->d->n_own && !e->gate->depth) mt_entry_sweep(e, 0, MT_SWEEP_CALL);
     if (cs == 1) {                               /* killCode (KillIO): nothing of ours is queued */
         pb->hdr.ioResult = 0;                    /* in the Device Manager; MacTCP answers 0 (120.1) */
         return 0;

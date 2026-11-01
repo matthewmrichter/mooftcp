@@ -10,7 +10,7 @@
     base+19  burst    sends 5000 bytes (pattern A..Z), then closes (clean FIN)
     base+37  reset    sends "x", then closes with RST
     base+7/udp, base+9/udp   UDP echo / UDP discard (used by mac/apiprobe)
-    "LATE" on the TCP or UDP echo: instead of echoing at once, the host waits 3 s, then sends 20 x 200 bytes
+    "LATE" on the TCP or UDP echo: instead of echoing at once, the host waits --late-ms (default 3000), then sends 20 x 200 bytes
     (TCP; the connection stays open) or echoes the datagram (UDP): data that arrives after a MultiFinder
     application quit with reads pending (mac/mfecho option P, Plan 3 Task 12)
 
@@ -27,6 +27,7 @@ import struct
 import threading
 
 BANNER = b"MoofTCP test host\r\nlogin: "
+LATE_S = 3.0      # --late-ms
 
 
 def log(msg):
@@ -63,7 +64,7 @@ class Service(socketserver.BaseRequestHandler):
                             log(f"{self.name}:{port} {peer} late burst sent (4000 bytes)")
                         except OSError as e:
                             log(f"{self.name}:{port} {peer} late burst error {e}")
-                    threading.Timer(3.0, late).start()
+                    threading.Timer(LATE_S, late).start()
                 elif self.echo:
                     self.request.sendall(data)
         except OSError as e:
@@ -159,7 +160,7 @@ def udp_service(bind, port, echo):
                 except OSError as e:
                     log(f"udp:{port} send error {e}")
             if data.startswith(b"LATE"):
-                threading.Timer(3.0, send).start()
+                threading.Timer(LATE_S, send).start()
             else:
                 send()
 
@@ -178,7 +179,10 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0", help="address to listen on (default 0.0.0.0)")
     ap.add_argument("--base", type=int, default=17000, help="base port (default 17000)")
     ap.add_argument("--only", default="", help="comma list of port offsets to serve (e.g. 13,19,37); default all")
+    ap.add_argument("--late-ms", type=int, default=3000, help="delay of the answer to LATE (default 3000)")
     args = ap.parse_args()
+    global LATE_S
+    LATE_S = args.late_ms / 1000.0
     only = {int(x) for x in args.only.split(",") if x}
 
     servers = []

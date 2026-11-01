@@ -60,6 +60,8 @@ void pbf_reset(void) {
     g_names = 0;
     memset(pbf_parts, 0, sizeof pbf_parts);
     pbf_dead_calls = 0;
+    pbf_own_tab = NULL;
+    pbf_alive_hook = NULL;
     g_ncode = 0;
     pbf_now = 1000;
 }
@@ -291,11 +293,27 @@ int mt_os_app_mem(MtAppMem *m) {
     return pbf_app_part != 0;
 }
 
+const void *pbf_own_tab;
+void (*pbf_alive_hook)(void);
+
 int mt_os_app_alive(const MtAppMem *m) {
     int i;
+    MacPtr32 lo;
+    if (pbf_own_tab && ((const void *)m < pbf_own_tab ||
+                        (const void *)m >= (const void *)((const MtAppMem *)pbf_own_tab + MT_PB_OWNERS))) {
+        pbf_bad++;                              /* a reader ran past the owner table */
+        return 0;
+    }
+    if (pbf_alive_hook) {                       /* an "interrupt" right inside the check */
+        void (*h)(void) = pbf_alive_hook;
+        pbf_alive_hook = NULL;
+        h();
+    }
+    lo = m->lo;                                 /* one snapshot, as the Mac's inline version */
+    if (!lo) return 0;
     for (i = 0; i < PBF_PARTS; i++) {
         const pbf_part *p = &pbf_parts[i];
-        if (p->live && p->lo == m->lo && p->h0 == m->h0) return 1;
+        if (p->live && p->lo == lo && p->h0 == m->h0) return 1;
     }
     return 0;
 }

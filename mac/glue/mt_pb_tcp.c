@@ -313,6 +313,15 @@ static void loans_consume(MtStream *s) {
     mt_tcp_consume(s->t, n, s->d->now);
 }
 
+/* A queued read PB still looks like the one do_rcv accepted (csCode, buffer pointers): a PB whose
+ * application quit and whose memory was reused before the sweep may have been overwritten. */
+static int rcv_pb_sane(const MtAnyPb *pb) {
+    if (pb->hdr.csCode == TCPRcv) return pb->tcp.csParam.receive.rcvBuff && pb->tcp.csParam.receive.rcvBuffLen;
+    if (pb->hdr.csCode == TCPNoCopyRcv)
+        return pb->tcp.csParam.receive.rdsPtr && pb->tcp.csParam.receive.rdsLength >= 2;
+    return 0;
+}
+
 /* Can the head read be served now (data there, and a loan slot if one is needed)? */
 static int can_serve(const MtStream *s, const MtAnyPb *pb) {
     if (pb->hdr.csCode == TCPRcv && s->loan_n == 0) return 1;
@@ -431,6 +440,7 @@ static int serve_reads(MtStream *s, int *served) {
         MtAnyPb *pb;
         if (s->d->n_own && mt_pb_gone(s->d, mt_os_addr(s->rq[0].pb))) break;   /* its app quit: the sweep forgets it */
         pb = rq_take(s, 0);
+        if (!rcv_pb_sane(pb)) continue;          /* rewritten under us (its memory was reused): drop, never fill */
         if (pb->hdr.csCode == TCPRcv) rcv_copy(s, pb);
         else rcv_nocopy(s, pb);
         complete(s, pb, 0);

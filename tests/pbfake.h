@@ -62,6 +62,8 @@ extern int pbf_app_part;
 extern uint32_t pbf_app_h0, pbf_app_name;   /* name: what mt_os_app_mem reports as the CurApName hash */
 extern pbf_part pbf_parts[PBF_PARTS];
 extern int pbf_dead_calls;
+extern const void *pbf_own_tab;   /* set: mt_os_app_alive flags (pbf_bad) any MtAppMem outside this MT_PB_OWNERS table */
+extern void (*pbf_alive_hook)(void);   /* run once inside the next mt_os_app_alive (a concurrent interrupt) */
 int      pbf_mf_launch(uint32_t size);
 int      pbf_mf_launch_at(MacPtr32 lo, uint32_t size, uint32_t name);   /* name 0: a new application */
 uint32_t pbf_mf_left(int i);     /* bytes pbf_mf_alloc can still give in partition i */
