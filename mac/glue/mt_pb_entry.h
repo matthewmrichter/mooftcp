@@ -43,6 +43,8 @@ int     mt_entry_sweep(MtEntry *e, int note, int why);
 /* The input path (why MT_SWEEP_RX) and the timer (MT_SWEEP_TIMER) call this before the core: 0 = an
  * owner is gone and could not be swept now: drop the frame / skip the tick (MtDrv.n_dead_drops). */
 int     mt_entry_core_ok(MtEntry *e, int why);
+/* mt_entry_drain only when mt_entry_core_ok allows (the timer and the gate's after-callback). */
+void    mt_entry_drain_ok(MtEntry *e, int why);
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
 void    mt_entry_drain(MtEntry *e);
 

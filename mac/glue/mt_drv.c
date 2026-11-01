@@ -90,14 +90,15 @@ static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if (r->d->n_own && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner not yet
-                                                 * forgotten: no core work that could touch its memory */
+                                                 * forgotten: no core work (no drain either) */
     mt_entry_drain(&r->entry);
     mt_pb_tick(r->d);
 }
 
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    mt_entry_drain(&r->entry);
+    mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
+                                                 * is still recorded (its queued PBs are not dropped yet) */
     mt_enet_watchdog(&r->enet, mt_os_ms());      /* idle: one compare */
     mt_timer_arm_deadline(&r->timer, mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d)));
 }

@@ -235,6 +235,9 @@ struct MtDrv {
     uint32_t  n_dead_calls;     /* routines of a gone owner not called (the sweep had not run yet) */
     uint32_t  n_dead_drops;     /* frames dropped / ticks skipped: an owner was gone and the sweep could not run */
     uint32_t  n_gone_call, n_gone_timer, n_gone_rx;   /* owners swept from a Control entry / the timer / the input path */
+    MtAppMem  co_own;           /* owner of the routine running at depth 1 (lo 0 = none recorded): if it is gone,
+                                 * that routine will never return (Task 12 round 3, mt_pb_unstick) */
+    uint32_t  n_unstuck;        /* glue (and gate) frames abandoned because their routine's application is gone */
     uint8_t   n_own;            /* used entries of own[] */
     uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
 };
@@ -281,6 +284,17 @@ int      mt_pb_in_app(const MtAppMem *m, MacPtr32 p);
  * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
  * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
 int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
+/* A routine (completion / ASR) whose application quits from inside it (ExitToShell, a MultiFinder
+ * force quit) never returns: depth (and co_gate, in_core) stay set and every sweep would bail. When the
+ * outermost routine starts, the glue records its owner (co_lo / co_h0, from the PB, its completion or
+ * the ASR address); if depth != 0 and that owner is gone, mt_pb_unstick clears depth, co_gate and
+ * in_core (as the goodbye kiss does for ExitToShell from a routine) and returns 1; a routine of a live
+ * application (merely slow, or hung) is never reset. The driver entry also clears the gate (it can be
+ * held by the abandoned frames). */
+int      mt_pb_unstick(MtDrv *d, const MtAppMem *cur);   /* cur: the task-time caller with the gate free
+                                 * (or NULL): a different application than the routine's owner proves the
+                                 * routine abandoned (no process switch inside a routine) */
+
 /* 1 while every recorded owner's partition header is unchanged (the input path's per-frame check,
  * no gate needed: reads only). */
 int      mt_pb_owners_alive(const MtDrv *d);

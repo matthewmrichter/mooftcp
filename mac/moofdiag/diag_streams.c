@@ -17,9 +17,9 @@ void diag_streams(const void *drv, void (*line)(const char *s))
     snprintf(b, sizeof b, "owners: %u recorded, gone %lu, not recorded (table full) %lu, routines of gone apps skipped %lu\r",
              d->n_own, (unsigned long)d->n_own_gone, (unsigned long)d->n_own_full, (unsigned long)d->n_dead_calls);
     line(b);
-    snprintf(b, sizeof b, "swept: by a Control call %lu, by the timer %lu, by the input path %lu; frames/ticks dropped (owner gone, sweep busy) %lu\r",
+    snprintf(b, sizeof b, "swept: by a Control call %lu, by the timer %lu, by the input path %lu; frames/ticks dropped (owner gone, sweep busy) %lu; routine frames abandoned (app quit inside it) %lu; depth %u\r",
              (unsigned long)d->n_gone_call, (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx,
-             (unsigned long)d->n_dead_drops);
+             (unsigned long)d->n_dead_drops, (unsigned long)d->n_unstuck, d->depth);
     line(b);
     for (i = 0; i < MT_PB_OWNERS; i++)
         if (d->own[i].lo) {

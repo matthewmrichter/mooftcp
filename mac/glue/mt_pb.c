@@ -40,10 +40,45 @@ void mt_pb_set_config(MtDrv *d, const mt_ifconfig *c) {
  * Every call into application code goes through these two, so depth says whether any glue
  * frame is below us: a TCPRelease made from inside one defers the core release (decision 3). */
 
+/* The owner of the routine that is about to run as the outermost one (see mt_pb_unstick). */
+static void co_note(MtDrv *d, MacPtr32 a, MacPtr32 b) {
+    uint8_t i;
+    d->co_own.lo = 0;
+    if (!d->n_own) return;
+    for (i = 0; i < MT_PB_OWNERS; i++) {
+        const MtAppMem *o = &d->own[i];
+        if (o->lo && ((a && mt_pb_in_app(o, a)) || (b && mt_pb_in_app(o, b)))) {
+            d->co_own = *o;
+            return;
+        }
+    }
+}
+
+static int same(const MtAppMem *a, const MtAppMem *b);
+
+int mt_pb_unstick(MtDrv *d, const MtAppMem *cur) {
+    const MtAppMem *o = &d->co_own;
+    if (!d->depth || !o->lo) return 0;
+    /* cur is given only for a task-time call with the gate free. Task-time code runs only in the current
+     * process, and a process switch cannot happen inside a routine: a DIFFERENT current application
+     * calling while depth != 0 proves the routine's frames abandoned (its app quit inside it), even if
+     * a new partition of the same size now sits in its place. The same application calling is a call
+     * from inside its own routine (a call-out). Otherwise only a changed partition header counts. */
+    if (mt_os_app_alive(o) && !(cur && !same(o, cur)))
+        return 0;                               /* alive (slow or hung): never reset */
+    d->depth = 0;
+    d->co_gate = 0;
+    d->in_core = 0;
+    d->co_own.lo = 0;
+    d->n_unstuck++;
+    return 1;
+}
+
 void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     uint8_t sv = d->co_gate;
     if (d->n_own && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
         return;                                 /* its application quit (MultiFinder): the sweep forgets it */
+    if (!d->depth) co_note(d, mt_os_addr(pb), pb->hdr.ioCompletion);
     d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;
     mt_os_complete(pb, err);
@@ -55,6 +90,7 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
     uint8_t sv;
     if (!a->proc) return;                       /* no notifyProc given: accepted (matrix 202b) */
     if (d->n_own && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
+    if (!d->depth) co_note(d, a->proc, 0);
     sv = d->co_gate;
     d->co_gate = (uint8_t)mt_os_gate_depth();
     d->depth++;

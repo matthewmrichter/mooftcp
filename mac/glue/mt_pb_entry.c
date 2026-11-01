@@ -48,6 +48,14 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* MultiFinder per-application cleanup (mt_pb_sweep): from every Control entry (note = a task-time
  * call: record the caller's partition) and from the timer. Skipped while the gate is held by a frame
  * below us or a glue frame is active (mt_pb_sweep checks the latter). */
+/* Queued PBs run only when the core may run (mt_entry_core_ok): a quit application's queued PBs are
+ * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
+ * (the timer and the gate's after-callback use this). */
+void mt_entry_drain_ok(MtEntry *e, int why) {
+    if (e->d->n_own && !mt_entry_core_ok(e, why)) return;
+    mt_entry_drain(e);
+}
+
 int mt_entry_sweep(MtEntry *e, int note, int why) {
     MtDrv *d = e->d;
     int n;
@@ -67,6 +75,7 @@ int mt_entry_sweep(MtEntry *e, int note, int why) {
 int mt_entry_core_ok(MtEntry *e, int why) {
     MtDrv *d = e->d;
     if (!d->n_own || mt_pb_owners_alive(d)) return 1;
+    if (d->depth) mt_pb_unstick(d, NULL);        /* a routine of the gone app never returns (round 3) */
     mt_entry_sweep(e, 0, why);
     if (mt_pb_owners_alive(d)) return 1;
     d->n_dead_drops++;
@@ -128,6 +137,18 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     }
     /* MultiFinder sends no goodbye kiss when an application quits: notice gone partitions here (and
      * from the timer). Only a task-time call outside any frame of ours names its caller reliably. */
+    /* Frames abandoned by a routine whose application quit inside it (no goodbye under MultiFinder)
+     * may still hold the gate: clear it as goodbye() does, then sweep (round 3). */
+    if ((e->gate->depth || e->d->depth) && e->d->n_own) {
+        MtAppMem cur;
+        int part = !irq && mt_os_app_mem(&cur);  /* task time: the caller names itself (task code never
+                                                 * preempts: a held gate at task time is the caller's own
+                                                 * frames or abandoned ones) */
+        if (mt_pb_unstick(e->d, part ? &cur : NULL)) {
+            e->gate->in_irq = 0;
+            e->gate->depth = 0;
+        }
+    }
     if (!irq && !e->gate->depth) mt_entry_sweep(e, 1, MT_SWEEP_CALL);
     else if (e->d->n_own && !e->gate->depth) mt_entry_sweep(e, 0, MT_SWEEP_CALL);
     if (cs == 1) {                               /* killCode (KillIO): nothing of ours is queued */

@@ -6,6 +6,7 @@
  * owners whose partition is gone (mt_os_app_alive) at every Control entry and from the timer. The fake
  * OS (tests/pbfake.h "MultiFinder model") gives each application a partition in fake memory with its own
  * header words, switches ApplZone / A5 between them and disposes of a partition without a goodbye. */
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "t.h"
@@ -90,10 +91,17 @@ static void tick(uint32_t ms) {
 static int rx_check(int depth) {
     int ok;
     uint8_t sv = g_x.d->depth;
+    if (sv) depth = -1;                          /* frames abandoned by a quit routine: keep them as they are */
     g_g.depth++;
-    g_x.d->depth = (uint8_t)depth;
+    if (depth >= 0) g_x.d->depth = (uint8_t)depth;   /* -1: as it is */
+    if (depth > 0) {                                 /* a routine of the current (live) application runs */
+        g_x.d->co_own.lo = pbf_parts[g_cur].lo;
+        g_x.d->co_own.hi = pbf_parts[g_cur].hi;
+        g_x.d->co_own.h0 = pbf_parts[g_cur].h0;
+        g_x.d->co_own.name = pbf_parts[g_cur].name;
+    }
     ok = !g_x.d->n_own || mt_entry_core_ok(&g_e, MT_SWEEP_RX);
-    g_x.d->depth = sv;
+    if (depth >= 0) g_x.d->depth = sv;
     g_g.depth--;
     return ok;
 }
@@ -173,6 +181,9 @@ static void quit_one_app_keeps_other_apps_streams(void) {
     fake_clear(&g_x.fl);
     T_EQ(status(sa), 0);                                  /* A's next call notices B is gone */
     T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_gone_call, 1);                          /* ...through the Control entry */
+    T_EQ(g_x.d->n_gone_timer, 0);
+    T_EQ(g_x.d->n_gone_rx, 0);
     T_EQ(g_x.d->n_own, 1);
     T_CHECK(rst_to(cb.lport));                            /* B's connection is reset */
     T_EQ(status(sb), invalidStreamPtr);
@@ -224,6 +235,8 @@ static void sweep_by_timer_when_nobody_calls(void) {
     to(a);
     tick(MT_PB_SWEEP_MS);
     T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_gone_timer, 1);                         /* ...through the timer */
+    T_EQ(g_x.d->n_gone_call, 0);
     T_EQ(status(sb), invalidStreamPtr);
     T_EQ(status(sa), 0);
     pbf_mf_quit(a);                                       /* the last one goes: no more periodic sweeps */
@@ -628,11 +641,14 @@ static void frame_dropped_when_dead_owner_cannot_be_swept(void) {
     T_EQ(g_x.d->n_dead_drops, 1);
     T_EQ(g_x.d->n_own_gone, 0);
     g_x.d->depth = 1;                                     /* the timer during that routine: no core work */
+    g_x.d->co_own.lo = pbf_parts[a].lo;                   /* (a routine of A, which is alive) */
+    g_x.d->co_own.h0 = pbf_parts[a].h0;
     g_g.depth++;
     T_EQ(mt_entry_core_ok(&g_e, MT_SWEEP_TIMER), 0);
     g_g.depth--;
     g_x.d->depth = 0;
     T_EQ(g_x.d->n_dead_drops, 2);
+    T_EQ(g_x.d->n_unstuck, 0);                            /* A is alive: its routine is never abandoned */
     T_EQ(rx_check(0), 1);                                 /* routine done: swept, delivered */
     T_EQ(g_x.d->n_own_gone, 1);
     T_EQ(g_x.d->n_gone_rx, 1);
@@ -698,6 +714,156 @@ static void rewritten_pending_pb_is_never_filled(void) {
     (void)c;
     pbt_peer(&g_x, cb.lport, cb.ps, cb.ms, TF_ACK | TF_PSH, 8192, "late", 4);
     T_EQ(ncompl(rb), 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 3: an application that quits from inside its own completion routine (ExitToShell, a
+ * MultiFinder force quit) never returns into the glue; depth (and, from inside a core call, the gate)
+ * stays set. The next frame / tick / Control call sees that the routine's owner is gone, abandons
+ * those frames and sweeps: the survivors' network keeps working, nothing of the quit app is written. */
+static jmp_buf g_quitjmp;
+static int g_quitpart;
+static void quit_in_routine(MtAnyPb *pb) {
+    (void)pb;
+    pbf_mf_quit(g_quitpart);
+    memset(pbf_p(pbf_parts[g_quitpart].lo), 0xC5, pbf_parts[g_quitpart].hi - pbf_parts[g_quitpart].lo);
+    longjmp(g_quitjmp, 1);                               /* never returns */
+}
+static int canary_ok(int part) {
+    const uint8_t *m = (const uint8_t *)pbf_p(pbf_parts[part].lo);
+    uint32_t i, n = pbf_parts[part].hi - pbf_parts[part].lo;
+    for (i = 0; i < n; i++) if (m[i] != 0xC5) return 0;
+    return 1;
+}
+static void quit_inside_own_routine_keeps_network_alive(void) {
+    int a, b, pass;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    for (pass = 0; pass < 2; pass++) {
+        msetup();
+        a = launch();
+        sa = est(&ca);
+        b = launch();
+        sb = est(&cb);
+        T_CHECK(sa && sb);
+        g_quitpart = b;
+        if (pass == 0) {                                  /* the entry's inline completion: gate free */
+            TCPiopb *pb = (TCPiopb *)apb(TCPStatus, sb);
+            pb->ioCompletion = pbf_mf_compl(b, quit_in_routine);
+            if (!setjmp(g_quitjmp)) { ecall(pb, 1); T_CHECK(0); }
+            T_EQ(g_x.d->depth, 1);
+            T_EQ(g_g.depth, 0);
+        } else {                                          /* inside a core call: the gate is held too */
+            TCPiopb *pb;
+            pbt_peer(&g_x, cb.lport, cb.ps, cb.ms, TF_ACK | TF_PSH, 8192, "abcdef", 6);
+            cb.ps += 6;
+            pb = (TCPiopb *)apb(TCPRcv, sb);              /* data there, some left: completed inside the call */
+            pb->csParam.receive.rcvBuff = pbf_a(pbf_mf_alloc(b, 2));
+            pb->csParam.receive.rcvBuffLen = 2;
+            pb->ioCompletion = pbf_mf_compl(b, quit_in_routine);
+            if (!setjmp(g_quitjmp)) { ecall(pb, 1); T_CHECK(0); }
+            T_EQ(g_x.d->depth, 1);
+            T_CHECK(g_g.depth > 0);                       /* abandoned frames hold the gate */
+            pbf_irq = 0;                                  /* (the fake's own nesting counters for those */
+            pbf_in_int = 0;                               /*  dead frames; the Mac has none) */
+        }
+        to(a);
+        if (pass == 0) {
+            T_EQ(rx_check(-1), 1);                        /* the next frame: abandoned, swept, delivered */
+            T_EQ(g_x.d->n_gone_rx, 1);
+        } else {
+            T_EQ(status(sa), 0);                          /* a Control call clears the gate as well */
+            T_EQ(g_g.depth, 0);
+            T_EQ(g_x.d->n_gone_call, 1);
+        }
+        T_EQ(g_x.d->n_unstuck, 1);
+        T_EQ(g_x.d->depth, 0);
+        T_EQ(g_x.d->n_own_gone, 1);
+        T_EQ(status(sb), invalidStreamPtr);
+        T_CHECK(echoes(sa, &ca, "alive"));
+        tick(MT_PB_SWEEP_MS);
+        T_CHECK(canary_ok(b));
+        T_EQ(pbf_dead_calls, 0);
+        T_EQ(pbf_bad, 0);
+    }
+}
+
+/* Fix round 3: B quits inside its routine and a DIFFERENT application of the same size lands in B's
+ * block before any check: the header looks alive. Its first task-time Control call proves the routine
+ * abandoned (task code runs only in the current process; no process switch inside a routine). */
+static void different_app_calling_unsticks_abandoned_routine(void) {
+    int a, b, c;
+    pbt_conn ca, cb, cc;
+    StreamPtr sa, sb, sc;
+    TCPiopb *pb;
+    MacPtr32 blo;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    g_quitpart = b;
+    pb = (TCPiopb *)apb(TCPStatus, sb);
+    pb->ioCompletion = pbf_mf_compl(b, quit_in_routine);
+    if (!setjmp(g_quitjmp)) { ecall(pb, 1); T_CHECK(0); }
+    T_EQ(g_x.d->depth, 1);
+    blo = pbf_parts[b].lo;
+    pbf_mf_forget(b);
+    c = pbf_mf_launch_at(blo, PART, 0);                   /* same place and size, another app */
+    g_compl[c] = pbf_mf_compl(c, compl_rec);
+    g_asr[c] = pbf_mf_asr(c, asr_rec);
+    g_cur = c;
+    T_EQ(rx_check(-1), 1);                                /* header alive: nothing proves it yet */
+    T_EQ(g_x.d->n_unstuck, 0);
+    sc = est(&cc);                                        /* C's first call */
+    T_CHECK(sc != 0);
+    T_EQ(g_x.d->n_unstuck, 1);
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(status(sb), invalidStreamPtr);
+    to(a);
+    T_CHECK(echoes(sa, &ca, "A"));
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 3 (2): the after-callback drains like the timer: while a gone owner cannot be swept (a
+ * live app's routine runs), its PBs queued in the entry are neither run nor completed; the sweep later
+ * drops them. */
+static void queued_pbs_of_gone_owner_not_drained(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    TCPiopb *q;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    q = (TCPiopb *)apb(TCPStatus, sb);                    /* queued by preemption (gate owned) */
+    g_g.depth = 1;
+    q->ioResult = inProgress;
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)q, TRAP_ASYNC, 1), 0);
+    g_g.depth = 0;
+    T_EQ(g_e.pend.queued, 1);
+    pbf_mf_quit(b);
+    to(a);
+    g_x.d->depth = 1;                                     /* a routine of A (alive) runs */
+    g_x.d->co_own.lo = pbf_parts[a].lo;
+    g_x.d->co_own.h0 = pbf_parts[a].h0;
+    g_g.depth++;
+    mt_entry_drain_ok(&g_e, MT_SWEEP_TIMER);
+    g_g.depth--;
+    T_EQ(ncompl(q), 0);
+    T_EQ(g_e.n_pend_run, 0);
+    g_x.d->depth = 0;
+    g_g.depth++;
+    mt_entry_drain_ok(&g_e, MT_SWEEP_TIMER);              /* now: swept, B's queued PB dropped */
+    g_g.depth--;
+    T_EQ(ncompl(q), 0);
+    T_EQ(g_e.n_pend_dropped, 1);
+    T_EQ(g_x.d->n_gone_timer, 1);
     T_EQ(pbf_bad, 0);
 }
 
@@ -778,14 +944,16 @@ static int pick_live(void) {
  * frames arrive while some application routine runs (depth 1: the sweep cannot run, the frame must
  * then be dropped). rx() checks; rx_end() restores depth after the delivery. */
 static int g_rxdepth;
+static uint8_t g_rxsv;
 static int rx(void) {
     int ok;
     g_rxdepth = (int)rn(2);
     ok = rx_check(g_rxdepth);
-    if (ok && g_rxdepth) g_x.d->depth = 1;       /* the frame is delivered inside that routine's time */
+    g_rxsv = g_x.d->depth;
+    if (ok && g_rxdepth && !g_rxsv) g_x.d->depth = 1;   /* the frame is delivered inside that routine's time */
     return ok;
 }
-static void rx_end(void) { g_x.d->depth = 0; }
+static void rx_end(void) { g_x.d->depth = g_rxsv; }
 /* The quit: MultiFinder frees the partition (no goodbye); from now on nothing may write into it. */
 static void fquit(int a, int step) {
     pbf_mf_quit(F[a].part);
@@ -795,7 +963,7 @@ static void fquit(int a, int step) {
     F[a].qstep = step;
 }
 
-static unsigned long g_steps, g_gone, g_deadc, g_apps;
+static unsigned long g_steps, g_gone, g_deadc, g_apps, g_inroutine, g_unstuck;
 static void fuzz_one(uint32_t seed) {
     int step, i, j;
     msetup();
@@ -873,6 +1041,20 @@ static void fuzz_one(uint32_t seed) {
         case 8:                                            /* quit: no goodbye under MultiFinder */
             fquit(a, step);
             break;
+        case 10:
+            if (rn(4) == 0) {                              /* quit from inside its own completion routine */
+                TCPiopb *pb = (TCPiopb *)apb(TCPStatus, F[a].s[j]);
+                g_quitpart = F[a].part;
+                pb->ioCompletion = pbf_mf_compl(F[a].part, quit_in_routine);
+                if (!setjmp(g_quitjmp)) { ecall(pb, 1); fbad(seed, step, "routine did not run"); return; }
+                F[a].live = 0;
+                F[a].swept = 1;                            /* quit_in_routine armed the canary */
+                F[a].qstep = step;
+                g_inroutine++;
+            } else {
+                tick(rn(300));
+            }
+            break;
         case 9:
             if (rn(6) == 0) {                              /* a goodbye kiss, then the quit */
                 T_EQ(ecall(apb(-1, 0), 0), 0);
@@ -918,10 +1100,12 @@ static void fuzz_apps(void) {
         fuzz_one(s);
         g_gone += g_x.d->n_own_gone;
         g_deadc += g_x.d->n_dead_calls;
+        g_unstuck += g_x.d->n_unstuck;
         g_apps += (unsigned long)g_nf;
     }
-    printf("fuzz_apps: %lu steps, %lu applications, %lu swept, %lu routines of quit applications skipped\n",
-           g_steps, g_apps, g_gone, g_deadc);
+    printf("fuzz_apps: %lu steps, %lu applications, %lu swept, %lu routines of quit applications skipped, "
+           "%lu quits inside a routine, %lu abandoned routine frames\n", g_steps, g_apps, g_gone, g_deadc,
+           g_inroutine, g_unstuck);
     g_lax = 0;
     T_EQ(g_fail, 0);
 }
@@ -933,4 +1117,6 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        different_app_in_identical_block_is_told_apart, echo_without_notify_is_capped,
        timer_sweep_bailing_does_not_spin, frame_dropped_when_dead_owner_cannot_be_swept,
        readers_survive_concurrent_owner_drop, rewritten_pending_pb_is_never_filled,
+       quit_inside_own_routine_keeps_network_alive, queued_pbs_of_gone_owner_not_drained,
+       different_app_calling_unsticks_abandoned_routine,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)

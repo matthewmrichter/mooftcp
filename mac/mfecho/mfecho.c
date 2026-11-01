@@ -7,6 +7,9 @@
  *         per-application cleanup must forget it)
  *   B<n>  testnet.py port base (echo at n+7; default 17000)
  *   U     also create a UDP stream (it stays live until the quit)
+ *   X     quit from INSIDE a completion routine (Task 12 round 3): the last call is an async TCPStatus whose
+ *         completion routine (run inline by the driver at task time) calls ExitToShell, so the driver's
+ *         frames for that routine never return
  *   P     quit with work pending (Task 12 fix round 1): the TCP stream (and the UDP stream with U) gets an
  *         ASR (notifyProc), and just before the quit the app queues an async TCPRcv (and UDPRead) with a
  *         completion routine and sends "LATE": testnet.py answers 3 s later (TCP: 4000 bytes, UDP: the
@@ -61,7 +64,12 @@ __asm__(
 "compl_stub:\n"
 "  addq.l #1,g_compl_n\n"
 "  rts\n"
+".globl exit_stub\n"
+"exit_stub:\n"
+"  .short 0xA9F4\n"                 /* _ExitToShell: never returns */
 );
+extern void exit_stub(void);
+static TCPiopb xpb;
 
 static void tables(const char *tag)
 {
@@ -72,8 +80,9 @@ static void tables(const char *tag)
     os_out("%s: goodbye %lu forced %lu dropped %lu owners %u gone %lu full %lu dead-calls %lu\r", tag,
            (unsigned long)gb, (unsigned long)gf, (unsigned long)dr, d->n_own, (unsigned long)d->n_own_gone,
            (unsigned long)d->n_own_full, (unsigned long)d->n_dead_calls);
-    os_out("%s: swept call %lu timer %lu rx %lu dead-drops %lu\r", tag, (unsigned long)d->n_gone_call,
-           (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx, (unsigned long)d->n_dead_drops);
+    os_out("%s: swept call %lu timer %lu rx %lu dead-drops %lu abandoned %lu depth %u\r", tag, (unsigned long)d->n_gone_call,
+           (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx, (unsigned long)d->n_dead_drops,
+           (unsigned long)d->n_unstuck, d->depth);
     for (i = 0; i < MT_PB_OWNERS; i++)
         if (d->own[i].lo)
             os_out("  owner[%u] %08lx-%08lx hdr %08lx\r", i, (unsigned long)d->own[i].lo,
@@ -103,7 +112,7 @@ static void tinit(int16_t cs, StreamPtr sp)
 int main(void)
 {
     char cfg[64];
-    int n, i, release = 0, udp = 0, quit = 0, pend = 0;
+    int n, i, release = 0, udp = 0, quit = 0, pend = 0, xquit = 0;
     long secs = 60, base = 17000;
     uint32_t t0, next, nextdump;
     StreamPtr sp = 0, us = 0;
@@ -122,8 +131,9 @@ int main(void)
         else if (cfg[i] == 'R') release = 1;
         else if (cfg[i] == 'U') udp = 1;
         else if (cfg[i] == 'P') pend = 1;
+        else if (cfg[i] == 'X') xquit = 1;
     }
-    os_out("MfEcho '%s' T%ld B%ld R%d U%d P%d\r", name, secs, base, release, udp, pend);
+    os_out("MfEcho '%s' T%ld B%ld R%d U%d P%d X%d\r", name, secs, base, release, udp, pend, xquit);
     os_dump_lowmem("start");
     r = os_open_ipp(&ref);
     os_out("OpenDriver %d ref %d rbuf %08lx pb %08lx\r", r, ref, (unsigned long)P32(rbuf), (unsigned long)P32(&tpb));
@@ -250,6 +260,15 @@ int main(void)
     }
 out:
     os_out("RESULT %s echoes %ld bad %ld\r", (bad == 0 && ok > 0) ? "PASS" : "FAIL", ok, bad);
+    if (xquit && sp) {
+        os_out("quitting from inside a completion routine (ExitToShell)\r");
+        os_out_close();
+        memset(&xpb, 0, sizeof xpb);
+        xpb.ioCRefNum = ref; xpb.csCode = TCPStatus; xpb.tcpStream = sp;
+        xpb.ioCompletion = P32(exit_stub);
+        (void)os_control_async(&xpb);                /* the driver runs exit_stub inline: no return */
+        return 0;
+    }
     os_out_close();
     return 0;
 }

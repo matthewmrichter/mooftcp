@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MultiFinder two-application run (Plan 3 Task 12): two copies of MfEcho (mac/mfecho) side by side,
 # one quits while the other keeps echoing; MoofDiag runs while the long one is still connected.
-#   mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--keep-disk] <label>
+#   mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--xquit] [--keep-disk] <label>
 #     --finder     boot without MultiFinder (Set Startup: Finder) and run the two apps one after the other
 #     --base N     testnet.py port base (echo at N+7; default 18000, started here when nothing listens)
 #     --long A|B   which copy runs long (default A: MfEchoA, launched first, T120; the other T30 + a UDP
@@ -9,6 +9,9 @@
 #     --pending    the short one quits with an async TCPRcv + UDPRead (completion routines) and ASRs
 #                  installed; the host answers "LATE" after MF_LATE_MS (default 50) ms, i.e. right around the
 #                  quit, so the input path's check (not the 250 ms timer) does the forgetting (MfEcho option P)
+#     --xquit      the short one quits from INSIDE a completion routine (ExitToShell from the routine the driver
+#                  runs inline: MfEcho option X); the survivor must keep echoing and MoofDiag must show
+#                  "routine frames abandoned ... 1"
 #     --release    the short one releases its streams before quitting (default: it quits with them live,
 #                  so the driver's per-application cleanup must forget them)
 #     --keep-disk  do not run fresh-disk.sh / install-moof.sh
@@ -20,9 +23,9 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
 die() { echo "mf-run.sh: $*" >&2; exit 1; }
-usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--keep-disk] <label>" >&2; exit 2; }
+usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--xquit] [--keep-disk] <label>" >&2; exit 2; }
 
-mf=1; base=18000; long=A; rel=""; pend=""; keepdisk=""; label=""
+mf=1; base=18000; long=A; rel=""; pend=""; xq=""; keepdisk=""; label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --finder) mf=""; shift;;
@@ -30,6 +33,7 @@ while [ $# -gt 0 ]; do
     --long) [ $# -ge 2 ] || usage; long="$2"; shift 2;;
     --release) rel=R; shift;;
     --pending) pend=P; shift;;
+    --xquit) xq=X; shift;;
     --keep-disk) keepdisk=1; shift;;
     -*) usage;;
     *) [ -z "$label" ] || usage; label="$1"; shift;;
@@ -38,7 +42,7 @@ done
 [ -n "$label" ] || usage
 case "$label" in *[!A-Za-z0-9._-]*) die "label may only contain A-Z a-z 0-9 . _ -";; esac
 case "$long" in A|B) ;; *) usage;; esac
-if [ "$long" = A ]; then cfgA="T120 B$base"; cfgB="T30 B$base U $rel $pend"; else cfgA="T30 B$base U $rel $pend"; cfgB="T120 B$base"; fi
+if [ "$long" = A ]; then cfgA="T120 B$base"; cfgB="T30 B$base U $rel $pend $xq"; else cfgA="T30 B$base U $rel $pend $xq"; cfgB="T120 B$base"; fi
 
 cd "$ROOT"
 out="$ROOT/build-mac/mf/$label"
@@ -210,6 +214,10 @@ if [ -z "$mf" ] && ! sed -n 's/^end: goodbye \([0-9]*\) .*/\1/p' "$out/$L.out.tx
 fi
 if [ -n "$mf" ] && [ -z "$rel" ] && ! sed -n 's/^end: .* gone \([0-9]*\) .*/\1/p' "$out/$L.out.txt" | grep -q '^[1-9]'; then
   echo "FAIL: no owner counted as gone"; ok=""
+fi
+if [ -n "$xq" ] && [ -n "$mf" ]; then
+  grep -E "^(owners|swept|tcp\[)" "$out/MoofDiag.out.txt" || true
+  grep -q "routine frames abandoned (app quit inside it) [1-9]" "$out/MoofDiag.out.txt" || { echo "FAIL: no abandoned routine frames counted"; ok=""; }
 fi
 if [ -n "$pend" ]; then
   grep -h "^pending\|^TCPSend LATE\|^UDPWrite LATE" "$out/$S.out.txt" || true
