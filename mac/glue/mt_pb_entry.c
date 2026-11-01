@@ -23,26 +23,40 @@ static MtAnyPb *pop(MtDrvPend *q) {
     return pb;
 }
 
-/* Keep only the PBs that do not live in the application's memory. */
-static uint32_t drop_app(MtDrvPend *q) {
+/* Keep only the PBs that do not live in the application's memory (PB or completion routine in m). */
+static uint32_t drop_app(MtDrvPend *q, const MtAppMem *m) {
     void *keep[MT_DRV_PENDQ];
     uint32_t n = 0, k, dropped = 0;
-    int m = mt_os_mask();
+    int sm = mt_os_mask();
     void *pb;
     while ((pb = mt_drv_pend_pop(q)) != NULL) {
         MacPtr32 c = ((const MtAnyPb *)pb)->hdr.ioCompletion;
-        if (mt_os_app_mem(mt_os_addr(pb)) || (c && mt_os_app_mem(c))) dropped++;
+        if (mt_pb_in_app(m, mt_os_addr(pb)) || (c && mt_pb_in_app(m, c))) dropped++;
         else keep[n++] = pb;
     }
     for (k = 0; k < n; k++) (void)mt_drv_pend_push(q, keep[k]);
     q->queued -= n;                              /* re-pushes are not new PBs */
-    mt_os_unmask(m);
+    mt_os_unmask(sm);
     return dropped;
+}
+
+static void drop_queues(void *ctx, const MtAppMem *m) {
+    MtEntry *e = (MtEntry *)ctx;
+    e->n_pend_dropped += drop_app(&e->pend, m) + drop_app(&e->refq, m) + drop_app(&e->doneq, m);
+}
+
+/* MultiFinder per-application cleanup (mt_pb_sweep): from every Control entry (note = a task-time
+ * call: record the caller's partition) and from the timer. Skipped while the gate is held by a frame
+ * below us or a glue frame is active (mt_pb_sweep checks the latter). */
+void mt_entry_sweep(MtEntry *e, int note) {
+    if (!note && !e->d->n_own) return;
+    mt_pb_sweep(e->d, note, drop_queues, e);
 }
 
 static void goodbye(MtEntry *e) {
     MtDrv *d = e->d;
     MtGate *g = e->gate;
+    MtAppMem m;
     if (g->depth || d->depth || d->in_core) {
         /* The goodbye kiss comes from ExitToShell. An application routine (completion or ASR)
          * that calls it never returns into the frames that own the core, so their ownership is
@@ -55,7 +69,8 @@ static void goodbye(MtEntry *e) {
         g->in_irq = 0;
         g->depth = 0;
     }
-    e->n_pend_dropped += drop_app(&e->pend) + drop_app(&e->refq) + drop_app(&e->doneq);
+    (void)mt_os_app_mem(&m);                     /* its MultiFinder partition, else ApplZone..BufPtr */
+    drop_queues(e, &m);
     mt_pb_goodbye(d);
     e->n_goodbye++;
 }
@@ -91,6 +106,10 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
         pb->hdr.ioResult = 0;
         return 0;
     }
+    /* MultiFinder sends no goodbye kiss when an application quits: notice gone partitions here (and
+     * from the timer). Only a task-time call outside any frame of ours names its caller reliably. */
+    if (!irq && !e->gate->depth) mt_entry_sweep(e, 1);
+    else if (e->d->n_own && !e->gate->depth) mt_entry_sweep(e, 0);
     if (cs == 1) {                               /* killCode (KillIO): nothing of ours is queued */
         pb->hdr.ioResult = 0;                    /* in the Device Manager; MacTCP answers 0 (120.1) */
         return 0;

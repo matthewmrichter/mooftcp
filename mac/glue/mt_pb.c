@@ -36,6 +36,8 @@ void mt_pb_set_config(MtDrv *d, const mt_ifconfig *c) {
 
 void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     uint8_t sv = d->co_gate;
+    if (d->n_own && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
+        return;                                 /* its application quit (MultiFinder): the sweep forgets it */
     d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;
     mt_os_complete(pb, err);
@@ -46,6 +48,7 @@ void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
 void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason, MacPtr32 icmp) {
     uint8_t sv;
     if (!a->proc) return;                       /* no notifyProc given: accepted (matrix 202b) */
+    if (d->n_own && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
     sv = d->co_gate;
     d->co_gate = (uint8_t)mt_os_gate_depth();
     d->depth++;
@@ -127,8 +130,13 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     c = mt_pb_udp_deadline(d);
     if (g > c) g = c;
     c = mt_pb_ip_deadline(d);
+    if (g > c) g = c;
+    if (d->n_own) {                             /* MultiFinder owners: the periodic sweep (Task 12) */
+        c = (int32_t)(d->own_dl - d->now) > 0 ? d->own_dl - d->now : 0;
+        if (g > c) g = c;
+    }
     mt_os_irq_restore(sv);
-    return g < c ? g : c;
+    return g;
 }
 
 void mt_pb_tick(MtDrv *d) {
@@ -160,39 +168,50 @@ void mt_pb_flush(MtDrv *d) {
     mt_os_irq_restore(sv);
 }
 
+/* ---- per-application cleanup (goodbye kiss, MultiFinder sweep: Plan 3 Task 12) ---- */
+
+int mt_pb_in_app(const MtAppMem *m, MacPtr32 p) {
+    MacPtr32 lo = m->lo;
+    if (m->hi <= 0x00FFFFFFu) {                 /* 24-bit: the high byte may carry Memory Manager flags */
+        p &= 0x00FFFFFFu;
+        lo &= 0x00FFFFFFu;
+    }
+    return p >= lo && p < m->hi;
+}
+
 /* A stream belongs to the departing application if its receive buffer, its ASR or any PB it
  * holds (the PB itself or its completion routine) lies in the application's memory: its
  * routines must never run again either way. */
-static int app_pb(const MtAnyPb *pb) {
-    return pb && (mt_os_app_mem(mt_os_addr(pb)) ||
-                  (pb->hdr.ioCompletion && mt_os_app_mem(pb->hdr.ioCompletion)));
+static int app_pb(const MtAppMem *m, const MtAnyPb *pb) {
+    return pb && (mt_pb_in_app(m, mt_os_addr(pb)) ||
+                  (pb->hdr.ioCompletion && mt_pb_in_app(m, pb->hdr.ioCompletion)));
 }
-static int app_tcp(const MtStream *s) {
+static int app_tcp(const MtAppMem *m, const MtStream *s) {
     uint8_t k;
-    if (mt_os_app_mem(s->rbuf) || (s->asr && mt_os_app_mem(s->asr))) return 1;
-    if (app_pb(s->open_pb) || app_pb(s->close_pb)) return 1;
-    for (k = 0; k < s->rq_n; k++) if (app_pb(s->rq[k].pb)) return 1;
-    for (k = 0; k < s->sq_n; k++) if (app_pb(s->sq[k].pb)) return 1;
+    if (mt_pb_in_app(m, s->rbuf) || (s->asr && mt_pb_in_app(m, s->asr))) return 1;
+    if (app_pb(m, s->open_pb) || app_pb(m, s->close_pb)) return 1;
+    for (k = 0; k < s->rq_n; k++) if (app_pb(m, s->rq[k].pb)) return 1;
+    for (k = 0; k < s->sq_n; k++) if (app_pb(m, s->sq[k].pb)) return 1;
     return 0;
 }
-static int app_udp(const MtUdpStream *u) {
+static int app_udp(const MtAppMem *m, const MtUdpStream *u) {
     uint8_t k;
-    if (mt_os_app_mem(u->rbuf) || (u->asr && mt_os_app_mem(u->asr))) return 1;
-    for (k = 0; k < u->rq_n; k++) if (app_pb(u->rq[k].pb)) return 1;
+    if (mt_pb_in_app(m, u->rbuf) || (u->asr && mt_pb_in_app(m, u->asr))) return 1;
+    for (k = 0; k < u->rq_n; k++) if (app_pb(m, u->rq[k].pb)) return 1;
     return 0;
 }
 
-/* Goodbye kiss: drop everything the departing application owns, silently (no routine of its
- * may run any more). Generations and connection counters move on, so a stale handle or a late
- * core callback for an old connection is recognised as such. */
-void mt_pb_goodbye(MtDrv *d) {
+/* Forget everything the application in m owns, silently (no routine of its may run any more).
+ * Generations and connection counters move on, so a stale handle or a late core callback for an
+ * old connection is recognised as such. A UDP stream's loans (Task 4) go with it. */
+void mt_pb_forget(MtDrv *d, const MtAppMem *m) {
     int sv = mt_os_irq_save();
     uint8_t i;
     for (i = 0; i < d->ntcp; i++) {
         MtStream *s = &d->tcp[i];
         uint8_t gen = s->gen;
         uint16_t conn = (uint16_t)(s->conn + 1u);
-        if (!s->used || !app_tcp(s)) continue;  /* system-heap clients stay */
+        if (!s->used || !app_tcp(m, s)) continue;  /* system-heap clients and other partitions stay */
         if (s->t) mt_tcp_release(s->t);         /* no callbacks; a live connection gets an RST */
         memset(s, 0, sizeof *s);
         s->gen = gen;
@@ -202,17 +221,122 @@ void mt_pb_goodbye(MtDrv *d) {
     for (i = 0; i < d->nudp; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
-        if (!u->used || !app_udp(u)) continue;
+        if (!u->used || !app_udp(m, u)) continue;
         if (u->u) mt_udp_release(u->u);
         memset(u, 0, sizeof *u);
         u->gen = gen;
     }
-    mt_pb_dns_goodbye(d);
+    mt_pb_dns_goodbye(d, m);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];
-        if (!e->blk.ioCompletion || mt_os_app_mem(e->blk.ioCompletion)) e->state = 0;
+        if (e->state && e->blk.ioCompletion && mt_pb_in_app(m, e->blk.ioCompletion)) e->state = 0;
     }
     mt_os_irq_restore(sv);
+}
+
+static void own_drop(MtDrv *d, uint8_t i) {
+    memset(&d->own[i], 0, sizeof d->own[i]);
+    d->n_own--;
+}
+
+/* Goodbye kiss: the current application (its partition under MultiFinder, else ApplZone..BufPtr). */
+void mt_pb_goodbye(MtDrv *d) {
+    MtAppMem m;
+    uint8_t i;
+    int part = mt_os_app_mem(&m);
+    mt_pb_forget(d, &m);
+    if (part)
+        for (i = 0; i < MT_PB_OWNERS; i++)
+            if (d->own[i].lo == m.lo) own_drop(d, i);
+}
+
+int mt_pb_gone(MtDrv *d, MacPtr32 p) {
+    uint8_t i;
+    if (!d->n_own || !p) return 0;
+    for (i = 0; i < MT_PB_OWNERS; i++) {
+        const MtAppMem *o = &d->own[i];
+        if (o->lo && mt_pb_in_app(o, p) && !mt_os_app_alive(o)) {
+            d->n_dead_calls++;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int overlaps(const MtAppMem *a, const MtAppMem *b) {
+    return a->lo < b->hi && b->lo < a->hi;
+}
+
+static int same(const MtAppMem *a, const MtAppMem *b) {
+    return a->lo == b->lo && a->hi == b->hi && a->h0 == b->h0;
+}
+
+/* Read-only pre-check (no gate: the table only changes inside it, and a stale read just sends us
+ * through the full path or leaves the work to the next call or tick): every owner alive, none
+ * overlapping the caller, and the caller (if any) already recorded. */
+static int quiet(const MtDrv *d, const MtAppMem *cur) {
+    uint8_t i;
+    int known = 0;
+    for (i = 0; i < MT_PB_OWNERS; i++) {
+        const MtAppMem *o = &d->own[i];
+        if (!o->lo) continue;
+        if (cur && same(o, cur)) { known = 1; continue; }
+        if (!mt_os_app_alive(o) || (cur && overlaps(o, cur))) return 0;
+    }
+    return !cur || known;
+}
+
+int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx) {
+    MtAppMem cur, gone;
+    int sv, n = 0, part = 0, known = 0;
+    uint8_t i, fr = MT_PB_OWNERS;
+    if (!note && !d->n_own) return 0;            /* no MultiFinder caller recorded: nothing to watch */
+    if (note) part = mt_os_app_mem(&cur);        /* task time: the caller's own globals */
+    if (!part && !d->n_own) return 0;
+    if (!note) {                                 /* timer / input path (gate owner): once per clock step */
+        uint32_t now = mt_os_ms();
+        if (now == d->own_chk) return 0;
+        d->own_chk = now;
+        if (quiet(d, NULL)) {
+            d->own_dl = now + MT_PB_SWEEP_MS;
+            return 0;
+        }
+    } else if (quiet(d, part ? &cur : NULL)) {
+        return 0;                                /* the common case: no gate round trip */
+    }
+    sv = mt_os_irq_save();
+    if (d->depth || d->in_core) {                /* a glue frame is active: next call or tick */
+        mt_os_irq_restore(sv);
+        return 0;
+    }
+    d->now = mt_os_ms();
+    for (i = 0; i < MT_PB_OWNERS; i++) {
+        MtAppMem *o = &d->own[i];
+        if (!o->lo) { if (fr == MT_PB_OWNERS) fr = i; continue; }
+        if (part && same(o, &cur)) {
+            known = 1;                           /* the caller itself: alive */
+            continue;
+        }
+        if (mt_os_app_alive(o) && !(part && overlaps(o, &cur))) continue;
+        gone = *o;                               /* gone, or its memory now belongs to the caller */
+        own_drop(d, i);
+        if (fr == MT_PB_OWNERS) fr = i;
+        d->n_own_gone++;
+        n++;
+        if (drop) drop(ctx, &gone);
+        mt_pb_forget(d, &gone);
+    }
+    if (part && !known) {
+        if (fr < MT_PB_OWNERS) {
+            d->own[fr] = cur;
+            d->n_own++;
+        } else {
+            d->n_own_full++;
+        }
+    }
+    if (d->n_own) d->own_dl = d->now + MT_PB_SWEEP_MS;
+    mt_os_irq_restore(sv);
+    return n;
 }
 
 /* ---- code tables (core -> MacTCP) ---- */

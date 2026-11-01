@@ -108,10 +108,36 @@ int  mt_os_gate_depth(void);
 int  mt_os_mask(void);
 void mt_os_unmask(int saved);
 
-/* Nonzero if the address lies in the current application's memory (ApplZone .. BufPtr): the
- * goodbye kiss forgets only what belongs to the departing application (streams by receive
- * buffer, echoes by notify routine, queued PBs by address). */
-int  mt_os_app_mem(MacPtr32 p);
+/* The memory of the application making the current call, [lo, hi), and its identity.
+ *
+ * System 6 without MultiFinder: lo = ApplZone, hi = BufPtr (heap, stack and A5 world of the one
+ * application; the Device Manager sends the goodbye kiss at every launch and quit), h0 = 0,
+ * and mt_os_app_mem returns 0.
+ *
+ * MultiFinder (Plan 3 Task 12, docs/dev/EMULATOR.md "MultiFinder"): each application runs in a
+ * partition that is one block of MultiFinder's heap; ApplZone is the start of the block's data and
+ * the 24-bit block header sits in the 8 bytes before it. mt_os_app_mem then returns 1 with
+ * lo = ApplZone, hi = the end of the block, h0 = the header's first word (tag + physical size): with
+ * lo the partition's identity. The second header word (the relative handle) is NOT part of it: it
+ * changed for a live partition when MultiFinder's heap moved its start as the system heap grew
+ * (measured, Snow: 003a0d14 -> 0039e3b0 for MfEchoA while MfEchoB launched). BufPtr is global under MultiFinder, so ApplZone..BufPtr would
+ * cover the partitions above the current one. MultiFinder sends no goodbye kiss when an application
+ * quits (measured), so the glue records the partitions of its callers and sweeps the ones that are
+ * gone (mt_os_app_alive). Call it at task time only: at interrupt time the low-memory globals belong
+ * to whichever application was interrupted. */
+typedef struct MtAppMem {
+    MacPtr32 lo, hi;
+    uint32_t h0;
+} MtAppMem;
+int  mt_os_app_mem(MtAppMem *m);
+
+/* Nonzero while the MultiFinder partition recorded in *m (mt_os_app_mem returned 1) still exists:
+ * the block header at m->lo - 8 still holds h0. MultiFinder disposes of the partition when the
+ * application quits; the block becomes free (tag 0) or part of another block. A new partition of
+ * exactly the same size at exactly the same place looks alive (the documented limit: the glue sweeps
+ * every MT_PB_SWEEP_MS, so the block must be freed and reallocated between two sweeps). Reads two
+ * words, no Toolbox call: legal at interrupt time. */
+int  mt_os_app_alive(const MtAppMem *m);
 
 /* KillIO on the Ethernet driver (PBKillIO with ioRefNum = refnum) for a transmit PB that stayed
  * in flight; `pb` is that PB (the Mac ignores it, the host fake records it). Returns the OSErr.

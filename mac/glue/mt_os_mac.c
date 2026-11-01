@@ -144,16 +144,53 @@ void mt_os_unmask(int saved)
     __asm__ volatile("move.w %0,%%sr" : : "d"(sr) : "memory", "cc");
 }
 
-/* ApplZone (0x2AA) .. BufPtr (0x10C). 24-bit addressing (the Mac Classic): the high byte of a
- * pointer may carry Memory Manager flags, so compare the low 24 bits. */
-int mt_os_app_mem(MacPtr32 p)
+/* MultiFinder is running when its _OSDispatch trap (A88F) is implemented: the toolbox trap table
+ * (0x0E00, 512 entries on the Classic / SE ROM) holds another address than _Unimplemented's (A89F).
+ * Measured in Snow with NGetTrapAddress (MfEcho, Task 12): implemented under MultiFinder only. */
+static int mf_running(void)
+{
+    volatile const uint32_t *tt = (volatile const uint32_t *)0x0E00;
+    return tt[0x08F] != tt[0x09F];
+}
+
+/* The current application's memory (mt_os.h). 24-bit addressing (the Mac Classic): the high byte
+ * of a pointer may carry Memory Manager flags, so compare the low 24 bits. Under MultiFinder the
+ * partition is validated before it is trusted: an in-use block (tag 0x80 relocatable / 0x40
+ * nonrelocatable), its end above the zone's bkLim and above CurrentA5, below BufPtr; anything
+ * else falls back to ApplZone..BufPtr (the classic range). */
+int mt_os_app_mem(MtAppMem *m)
 {
     uint32_t lo = *(volatile uint32_t *)0x2AA, hi = *(volatile uint32_t *)0x10C;
-    if (hi <= 0x00FFFFFFu) {
-        p &= 0x00FFFFFFu;
-        lo &= 0x00FFFFFFu;
+    uint32_t a5 = *(volatile uint32_t *)0x904;
+    m->h0 = 0;
+    if (hi > 0x00FFFFFFu) {                       /* 32-bit clean memory map: not System 6 on a Classic */
+        m->lo = lo;
+        m->hi = hi;
+        return 0;
     }
-    return p >= lo && p < hi;
+    lo &= 0x00FFFFFFu;
+    a5 &= 0x00FFFFFFu;
+    m->lo = lo;
+    m->hi = hi;
+    if (mf_running() && lo >= 0x1000u && !(lo & 1u)) {
+        uint32_t h0 = *(volatile const uint32_t *)(lo - 8u);
+        uint32_t tag = h0 >> 24, end = lo - 8u + (h0 & 0x00FFFFFFu);
+        uint32_t bklim = *(volatile const uint32_t *)lo & 0x00FFFFFFu;   /* Zone.bkLim, first field */
+        if (((tag & 0xC0u) == 0x80u || (tag & 0xC0u) == 0x40u) && end > lo && end <= hi &&
+            bklim > lo && bklim <= end && a5 > lo && a5 < end) {
+            m->hi = end;
+            m->h0 = h0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int mt_os_app_alive(const MtAppMem *m)
+{
+    uint32_t lo = m->lo & 0x00FFFFFFu;
+    if (lo < 0x1000u || (lo & 1u)) return 0;
+    return *(volatile const uint32_t *)(lo - 8u) == m->h0;
 }
 
 int mt_os_gate_depth(void)

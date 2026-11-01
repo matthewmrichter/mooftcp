@@ -16,6 +16,13 @@ MtGate *pbf_gate;
 void (*pbf_leave_hook)(void);
 MacPtr32 pbf_app_lo, pbf_app_hi;
 MacPtr32 pbf_a5;
+int pbf_app_part;
+uint32_t pbf_app_h0;
+pbf_part pbf_parts[PBF_PARTS];
+int pbf_dead_calls;
+#define NCODE 64
+static struct { MacPtr32 at; pbf_compl_fn c; pbf_asr_fn a; } g_code[NCODE];
+static int g_ncode;
 
 static uint64_t g_mem[PBF_SIZE / 8];
 static uint32_t g_used;
@@ -47,7 +54,92 @@ void pbf_reset(void) {
     fake_tx_hook = NULL;
     pbf_app_lo = 0;
     pbf_app_hi = 0xFFFFFFFFu;
+    pbf_app_part = 0;
+    pbf_app_h0 = 0;
+    memset(pbf_parts, 0, sizeof pbf_parts);
+    pbf_dead_calls = 0;
+    g_ncode = 0;
     pbf_now = 1000;
+}
+
+/* ---- MultiFinder model ---- */
+
+static int part_new(MacPtr32 lo, uint32_t size) {
+    int i;
+    for (i = 0; i < PBF_PARTS; i++)
+        if (!pbf_parts[i].lo) break;
+    if (i == PBF_PARTS || !lo) { pbf_bad++; return -1; }
+    pbf_parts[i].lo = lo;
+    pbf_parts[i].hi = lo + size;
+    pbf_parts[i].h0 = 0x80000000u | (size + 8u);
+    pbf_parts[i].a5 = lo + size - 0x100u;
+    pbf_parts[i].used = 16;                     /* the "zone header" */
+    pbf_parts[i].live = 1;
+    pbf_mf_switch(i);
+    return i;
+}
+
+int pbf_mf_launch(uint32_t size) {
+    void *m = pbf_alloc(size);
+    return part_new(m ? pbf_a(m) : 0, size);
+}
+
+int pbf_mf_launch_at(MacPtr32 lo, uint32_t size) {
+    memset(pbf_p(lo), 0, size);                 /* the new application's memory */
+    return part_new(lo, size);
+}
+
+void pbf_mf_switch(int i) {
+    const pbf_part *p = &pbf_parts[i];
+    pbf_app_part = 1;
+    pbf_app_lo = p->lo;
+    pbf_app_hi = p->hi;
+    pbf_app_h0 = p->h0;
+    pbf_a5 = p->a5;
+}
+
+void pbf_mf_quit(int i) {
+    pbf_parts[i].live = 0;                      /* MultiFinder disposes of the partition: no goodbye */
+}
+
+void pbf_mf_forget(int i) { memset(&pbf_parts[i], 0, sizeof pbf_parts[i]); }
+
+void *pbf_mf_alloc(int i, uint32_t n) {
+    pbf_part *p = &pbf_parts[i];
+    uint32_t a = (p->used + 7u) & ~7u;
+    if (n > p->hi - p->lo - 0x200u || a > p->hi - p->lo - 0x200u - n) { pbf_bad++; return NULL; }
+    p->used = a + n;
+    return pbf_p(p->lo + a);
+}
+
+static MacPtr32 code_at(int i, pbf_compl_fn c, pbf_asr_fn a) {
+    void *m;
+    if (g_ncode >= NCODE || !(m = pbf_mf_alloc(i, 4))) { pbf_bad++; return 0; }
+    g_code[g_ncode].at = pbf_a(m);
+    g_code[g_ncode].c = c;
+    g_code[g_ncode].a = a;
+    return g_code[g_ncode++].at;
+}
+MacPtr32 pbf_mf_compl(int i, pbf_compl_fn f) { return code_at(i, f, NULL); }
+MacPtr32 pbf_mf_asr(int i, pbf_asr_fn f) { return code_at(i, NULL, f); }
+
+/* 1 if a lies in a partition that is gone (and in no live one). */
+static int in_dead(MacPtr32 a) {
+    int i, dead = 0;
+    for (i = 0; i < PBF_PARTS; i++) {
+        const pbf_part *p = &pbf_parts[i];
+        if (!p->lo || a < p->lo || a >= p->hi) continue;
+        if (p->live) return 0;
+        dead = 1;
+    }
+    return dead;
+}
+
+static int code_find(MacPtr32 a) {
+    int i;
+    for (i = 0; i < g_ncode; i++)
+        if (g_code[i].at == a) return i;
+    return -1;
 }
 
 void *pbf_alloc(uint32_t n) {
@@ -100,6 +192,7 @@ void mt_os_complete(MtAnyPb *pb, int16_t err) {
     pbf_ev e;
     MacPtr32 c = pb->hdr.ioCompletion;
     memset(&e, 0, sizeof e);
+    if (in_dead(pbf_a(pb)) || (c && in_dead(c))) pbf_dead_calls++;   /* a quit app's PB or routine */
     pb->hdr.ioResult = err;                     /* final before the routine runs (matrix 150) */
     e.kind = 'C';
     e.pb = pbf_a(pb);
@@ -107,6 +200,12 @@ void mt_os_complete(MtAnyPb *pb, int16_t err) {
     e.cs = pb->hdr.csCode;
     log_add(&e);
     if (!c) return;
+    if (code_find(c) >= 0) {
+        pbf_in_int++;
+        if (g_code[code_find(c)].c) g_code[code_find(c)].c(pb); else pbf_bad++;
+        pbf_in_int--;
+        return;
+    }
     if (c < PROC_BASE || c >= PROC_BASE + 4u * NPROC || (c & 3u)) { pbf_bad++; return; }
     pbf_in_int++;
     if (g_compl[(c - PROC_BASE) / 4u]) g_compl[(c - PROC_BASE) / 4u](pb);
@@ -125,6 +224,14 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
     e.icmp = icmp;
     e.a5 = a->a5;
     log_add(&e);
+    if (in_dead(c)) pbf_dead_calls++;
+    if (code_find(c) >= 0) {
+        pbf_in_int++;
+        if (g_code[code_find(c)].a) g_code[code_find(c)].a(a->stream, event, a->user, reason, icmp);
+        else pbf_bad++;
+        pbf_in_int--;
+        return;
+    }
     if (c < PROC_BASE + 0x1000u || c >= PROC_BASE + 0x1000u + 4u * NPROC || (c & 3u)) {
         pbf_bad++;                              /* the glue must never call ASR 0 or garbage */
         return;
@@ -166,7 +273,21 @@ void mt_os_unmask(int saved) {
 
 int mt_os_gate_depth(void) { return pbf_gate ? pbf_gate->depth : pbf_irq; }
 
-int mt_os_app_mem(MacPtr32 p) { return p >= pbf_app_lo && p < pbf_app_hi; }
+int mt_os_app_mem(MtAppMem *m) {
+    m->lo = pbf_app_lo;
+    m->hi = pbf_app_hi;
+    m->h0 = pbf_app_part ? pbf_app_h0 : 0;
+    return pbf_app_part != 0;
+}
+
+int mt_os_app_alive(const MtAppMem *m) {
+    int i;
+    for (i = 0; i < PBF_PARTS; i++) {
+        const pbf_part *p = &pbf_parts[i];
+        if (p->live && p->lo == m->lo && p->h0 == m->h0) return 1;
+    }
+    return 0;
+}
 
 int pbf_kill_calls;
 int16_t pbf_kill_ref;

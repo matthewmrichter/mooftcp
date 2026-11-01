@@ -36,6 +36,9 @@ void    mt_entry_init(MtEntry *e, struct MtDrv *d, MtGate *g);
 /* One Control call. The PB is already off the Device Manager queue. trap = its ioTrap; irq:
  * the call is made at interrupt time (SR mask != 0). */
 int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq);
+/* MultiFinder per-application cleanup (Plan 3 Task 12): mt_pb_sweep with the entry's queues. note = the
+ * current call is a task-time application call (its partition is recorded). The timer calls it with 0. */
+void    mt_entry_sweep(MtEntry *e, int note);
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
 void    mt_entry_drain(MtEntry *e);
 

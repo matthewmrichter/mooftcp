@@ -124,6 +124,7 @@ static void finish(MtDnsSlot *q, mt_dns_status st) {
     MtDrv *d = q->d;
     MtAnyPb *pb = q->pb;
     if (!q->state) return;
+    if (pb && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, q->out))) pb = NULL;   /* its app quit (Task 12) */
     if (pb) deliver(q, st);
     q->state = 0;
     q->pb = NULL;
@@ -277,14 +278,16 @@ int16_t mt_pb_dns_control(MtDrv *d, MtAnyPb *pb) {
     }
 }
 
-/* The departing application's lookups: forget them without a completion (its code is going away),
- * and tell the core to stop (it never writes `res` afterwards; nothing of ours points into the heap). */
-void mt_pb_dns_goodbye(MtDrv *d) {
+/* The departing application's lookups (PB, result record or completion routine in its memory): forget
+ * them without a completion (its code is going away), and tell the core to stop (it never writes `res` afterwards; nothing of ours points into the heap). */
+void mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m) {
     uint32_t i;
     int any = 0;
     for (i = 0; i < MT_PB_DNS; i++) {
         MtDnsSlot *q = &d->dns[i];
-        if (!q->state || !q->pb || !mt_os_app_mem(mt_os_addr(q->pb))) continue;
+        if (!q->state || !q->pb ||
+            !(mt_pb_in_app(m, mt_os_addr(q->pb)) || mt_pb_in_app(m, q->out) ||
+              (q->pb->hdr.ioCompletion && mt_pb_in_app(m, q->pb->hdr.ioCompletion)))) continue;
         cancel_core(d, q);
         q->state = 0;
         q->pb = NULL;

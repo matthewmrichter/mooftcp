@@ -79,11 +79,16 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 /* ---- gate callbacks (the owner runs them; see mt_gate.h) ---- */
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
-    mt_pb_input(((MtRes *)ctx)->d, frame, len);
+    MtRes *r = (MtRes *)ctx;
+    /* MultiFinder: notice a quit application before the core writes into its receive buffers (at
+     * most once per clock step, a load and a branch without MultiFinder owners; Task 12) */
+    if (r->d->n_own) mt_entry_sweep(&r->entry, 0);
+    mt_pb_input(r->d, frame, len);
 }
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
+    mt_entry_sweep(&r->entry, 0);                /* MultiFinder: applications that quit (Task 12) */
     mt_entry_drain(&r->entry);
     mt_pb_tick(r->d);
 }

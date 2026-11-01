@@ -75,6 +75,7 @@ static void serve_reads(MtUdpStream *s) {
     uint8_t g = s->gen;
     while (s->rq_n && s->u && s->loan_n < MT_PB_UDPLOANS) {
         MtAnyPb *pb = s->rq[0].pb;
+        if (s->d->n_own && mt_pb_gone(s->d, mt_os_addr(pb))) break;   /* its app quit: the sweep forgets it */
         if (!take_datagram(s, pb)) break;
         rq_take(s, 0);
         complete(s, pb, 0);

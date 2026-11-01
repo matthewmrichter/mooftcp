@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include "mt.h"
 #include "mt_drv.h"
+#include "diag_streams.h"
 
 QDGlobals qd;
 
@@ -43,6 +44,8 @@ static void P(const char *fmt, ...)
     n = (long)strlen(b);
     if (outref >= 0) FSWrite(outref, &n, b);
 }
+
+static void Pline(const char *s) { P("%s", s); }
 
 static uint32_t s24(const void *p) { return (uint32_t)(uintptr_t)p & 0x00FFFFFFu; }
 static void ip(char *b, uint32_t a)
@@ -177,6 +180,7 @@ int main(void)
               (unsigned long)st->tcp_fast_rexmt, (unsigned long)st->tcp_resets_in, (unsigned long)st->tcp_resets_out,
               (unsigned long)st->tcp_conns_open, (unsigned long)st->tcp_active_opens, (unsigned long)st->tcp_passive_opens,
               (unsigned long)st->tcp_tx_stalls, (unsigned long)st->ip_lo_out, (unsigned long)st->ip_lo_drops);
+            diag_streams(m->d, Pline);               /* streams and MultiFinder owners (Task 12) */
             P("log: prefs flags %02x (bit 0 = diagnostic log on)\r", m->cfg_flags);
             {
                 mt_logrec rec[16];

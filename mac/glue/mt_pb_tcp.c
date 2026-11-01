@@ -428,7 +428,9 @@ static int serve_reads(MtStream *s, int *served) {
     uint16_t c = s->conn;
     int n = 0;
     while (s->rq_n && unread(s) && can_serve(s, s->rq[0].pb)) {
-        MtAnyPb *pb = rq_take(s, 0);
+        MtAnyPb *pb;
+        if (s->d->n_own && mt_pb_gone(s->d, mt_os_addr(s->rq[0].pb))) break;   /* its app quit: the sweep forgets it */
+        pb = rq_take(s, 0);
         if (pb->hdr.csCode == TCPRcv) rcv_copy(s, pb);
         else rcv_nocopy(s, pb);
         complete(s, pb, 0);

@@ -43,10 +43,33 @@ extern int pbf_bad;               /* misuse seen by the fake (bad pointer, unkno
 extern int pbf_irq, pbf_irq_max, pbf_irq_calls;
 extern int pbf_in_int;            /* what mt_os_in_interrupt reports */
 extern int pbf_mask, pbf_mask_max;      /* mt_os_mask depth (0 outside) and its maximum */
-extern MacPtr32 pbf_app_lo, pbf_app_hi; /* mt_os_app_mem range, [lo, hi) (default: all) */
+extern MacPtr32 pbf_app_lo, pbf_app_hi; /* mt_os_app_mem range, [lo, hi) (default: all; classic mode) */
 extern void (*pbf_leave_hook)(void);   /* run at every outermost irq restore (gate leave) */
 extern struct MtGate *pbf_gate;           /* set: irq_save/restore move its depth (the Mac gate) */
 extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current application's" A5) */
+
+/* MultiFinder model (Plan 3 Task 12). pbf_app_part != 0: mt_os_app_mem reports the partition
+ * [pbf_app_lo, pbf_app_hi) with header word pbf_app_h0 = 0x80000000 | (size + 8) (return 1); mt_os_app_alive(m)
+ * is true while a live pbf_parts entry has m's lo and h0. pbf_mf_launch allocates a partition in fake memory and
+ * makes it current; pbf_mf_launch_at reuses memory (a new application in a quit one's partition);
+ * pbf_mf_switch makes another one current (ApplZone, A5, header: what MultiFinder swaps); pbf_mf_quit
+ * disposes of it WITHOUT a goodbye (what MultiFinder does). pbf_mf_alloc / pbf_mf_compl / pbf_mf_asr give
+ * memory and routines inside a partition. pbf_dead_calls counts completions and ASRs the glue ran for a
+ * PB or routine that lies in a quit partition (a crash on the Mac). */
+#define PBF_PARTS 32
+typedef struct { MacPtr32 lo, hi; uint32_t h0; MacPtr32 a5; uint32_t used; int live; } pbf_part;
+extern int pbf_app_part;
+extern uint32_t pbf_app_h0;
+extern pbf_part pbf_parts[PBF_PARTS];
+extern int pbf_dead_calls;
+int      pbf_mf_launch(uint32_t size);
+int      pbf_mf_launch_at(MacPtr32 lo, uint32_t size);
+void     pbf_mf_switch(int i);
+void     pbf_mf_quit(int i);
+void     pbf_mf_forget(int i);    /* drop a quit partition from the table (its memory is reused) */
+void    *pbf_mf_alloc(int i, uint32_t n);
+MacPtr32 pbf_mf_compl(int i, pbf_compl_fn f);
+MacPtr32 pbf_mf_asr(int i, pbf_asr_fn f);
 
 extern int pbf_kill_calls;        /* mt_os_enet_kill calls and the last arguments */
 extern int16_t pbf_kill_ref;

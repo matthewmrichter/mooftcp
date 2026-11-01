@@ -53,6 +53,8 @@
 #define MT_PB_ECHO_TMO_S  3      /* ICMPEcho timeout when the PB gives none (matrix A00..A03 used 3) */
 #define MT_PB_UDP_MTU_OFFNET 548 /* UDPMaxMTUSize towards a host off our subnet (matrix 910) */
 #define MT_PB_DNS         4      /* DNR lookups in flight (private csCode, mt_pb_dns.c); the core has 4 query slots */
+#define MT_PB_OWNERS      8      /* MultiFinder applications tracked for the per-application sweep (Task 12) */
+#define MT_PB_SWEEP_MS    250    /* periodic sweep while owners are recorded (mt_pb_sweep) */
 
 /* Results that are not .IPP codes: notOpenErr (Device Manager: driver not open, matrix
  * "Unconfigured run") and the -4 MacTCP returns for csCodes it does not implement (matrix 120). */
@@ -221,6 +223,16 @@ struct MtDrv {
     uint8_t   lap_mac[8];       /* LAPStats.ifPhysicalAddress */
     uint8_t   lap_if[12];       /* LAPStats.ifString: Pascal string, NUL terminated (a guess) */
     arp_entry arp[ARP_TABLE_SIZE];   /* LAPStats.AddrXlation: all zero (not mirrored from the core) */
+    /* MultiFinder owners (Plan 3 Task 12): the partitions of the applications that called the driver
+     * at task time (mt_os_app_mem returned 1). own[i].lo == 0 = free. mt_pb_sweep forgets the
+     * objects of an owner whose partition is gone (no goodbye kiss under MultiFinder). */
+    MtAppMem  own[MT_PB_OWNERS];
+    uint32_t  own_dl;           /* next periodic sweep (ms clock) while n_own > 0 */
+    uint32_t  own_chk;          /* clock value of the last timer / input-path check (once per step) */
+    uint32_t  n_own_gone;       /* owners found gone and swept */
+    uint32_t  n_own_full;       /* callers not recorded: the table was full (their objects are never swept) */
+    uint32_t  n_dead_calls;     /* routines of a gone owner not called (the sweep had not run yet) */
+    uint8_t   n_own;            /* used entries of own[] */
     uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
 };
 
@@ -245,11 +257,27 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE
 void     mt_pb_tick(MtDrv *d);
 /* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
  * forget every TCP and UDP stream whose receive buffer, ASR or any pending PB lies in the
- * application's memory and every ICMPEcho whose notify routine does (mt_os_app_mem; system-heap clients keep theirs),
- * WITHOUT calling any completion routine or ASR (the application's code and buffers are going away). Core objects are
- * released, so the core stops touching the app's buffers (a live connection gets an RST). Call
- * it at task time with no glue frame active (depth 0, not inside the core): the driver does. */
+ * application's memory (mt_os_app_mem: its MultiFinder partition, else ApplZone..BufPtr), every
+ * ICMPEcho whose notify routine does and every DNR lookup whose PB does (system-heap clients and
+ * other partitions keep theirs), WITHOUT calling any completion routine or ASR (the application's
+ * code and buffers are going away). Core objects are released, so the core stops touching the app's
+ * buffers (a live connection gets an RST). The UDP loans go with their stream. Call it at task time
+ * with no glue frame active (depth 0, not inside the core): the driver does. */
 void     mt_pb_goodbye(MtDrv *d);
+/* The same for an explicit range (the goodbye's and the sweep's worker). */
+void     mt_pb_forget(MtDrv *d, const MtAppMem *m);
+/* Nonzero if p lies in [m->lo, m->hi) (24-bit compare when hi fits in 24 bits). */
+int      mt_pb_in_app(const MtAppMem *m, MacPtr32 p);
+
+/* MultiFinder per-application cleanup (Plan 3 Task 12). note != 0: the call is made at task time by
+ * an application, so record its partition (a recorded owner whose range the new partition overlaps
+ * is gone: its block was reused). Then every owner whose partition no longer exists
+ * (mt_os_app_alive) is forgotten: drop(ctx, range) first (the driver entry's queued PBs), then
+ * mt_pb_forget. Does nothing while a glue frame is active or the core runs (retried at the next
+ * call or tick). Returns the number of owners forgotten. The driver calls it at every Control entry
+ * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
+ * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
+int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
 
 /* The one table each for core -> MacTCP codes (exported so every row is tested). */
 uint16_t mt_pb_event_code(int core_ev);        /* mt_tcp_event -> TCP ASR eventCode, 0 = none */
@@ -270,7 +298,10 @@ void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
 uint32_t mt_pb_udp_deadline(MtDrv *d);
 int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
 int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
-void     mt_pb_dns_goodbye(MtDrv *d);          /* cancel the lookups whose PB lies in the application heap */
+void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m);   /* cancel the lookups of the application in m */
+/* Nonzero if p lies in a recorded MultiFinder owner whose partition is gone (counts n_dead_calls): the
+ * glue then neither calls that owner's routines nor writes its result records (Task 12). */
+int      mt_pb_gone(MtDrv *d, MacPtr32 p);
 void     mt_pb_ip_init(MtDrv *d);              /* echo callback, constant strings */
 void     mt_pb_ip_timers(MtDrv *d);            /* expire ICMPEcho timeouts */
 uint32_t mt_pb_ip_deadline(MtDrv *d);

@@ -15,3 +15,4 @@ add_subdirectory(cdev)
 add_subdirectory(moof)
 add_subdirectory(installer)   # after moof: it embeds build-mac/moof/MoofTCP.bin
 add_subdirectory(moofdiag)
+add_subdirectory(mfecho)
