@@ -31,7 +31,11 @@ static int streq(const char *a, const char *b) {
 
 int cdl_fields_equal(const CfeFields *a, const CfeFields *b) {
     return streq(a->ip, b->ip) && streq(a->mask, b->mask) && streq(a->gw, b->gw) &&
-           streq(a->dns, b->dns) && streq(a->domain, b->domain);
+           streq(a->dns, b->dns) && streq(a->domain, b->domain) && !a->log == !b->log;
+}
+
+void cdl_load_saved(const uint8_t *res, uint32_t n, CfeFields *f) {
+    if (cfe_decode(res, n, f) != 0) f->log = 1;         /* no usable settings yet: log on */
 }
 
 static const char *field_name(int field) {
@@ -116,7 +120,7 @@ uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap) {
     uint32_t n = 1;
     int i;
     if (cap < 1) return 0;
-    out[0] = 1;
+    out[0] = 2;
     for (i = 0; i < 5; i++) {
         const char *s = fld(f, i);
         uint32_t k = 0;
@@ -125,17 +129,19 @@ uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap) {
         out[n++] = (uint8_t)k;
         while (k--) out[n++] = (uint8_t)*s++;
     }
+    if (n + 1 > cap) return 0;
+    out[n++] = f->log ? 1 : 0;                          /* version 2: the log flag */
     return n;
 }
 
-int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f) {
+int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log) {
     uint32_t off = 1;
     int i, cap;
     char *d;
     char *z = (char *)f;
     uint32_t k;
     for (k = 0; k < sizeof *f; k++) z[k] = 0;
-    if (!p || n < 1 || p[0] != 1) return -1;
+    if (!p || n < 1 || (p[0] != 1 && p[0] != 2)) return -1;
     for (i = 0; i < 5; i++) {
         if (off >= n) goto bad;
         k = p[off++];
@@ -150,6 +156,12 @@ int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f) {
             d[k] = 0;
         }
         off += k;
+    }
+    if (p[0] == 2) {                                    /* version 2: one flag byte, 0 or 1 */
+        if (off >= n || p[off] > 1) goto bad;
+        f->log = p[off];
+    } else {
+        f->log = (uint8_t)(default_log ? 1 : 0);        /* version 1 drafts had no flag */
     }
     return 0;
 bad:

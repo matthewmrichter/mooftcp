@@ -137,6 +137,7 @@ uint32_t cfe_encode(const CfeFields *f, const uint8_t *prior, uint32_t prior_len
     } else {
         flags = 0;
     }
+    flags = (uint8_t)((flags & (uint8_t)~MT_CFG_FLAG_LOG) | (f->log ? MT_CFG_FLAG_LOG : 0));
     return mt_cfg_build_keep(&c, mode, flags, tail, tail_len, out, cap);
 }
 
@@ -152,5 +153,6 @@ int cfe_decode(const uint8_t *res, uint32_t n, CfeFields *f) {
     if (plain_ok(c.gateway)) cfe_format_ip(c.gateway, f->gw);
     if (plain_ok(c.dns)) cfe_format_ip(c.dns, f->dns);
     if (domain_ok(c.domain)) memcpy(f->domain, c.domain, sizeof f->domain);
+    f->log = (uint8_t)(flags & MT_CFG_FLAG_LOG ? 1 : 0);
     return 0;
 }

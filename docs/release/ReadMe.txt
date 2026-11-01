@@ -72,11 +72,27 @@ THINGS YOU MAY NOTICE
 [BEGIN DIAGNOSTIC LOG TEXT: shipped only if DIAGLOG_TEXT=1 in scripts/release.conf]
 REPORTING PROBLEMS
 
-MoofTCP can keep a diagnostic log of what it did. It is off by
-default. To turn it on, open the MoofTCP control panel, tick
-"Keep a diagnostic log", save, and restart. Include the log
-with your report, together with the program you used and what
-you did.
+MoofTCP keeps a small diagnostic log of what it did (connections
+opening and closing, retransmissions, dropped packets, failed
+name lookups). It costs almost nothing and is on by default for
+new settings. The switch is the "Keep a diagnostic log" box in
+the MoofTCP control panel, under the five fields; a change takes
+effect after you restart.
+
+If a program misbehaves (a connection hangs, a transfer stops, a
+name does not resolve) but the Mac keeps running:
+
+  1. Right after the problem, without restarting, run MoofDiag.
+     It is one of the release-candidate test files; ask for it
+     if you do not have it.
+  2. MoofDiag writes a text file "MoofDiag.out" next to itself.
+  3. Send that file with a short description: the program, what
+     you did, and what happened.
+
+The log lives in memory only. A crash or a restart erases it, so
+after a crash it cannot help: then please send a photo of the
+screen (or the MacsBug text, if you use MacsBug) and describe
+what you were doing.
 [END DIAGNOSTIC LOG TEXT]
 
 

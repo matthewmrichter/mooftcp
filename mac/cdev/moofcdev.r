@@ -33,7 +33,8 @@ data 'nrct' (-4064) {
     $"0001 FFFF 0057 00FF 0142"
 };
 
-/* Item order is cdev_main.c's IT_* enum (Save is last: added in the Task 8 fix round). Rows:
+/* Item order is cdev_main.c's IT_* enum (Save added in the Task 8 fix round, the diagnostic-log
+ * checkbox in Task 11b, both appended so earlier item numbers stay). Rows:
  * label at x 95, field at x 186, 24 px apart; Revert, Save and the version along the bottom. */
 resource 'DITL' (-4064) {
     {
@@ -48,11 +49,12 @@ resource 'DITL' (-4064) {
         {57, 95, 73, 180}, StaticText { disabled, "Router" };
         {81, 95, 97, 180}, StaticText { disabled, "DNS server" };
         {105, 95, 121, 180}, StaticText { disabled, "Domain" };
-        {132, 95, 148, 316}, StaticText { disabled, "" };
-        {150, 95, 182, 316}, StaticText { disabled, "" };
-        {186, 95, 218, 316}, StaticText { disabled, "Changes take effect after you restart." };
+        {150, 95, 166, 316}, StaticText { disabled, "" };
+        {168, 95, 200, 316}, StaticText { disabled, "" };
+        {202, 95, 218, 320}, StaticText { disabled, "Changes take effect after you restart." };
         {228, 250, 244, 320}, StaticText { disabled, "v1.0rc1" };
         {224, 170, 244, 235}, Button { enabled, "Save" };
+        {128, 93, 146, 316}, CheckBox { enabled, "Keep a diagnostic log" };
     }
 };
 

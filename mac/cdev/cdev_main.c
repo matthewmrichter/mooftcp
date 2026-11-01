@@ -8,7 +8,9 @@
  *              cfe_decode (the saved settings; empty fields when there is no file or no usable
  *              resource) and the draft MCFD 128 (edits that could not be saved last time; shown
  *              instead of the saved values when present), show the status line.
- *   hitDev     Save: validate (an invalid field gets an alert naming it, the field is selected and
+ *   hitDev     "Keep a diagnostic log" checkbox (prefs flags bit 0; on by default for a new prefs file,
+ *              Task 11b): toggles, counts as an edit like the text fields.
+ *              Save: validate (an invalid field gets an alert naming it, the field is selected and
  *              the text stays; the off-subnet router warning asks first), then write the prefs.
  *              Revert: put the saved values back.
  *   keyEvtDev  Return/Enter are swallowed (a field would get a CR); a character that would make a
@@ -40,6 +42,7 @@
 #include <Memory.h>
 #include <Events.h>
 #include <OSUtils.h>
+
 #include <stdint.h>
 #include "cfg_edit.h"
 #include "cdev_logic.h"
@@ -59,7 +62,7 @@ enum { cdevGenErr = -1, cdevMemErr = 0, cdevResErr = 1, cdevUnset = 3 };
  * numItems items. Field item = IT_IP + (CFE_F_* - 1). */
 enum { IT_REVERT = 1, IT_IP, IT_MASK, IT_GW, IT_DNS, IT_DOMAIN,
        IT_L_IP, IT_L_MASK, IT_L_GW, IT_L_DNS, IT_L_DOMAIN, IT_STATUS, IT_CHECK, IT_NOTE, IT_VERSION,
-       IT_SAVE };
+       IT_SAVE, IT_LOG };
 
 /* Alerts (moofcdev.r). Fixed IDs in the cdev's own file: CPanelID is the Control Panel desk
  * accessory's own resource base (observed -15904 = 0xC1E0 in Snow, DRVR 15's owned range), not the
@@ -76,7 +79,7 @@ typedef struct {
 
 #define PREFS_NAME ((ConstStringPtr)"\pMoofTCP Prefs")
 #define NOTE_NORMAL "Changes take effect after you restart."
-#define NOTE_DRAFT  "Unsaved changes from last time (not saved yet). Fix them and Save."
+#define NOTE_DRAFT  "Kept from last time, not saved yet."
 
 static void zero(void *p, long n) {
     char *c = (char *)p;
@@ -121,7 +124,17 @@ static void get_text(DialogPtr d, short base, short it, char *out, int cap) {
     out[n] = 0;
 }
 
+/* The "Keep a diagnostic log" checkbox (Task 11b). */
+static ControlHandle log_box(DialogPtr d, short base) {
+    short type;
+    Handle h;
+    Rect r;
+    GetDialogItem(d, (short)(base + IT_LOG), &type, &h, &r);
+    return (ControlHandle)h;
+}
+
 static void read_fields(DialogPtr d, short base, CfeFields *f) {
+    f->log = (uint8_t)(GetControlValue(log_box(d, base)) ? 1 : 0);
     get_text(d, base, IT_IP, f->ip, (int)sizeof f->ip);
     get_text(d, base, IT_MASK, f->mask, (int)sizeof f->mask);
     get_text(d, base, IT_GW, f->gw, (int)sizeof f->gw);
@@ -135,6 +148,7 @@ static void show_fields(DialogPtr d, short base, const CfeFields *f) {
     set_text(d, base, IT_GW, f->gw);
     set_text(d, base, IT_DNS, f->dns);
     set_text(d, base, IT_DOMAIN, f->domain);
+    SetControlValue(log_box(d, base), f->log ? 1 : 0);
 }
 
 static short alert(short which, const unsigned char *msg) {
@@ -186,20 +200,22 @@ static int load_prefs(CfeFields *saved, CfeFields *draft) {
     int has = 0;
     zero(saved, sizeof *saved);
     zero(draft, sizeof *draft);
+    cdl_load_saved(NULL, 0, saved);                         /* no file: empty fields, log on */
     ref = OpenRFPerm(PREFS_NAME, LM_BOOTDRIVE, fsRdPerm);
     if (ref != -1) {
         UseResFile(ref);
         h = Get1Resource('MCFG', 128);
         if (h) {
             HLock(h);
-            (void)cfe_decode((const uint8_t *)*h, (uint32_t)GetHandleSize(h), saved); /* -1: empty */
+            cdl_load_saved((const uint8_t *)*h, (uint32_t)GetHandleSize(h), saved);
             HUnlock(h);
             ReleaseResource(h);
         }
         h = Get1Resource('MCFD', 128);
         if (h) {
             HLock(h);
-            has = cdl_draft_decode((const uint8_t *)*h, (uint32_t)GetHandleSize(h), draft) == 0;
+            has = cdl_draft_decode((const uint8_t *)*h, (uint32_t)GetHandleSize(h), draft,
+                                   saved->log) == 0;
             HUnlock(h);
             ReleaseResource(h);
         }
@@ -371,7 +387,7 @@ static const char *write_prefs(const CfeFields *f) {
 static const char *write_draft(const CfeFields *f) {
     short cur = CurResFile(), ref;
     int created;
-    uint8_t buf[1 + 4 * 16 + 64];
+    uint8_t buf[160];                                       /* draft v2: at most 1 + 4*16 + 64 + 1 */
     uint32_t len = cdl_draft_encode(f, buf, sizeof buf);
     const char *why = prefs_open(1, &ref, &created);
     Handle h;
@@ -555,6 +571,10 @@ static long dispatch(const CdevArgs *a) {
             st->check_pending = 1;
         } else if (a->item - base == IT_SAVE) {
             (void)save_now(a, st);
+        } else if (a->item - base == IT_LOG) {
+            ControlHandle c = log_box(d, base);
+            SetControlValue(c, GetControlValue(c) ? 0 : 1);
+            st->check_pending = 1;
         }
         break;
     case keyEvtDev:

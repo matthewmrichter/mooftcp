@@ -62,7 +62,7 @@ int cdl_insert_ok(int cur, int sel, int n, int cap);
 int cdl_key_inserts(unsigned char c);
 
 void cdl_pcat(unsigned char *ps, const char *c);          /* append a C string, capped at 255 */
-int cdl_fields_equal(const CfeFields *a, const CfeFields *b);
+int cdl_fields_equal(const CfeFields *a, const CfeFields *b);   /* the five texts and the log flag */
 
 void cdl_problem_text(const CfeFields *f, int rc, const CfeError *e, unsigned char *ps);
 int cdl_check_key(const CfeFields *f, int rc, const CfeError *e);   /* 0 = nothing to show */
@@ -81,9 +81,15 @@ enum { CDL_CLOSE_NOTHING = 1,  /* nothing changed (or the same invalid draft is 
 /* draft: the draft read at initDev, NULL if there was none. rc: cfe_validate(cur). */
 int cdl_close_action(const CfeFields *cur, const CfeFields *saved, const CfeFields *draft, int rc);
 
-/* The draft resource: version byte 1, then the five fields as Pascal strings. Returns the length,
- * 0 if cap is too small. decode: 0 on success, -1 if not a usable draft (f all empty). */
+/* The draft resource: version byte 2, the five fields as Pascal strings, then the log flag byte
+ * (0/1). Version 1 (Task 8 fix round 1: no flag byte) still decodes; its log comes from
+ * default_log (the panel passes the saved value). encode returns the length, 0 if cap is too
+ * small. decode: 0 on success, -1 if not a usable draft (f all empty). */
 uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap);
-int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f);
+int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log);
+
+/* The saved settings from MCFG 128 (res may be NULL: no file / no resource). An unusable or
+ * missing resource gives empty fields with log ON: the default for a new prefs file (Task 11b). */
+void cdl_load_saved(const uint8_t *res, uint32_t n, CfeFields *f);
 
 #endif

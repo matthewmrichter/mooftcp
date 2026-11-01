@@ -24,9 +24,12 @@
  *    "..", (the resolver appends it to names). Empty is fine.
  *  - Strings must be NUL-terminated inside their buffer, else the field is invalid.
  *  - cfe_encode refuses (returns 0) on any fatal validation result. It keeps the raw mode word,
- *    the flags byte (diagnostic log) and unknown tail bytes of the prior resource (R3); a prior
- *    that is not a usable v1 resource (corrupt, foreign version, too short) counts as none: mode
- *    manual, flags 0, no tail.
+ *    the flags byte's other bits and unknown tail bytes of the prior resource (R3); bit 0 (the
+ *    diagnostic log) comes from f->log (Task 11b). A prior that is not a usable v1 resource
+ *    (corrupt, foreign version, too short) counts as none: mode manual, flags = f->log only, no
+ *    tail.
+ *  - cfe_decode sets f->log from flags bit 0 (0 when the resource has no flags byte). The panel's
+ *    default for a NEW file (no usable resource) is log on: cdl_load_saved (cdev_logic.h).
  *  - cfe_decode shows what is stored but blanks fields the validator would refuse (an address the
  *    loader treats as unconfigured, a reserved gateway/DNS, a bad domain). */
 #ifndef CFG_EDIT_H
@@ -35,7 +38,8 @@
 #include <stdint.h>
 #include "mt.h"
 
-typedef struct { char ip[16], mask[16], gw[16], dns[16], domain[64]; } CfeFields;
+/* log: the "Keep a diagnostic log" checkbox = prefs flags bit 0 (MT_CFG_FLAG_LOG), 0 or 1 (Task 11b). */
+typedef struct { char ip[16], mask[16], gw[16], dns[16], domain[64]; uint8_t log; } CfeFields;
 
 /* field ids (CfeError.field) */
 enum { CFE_F_NONE = 0, CFE_F_IP, CFE_F_MASK, CFE_F_GW, CFE_F_DNS, CFE_F_DOMAIN };

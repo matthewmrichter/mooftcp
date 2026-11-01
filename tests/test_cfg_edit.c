@@ -297,14 +297,22 @@ static void encode_keeps_prior_mode_flags_tail(void) {
     CfeFields f, g;
     uint32_t n;
     setf(&f, "192.168.1.7", "255.255.255.0", "192.168.1.1", "8.8.8.8", "new.example");
+    f.log = 1;                                          /* the checkbox as decoded from prior */
     n = cfe_encode(&f, prior, sizeof prior, buf, sizeof buf);
     T_EQ(n, 22 + 11 + 2);
     T_EQ(mt_cfg_raw_mode(buf, n), 7);                   /* raw mode word, not folded */
     T_EQ(buf[20 + 1 + 11], 0x81);                       /* flags byte incl. unknown bits */
+    f.log = 0;                                          /* unticked: bit 0 clears, bit 7 stays */
+    n = cfe_encode(&f, prior, sizeof prior, buf, sizeof buf);
+    T_EQ(buf[20 + 1 + 11], 0x80);
+    T_EQ(buf[n - 2], 0xDE); T_EQ(buf[n - 1], 0xAD);
+    f.log = 1;
+    n = cfe_encode(&f, prior, sizeof prior, buf, sizeof buf);
     T_EQ(buf[n - 2], 0xDE); T_EQ(buf[n - 1], 0xAD);
     T_EQ(cfe_decode(buf, n, &g), 0);
     T_CHECK(strcmp(g.ip, "192.168.1.7") == 0);
     T_CHECK(strcmp(g.domain, "new.example") == 0);
+    f.log = 0;                                          /* below: the checkbox off */
     /* prior without flags byte / tail: flags 0, no tail, mode kept */
     { static const uint8_t p2[] = { 0,1, 0,1, 10,0,0,2, 255,0,0,0, 0,0,0,0, 0,0,0,0, 0 };
       n = cfe_encode(&f, p2, sizeof p2, buf, sizeof buf);
@@ -350,6 +358,41 @@ static void encode_rewrite_stable(void) {
     n = cfe_encode(&f, prior, sizeof prior, buf, sizeof buf);
     T_EQ(n, sizeof prior);
     T_MEMEQ(buf, prior, sizeof prior);
+}
+
+/* Task 11b: the diagnostic-log checkbox is flags bit 0. */
+static void log_flag_encode_decode(void) {
+    static const uint8_t off_file[] = { 0,1, 0,0, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 0, 0x00 };
+    static const uint8_t nofl_file[] = { 0,1, 0,0, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 0 };
+    static const uint8_t bits_file[] = { 0,1, 0,0, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 0, 0x7F, 9 };
+    uint8_t buf[64];
+    CfeFields f;
+    uint32_t n;
+    /* existing flag OFF decodes OFF and re-encodes OFF */
+    T_EQ(cfe_decode(off_file, sizeof off_file, &f), 0);
+    T_EQ(f.log, 0);
+    n = cfe_encode(&f, off_file, sizeof off_file, buf, sizeof buf);
+    T_EQ(n, sizeof off_file);
+    T_MEMEQ(buf, off_file, sizeof off_file);
+    /* a file without a flags byte (old mkprefs default) shows OFF */
+    T_EQ(cfe_decode(nofl_file, sizeof nofl_file, &f), 0);
+    T_EQ(f.log, 0);
+    /* other bits and the tail survive both settings of bit 0 */
+    T_EQ(cfe_decode(bits_file, sizeof bits_file, &f), 0);
+    T_EQ(f.log, 1);
+    n = cfe_encode(&f, bits_file, sizeof bits_file, buf, sizeof buf);
+    T_MEMEQ(buf, bits_file, sizeof bits_file);
+    f.log = 0;
+    n = cfe_encode(&f, bits_file, sizeof bits_file, buf, sizeof buf);
+    T_EQ(n, sizeof bits_file);
+    T_EQ(buf[21], 0x7E); T_EQ(buf[22], 9);
+    /* no prior (new file): the flags byte is just the checkbox */
+    f.log = 1;
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(buf[n - 1], 0x01);
+    f.log = 0;
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(buf[n - 1], 0x00);
 }
 
 static void decode_blanks_invalid(void) {
@@ -435,4 +478,4 @@ T_MAIN(parse_ip_table, parse_mask_table, format_round_trip, validate_empty_and_b
        validate_reserved_addresses, validate_host_bits, validate_ip_required,
        validate_gateway_offnet_warning, validate_domain, encode_decode_round_trip,
        encode_refuses_fatal_and_small_cap, encode_keeps_prior_mode_flags_tail, encode_rewrite_stable,
-       decode_blanks_invalid, parse_ip_idempotent_fuzz)
+       decode_blanks_invalid, parse_ip_idempotent_fuzz, log_flag_encode_decode)

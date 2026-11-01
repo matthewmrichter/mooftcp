@@ -243,23 +243,70 @@ static void draft_round_trip(void) {
     uint8_t b[256];
     uint32_t n;
     setf(&f, "10.0.0.2", "255.0.255.0", "10.0.0.1", "", "a-very.long_domain");
+    f.log = 1;
     n = cdl_draft_encode(&f, b, sizeof b);
-    T_EQ(n, 1 + 1 + 8 + 1 + 11 + 1 + 8 + 1 + 0 + 1 + 18);
-    T_EQ(cdl_draft_decode(b, n, &g), 0);
+    T_EQ(n, 1 + 1 + 8 + 1 + 11 + 1 + 8 + 1 + 0 + 1 + 18 + 1);
+    T_EQ(b[0], 2);
+    T_EQ(cdl_draft_decode(b, n, &g, 0), 0);
+    T_EQ(g.log, 1);                                    /* the flag round-trips, default ignored */
     T_EQ(cdl_fields_equal(&f, &g), 1);
+    f.log = 0;
+    n = cdl_draft_encode(&f, b, sizeof b);
+    T_EQ(cdl_draft_decode(b, n, &g, 1), 0);
+    T_EQ(g.log, 0);
     T_EQ(cdl_draft_encode(&f, b, 10), 0);               /* cap too small */
-    T_EQ(cdl_draft_decode(b, n - 1, &g), -1);          /* truncated */
+    T_EQ(cdl_draft_encode(&f, b, n - 1), 0);            /* no room for the flag byte */
+    T_EQ(cdl_draft_decode(b, n - 1, &g, 0), -1);       /* truncated (flag byte missing) */
     T_EQ(g.ip[0], 0);
-    b[0] = 2;
-    T_EQ(cdl_draft_decode(b, n, &g), -1);              /* foreign version */
-    b[0] = 1; b[1] = 16;                               /* field longer than its buffer */
-    T_EQ(cdl_draft_decode(b, n, &g), -1);
-    T_EQ(cdl_draft_decode(NULL, 0, &g), -1);
+    b[n - 1] = 2;
+    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* flag byte not 0/1 */
+    b[n - 1] = 0;
+    b[0] = 3;
+    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* foreign version */
+    b[0] = 2; b[1] = 16;                               /* field longer than its buffer */
+    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);
+    T_EQ(cdl_draft_decode(NULL, 0, &g, 0), -1);
     setf(&f, "", "", "", "", "");
     n = cdl_draft_encode(&f, b, sizeof b);
-    T_EQ(n, 6);
-    T_EQ(cdl_draft_decode(b, n, &g), 0);
+    T_EQ(n, 7);
+    T_EQ(cdl_draft_decode(b, n, &g, 1), 0);
     T_EQ(cdl_fields_equal(&f, &g), 1);
+}
+
+/* Task 8 fix round 1 drafts (version 1, no flag byte) still decode; the flag is the default. */
+static void draft_v1_decodes(void) {
+    static const uint8_t v1[] = { 1, 8,'1','0','.','0','.','0','.','2', 3,'2','5','5', 0, 0, 3,'l','a','n' };
+    CfeFields g;
+    T_EQ(cdl_draft_decode(v1, sizeof v1, &g, 1), 0);
+    T_CHECK(strcmp(g.ip, "10.0.0.2") == 0);
+    T_CHECK(strcmp(g.mask, "255") == 0);
+    T_CHECK(strcmp(g.domain, "lan") == 0);
+    T_EQ(g.log, 1);
+    T_EQ(cdl_draft_decode(v1, sizeof v1, &g, 0), 0);
+    T_EQ(g.log, 0);
+}
+
+/* Task 11b: a new prefs file defaults the checkbox ON; an existing one shows its flag. */
+static void load_saved_defaults(void) {
+    static const uint8_t off_file[] = { 0,1, 0,0, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 0, 0x00 };
+    static const uint8_t on_file[] = { 0,1, 0,0, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 0, 0x81 };
+    static const uint8_t foreign[] = { 0,9, 0,0 };
+    CfeFields f, g;
+    cdl_load_saved(NULL, 0, &f);
+    T_EQ(f.log, 1);
+    T_EQ(f.ip[0], 0);
+    cdl_load_saved(foreign, sizeof foreign, &f);
+    T_EQ(f.log, 1);
+    cdl_load_saved(off_file, sizeof off_file, &f);
+    T_EQ(f.log, 0);
+    T_CHECK(strcmp(f.ip, "10.0.0.2") == 0);
+    cdl_load_saved(on_file, sizeof on_file, &g);
+    T_EQ(g.log, 1);
+    /* changing only the checkbox counts as an edit */
+    g = f; g.log = 1;
+    T_EQ(cdl_fields_equal(&f, &g), 0);
+    T_EQ(cdl_close_action(&g, &f, NULL, CFE_OK), CDL_CLOSE_ASK);
+    T_EQ(cdl_close_action(&f, &f, NULL, CFE_OK), CDL_CLOSE_NOTHING);
 }
 
 static void pcat_caps_at_255(void) {
@@ -271,4 +318,5 @@ static void pcat_caps_at_255(void) {
 }
 
 T_MAIN(units_is_moof_matches_moof_r, units_find_ipp_fake_table, problem_text_messages,
-       check_key_transitions, save_and_close_decisions, field_caps, draft_round_trip, pcat_caps_at_255)
+       check_key_transitions, save_and_close_decisions, field_caps, draft_round_trip, pcat_caps_at_255,
+       draft_v1_decodes, load_saved_defaults)
