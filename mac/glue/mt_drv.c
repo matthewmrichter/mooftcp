@@ -80,9 +80,9 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     MtRes *r = (MtRes *)ctx;
-    /* MultiFinder: notice a quit application before the core writes into its receive buffers (at
-     * most once per clock step, a load and a branch without MultiFinder owners; Task 12) */
-    if (r->d->n_own) mt_entry_sweep(&r->entry, 0);
+    /* MultiFinder: notice a quit application before the core writes into its receive buffers: every
+     * frame, one header load per recorded owner (a load and a branch without MultiFinder; Task 12) */
+    if (r->d->n_own && !mt_pb_owners_alive(r->d)) mt_entry_sweep(&r->entry, 0);
     mt_pb_input(r->d, frame, len);
 }
 

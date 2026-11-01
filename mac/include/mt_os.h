@@ -128,6 +128,9 @@ void mt_os_unmask(int saved);
 typedef struct MtAppMem {
     MacPtr32 lo, hi;
     uint32_t h0;
+    uint32_t name;                  /* hash of CurApName (0x910): a different application of the same size
+                                     * in the same place is a different owner; a relaunch of the SAME
+                                     * application there is not told apart (the sweep period bounds it) */
 } MtAppMem;
 int  mt_os_app_mem(MtAppMem *m);
 
@@ -137,7 +140,13 @@ int  mt_os_app_mem(MtAppMem *m);
  * exactly the same size at exactly the same place looks alive (the documented limit: the glue sweeps
  * every MT_PB_SWEEP_MS, so the block must be freed and reallocated between two sweeps). Reads two
  * words, no Toolbox call: legal at interrupt time. */
+#ifdef MT_OS_MAC
+static inline int mt_os_app_alive(const MtAppMem *m) {   /* one load: per frame while owners exist */
+    return *(volatile const uint32_t *)((m->lo & 0x00FFFFFFu) - 8u) == m->h0;
+}
+#else
 int  mt_os_app_alive(const MtAppMem *m);
+#endif
 
 /* KillIO on the Ethernet driver (PBKillIO with ioRefNum = refnum) for a transmit PB that stayed
  * in flight; `pb` is that PB (the Mac ignores it, the host fake records it). Returns the OSErr.

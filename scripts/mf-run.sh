@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # MultiFinder two-application run (Plan 3 Task 12): two copies of MfEcho (mac/mfecho) side by side,
 # one quits while the other keeps echoing; MoofDiag runs while the long one is still connected.
-#   mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--keep-disk] <label>
+#   mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--keep-disk] <label>
 #     --finder     boot without MultiFinder (Set Startup: Finder) and run the two apps one after the other
 #     --base N     testnet.py port base (echo at N+7; default 18000, started here when nothing listens)
 #     --long A|B   which copy runs long (default A: MfEchoA, launched first, T120; the other T30 + a UDP
 #                  stream); B = the first-launched one quits and the second keeps going
+#     --pending    the short one quits with an async TCPRcv + UDPRead (completion routines) and ASRs
+#                  installed, and the host answers 3 s after the quit (MfEcho option P, testnet "LATE")
 #     --release    the short one releases its streams before quitting (default: it quits with them live,
 #                  so the driver's per-application cleanup must forget them)
 #     --keep-disk  do not run fresh-disk.sh / install-moof.sh
@@ -17,15 +19,16 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
 die() { echo "mf-run.sh: $*" >&2; exit 1; }
-usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--keep-disk] <label>" >&2; exit 2; }
+usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--keep-disk] <label>" >&2; exit 2; }
 
-mf=1; base=18000; long=A; rel=""; keepdisk=""; label=""
+mf=1; base=18000; long=A; rel=""; pend=""; keepdisk=""; label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --finder) mf=""; shift;;
     --base) [ $# -ge 2 ] || usage; base="$2"; shift 2;;
     --long) [ $# -ge 2 ] || usage; long="$2"; shift 2;;
     --release) rel=R; shift;;
+    --pending) pend=P; shift;;
     --keep-disk) keepdisk=1; shift;;
     -*) usage;;
     *) [ -z "$label" ] || usage; label="$1"; shift;;
@@ -34,7 +37,7 @@ done
 [ -n "$label" ] || usage
 case "$label" in *[!A-Za-z0-9._-]*) die "label may only contain A-Z a-z 0-9 . _ -";; esac
 case "$long" in A|B) ;; *) usage;; esac
-if [ "$long" = A ]; then cfgA="T120 B$base"; cfgB="T30 B$base U $rel"; else cfgA="T30 B$base U $rel"; cfgB="T120 B$base"; fi
+if [ "$long" = A ]; then cfgA="T120 B$base"; cfgB="T30 B$base U $rel $pend"; else cfgA="T30 B$base U $rel $pend"; cfgB="T120 B$base"; fi
 
 cd "$ROOT"
 out="$ROOT/build-mac/mf/$label"
@@ -189,18 +192,29 @@ L="MfEcho$long"; S="MfEcho$([ "$long" = A ] && echo B || echo A)"
 [ -f "$out/$L.out.txt" ] && [ -f "$out/$S.out.txt" ] || die "outputs missing (see $out)"
 grep -h "^RESULT" "$out/$L.out.txt" "$out/$S.out.txt"
 shandle="$(sed -n "s/^TCPCreate 0 stream \([0-9a-f]*\).*/\1/p" "$out/$S.out.txt")"
+# the short copy's own table line for that stream: handle + rbuf + A5 + connection serial (conn moves on
+# at every open and at every forget), so a later stream in the same slot can never match it
+sline="$(sed -n '/^connected: goodbye/,/^[^ ]/p' "$out/$S.out.txt" | grep "handle $shandle " | head -1 | sed 's/^ *tcp\[[0-9]*\] //')"
 tail -n 30 "$out/$L.out.txt" | grep "^end: goodbye" || true
 ok=1
 grep -q "^RESULT PASS" "$out/$L.out.txt" || { echo "FAIL: the long copy lost echoes"; ok=""; }
-# (by stream handle: without MultiFinder the second app gets the same memory, so the same rbuf)
-if [ -z "$rel" ] && [ -n "$shandle" ] && sed -n '/^end: goodbye/,$p' "$out/$L.out.txt" | grep -q "handle $shandle"; then
-  echo "FAIL: the short copy's stream (handle $shandle) is still in the driver at the end"; ok=""
+[ -n "$sline" ] || { echo "FAIL: the short copy's stream line was not found"; ok=""; }
+if [ -z "$rel" ] && [ -n "$sline" ] && sed -n '/^end: goodbye/,$p' "$out/$L.out.txt" | grep -qF "$sline"; then
+  echo "FAIL: the short copy's stream ($sline) is still in the driver at the end"; ok=""
 fi
 if [ -z "$mf" ] && ! sed -n 's/^end: goodbye \([0-9]*\) .*/\1/p' "$out/$L.out.txt" | grep -q '^[1-9]'; then
   echo "FAIL: no goodbye kiss counted without MultiFinder"; ok=""
 fi
 if [ -n "$mf" ] && [ -z "$rel" ] && ! sed -n 's/^end: .* gone \([0-9]*\) .*/\1/p' "$out/$L.out.txt" | grep -q '^[1-9]'; then
   echo "FAIL: no owner counted as gone"; ok=""
+fi
+if [ -n "$pend" ]; then
+  grep -h "^pending\|^TCPSend LATE\|^UDPWrite LATE" "$out/$S.out.txt" || true
+  grep -q "late burst sent" "$out/testnet.log" 2>/dev/null && echo "host: late burst sent after the quit" || echo "host: (shared testnet, no log)"
+  if [ -n "$mf" ]; then
+    grep -E "^(owners|tcp\[|udp\[)" "$out/MoofDiag.out.txt" || true
+    grep -q "^owners: .* gone [1-9]" "$out/MoofDiag.out.txt" || { echo "FAIL: MoofDiag shows no gone owner"; ok=""; }
+  fi
 fi
 [ -n "$ok" ] || die "see $out"
 echo "PASS ($out)"

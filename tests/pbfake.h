@@ -57,13 +57,14 @@ extern MacPtr32 pbf_a5;           /* what mt_os_a5 reports (the "current applica
  * memory and routines inside a partition. pbf_dead_calls counts completions and ASRs the glue ran for a
  * PB or routine that lies in a quit partition (a crash on the Mac). */
 #define PBF_PARTS 32
-typedef struct { MacPtr32 lo, hi; uint32_t h0; MacPtr32 a5; uint32_t used; int live; } pbf_part;
+typedef struct { MacPtr32 lo, hi; uint32_t h0, name; MacPtr32 a5; uint32_t used; int live; } pbf_part;
 extern int pbf_app_part;
-extern uint32_t pbf_app_h0;
+extern uint32_t pbf_app_h0, pbf_app_name;   /* name: what mt_os_app_mem reports as the CurApName hash */
 extern pbf_part pbf_parts[PBF_PARTS];
 extern int pbf_dead_calls;
 int      pbf_mf_launch(uint32_t size);
-int      pbf_mf_launch_at(MacPtr32 lo, uint32_t size);
+int      pbf_mf_launch_at(MacPtr32 lo, uint32_t size, uint32_t name);   /* name 0: a new application */
+uint32_t pbf_mf_left(int i);     /* bytes pbf_mf_alloc can still give in partition i */
 void     pbf_mf_switch(int i);
 void     pbf_mf_quit(int i);
 void     pbf_mf_forget(int i);    /* drop a quit partition from the table (its memory is reused) */

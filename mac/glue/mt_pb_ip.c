@@ -93,7 +93,10 @@ static int16_t do_echo(MtDrv *d, MtAnyPb *pb) {
     e->dest = dest;
     e->tk0 = mt_os_ticks();
     e->user = pb->ip.csParam.IPEchoPB.userDataPtr;
-    e->dl = d->now + (tmo > 0 ? (uint32_t)tmo : (uint32_t)MT_PB_ECHO_TMO_S) * 1000u;
+    if (tmo <= 0) tmo = MT_PB_ECHO_TMO_S;
+    if (!e->blk.ioCompletion && tmo > MT_PB_ECHO_NONOTIFY_S) tmo = MT_PB_ECHO_NONOTIFY_S;   /* nobody waits:
+                                                 * free the slot soon (no goodbye drops it; Task 12) */
+    e->dl = d->now + (uint32_t)tmo * 1000u;
     e->state = ECHO_WAIT;
     return 0;                                                /* matrix A00: our PB completes 0 */
 }

@@ -8,6 +8,7 @@ void     os_init(void);
 uint32_t os_ticks(void);
 short    os_open_ipp(short *ref);
 short    os_control_sync(void *pb);
+short    os_control_async(void *pb);
 /* Output "<CurApName>.out" (created/truncated) and config "<CurApName>.cfg" in the app's folder. */
 void     os_app_name(char *c, int max);          /* C string */
 short    os_out_open(void);

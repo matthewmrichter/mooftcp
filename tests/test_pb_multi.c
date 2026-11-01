@@ -381,7 +381,7 @@ static void new_app_in_dead_apps_partition_is_not_the_old_owner(void) {
     blo = pbf_parts[b].lo;
     pbf_mf_quit(b);
     pbf_mf_forget(b);
-    c = pbf_mf_launch_at(blo, PART - 0x1000u);            /* same place, another size (header word) */
+    c = pbf_mf_launch_at(blo, PART - 0x1000u, 0);         /* same place, another size (header word) */
     g_compl[c] = pbf_mf_compl(c, compl_rec);
     g_asr[c] = pbf_mf_asr(c, asr_rec);
     g_cur = c;
@@ -396,7 +396,7 @@ static void new_app_in_dead_apps_partition_is_not_the_old_owner(void) {
     /* C quits; D starts 0x100 bytes into C's old range (its header lies inside C's memory) */
     pbf_mf_quit(c);
     pbf_mf_forget(c);
-    d = pbf_mf_launch_at(blo + 0x100u, PART - 0x100u);
+    d = pbf_mf_launch_at(blo + 0x100u, PART - 0x100u, 0);
     g_compl[d] = pbf_mf_compl(d, compl_rec);
     g_asr[d] = pbf_mf_asr(d, asr_rec);
     g_cur = d;
@@ -419,6 +419,30 @@ static void identical_relaunch_before_a_sweep_is_not_detected(void) {
     pbt_conn cb;
     StreamPtr sb;
     MacPtr32 blo;
+    uint32_t bname;
+    msetup();
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sb != 0);
+    blo = pbf_parts[b].lo;
+    bname = pbf_parts[b].name;
+    pbf_mf_quit(b);
+    pbf_mf_forget(b);
+    c = pbf_mf_launch_at(blo, PART, bname);               /* the same application again */
+    g_compl[c] = pbf_mf_compl(c, compl_rec);
+    g_cur = c;
+    T_EQ(status(sb), 0);                                  /* still there (the known limit) */
+    T_EQ(g_x.d->n_own_gone, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round M2: a DIFFERENT application of the same size in exactly the same block differs by its
+ * CurApName hash: its first call proves the old owner gone. */
+static void different_app_in_identical_block_is_told_apart(void) {
+    int b, c;
+    pbt_conn cb, cc;
+    StreamPtr sb, sc;
+    MacPtr32 blo;
     msetup();
     b = launch();
     sb = est(&cb);
@@ -426,11 +450,70 @@ static void identical_relaunch_before_a_sweep_is_not_detected(void) {
     blo = pbf_parts[b].lo;
     pbf_mf_quit(b);
     pbf_mf_forget(b);
-    c = pbf_mf_launch_at(blo, PART);
+    c = pbf_mf_launch_at(blo, PART, 0);                   /* same place and size, another name */
     g_compl[c] = pbf_mf_compl(c, compl_rec);
+    g_asr[c] = pbf_mf_asr(c, asr_rec);
     g_cur = c;
-    T_EQ(status(sb), 0);                                  /* still there (the known limit) */
+    sc = est(&cc);
+    T_CHECK(sc != 0);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(status(sb), invalidStreamPtr);
+    T_EQ(status(sc), 0);
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round M4: an ICMPEcho without a notify routine holds its slot at most MT_PB_ECHO_NONOTIFY_S
+ * (no goodbye drops it any more), whatever timeout it asked for, in both modes. */
+static void echo_without_notify_is_capped(void) {
+    int mode, k;
+    for (mode = 0; mode < 2; mode++) {
+        IPParamBlock *pb;
+        msetup();
+        if (mode) launch();
+        for (k = 0; k < MT_PB_ECHOQ; k++) {
+            pb = (IPParamBlock *)(mode ? apb(ipctlEchoICMP, 0) : (void *)pbt_pb(ipctlEchoICMP, 0));
+            pb->ioCompletion = 0;
+            pb->csParam.IPEchoPB.dest = T_PEER;
+            pb->csParam.IPEchoPB.timeout = 30000;
+            pb->csParam.IPEchoPB.icmpCompletion = 0;
+            T_EQ(ecall(pb, 1), 0);
+        }
+        pb = (IPParamBlock *)pbt_pb(ipctlEchoICMP, 0);
+        pb->csParam.IPEchoPB.dest = T_PEER;
+        T_EQ(ecall(pb, 1), insufficientResources);        /* all four slots held */
+        tick(MT_PB_ECHO_NONOTIFY_S * 1000u - 100u);
+        T_EQ(ecall(pb, 1), insufficientResources);
+        tick(200);
+        T_EQ(ecall(pb, 1), 0);                            /* freed after the cap */
+        T_EQ(pbf_bad, 0);
+    }
+}
+
+/* Fix round M6: a timer sweep that finds a glue frame active pushes the periodic deadline, so the
+ * timer does not re-fire at deadline 0; the next tick does the sweep. */
+static void timer_sweep_bailing_does_not_spin(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    pbf_mf_quit(b);
+    to(a);
+    pbf_now += MT_PB_SWEEP_MS;
+    g_x.d->depth = 1;
+    T_EQ(mt_pb_sweep(g_x.d, 0, NULL, NULL), 0);
+    g_x.d->depth = 0;
     T_EQ(g_x.d->n_own_gone, 0);
+    T_CHECK(mt_pb_next_deadline_ms(g_x.d) >= MT_PB_SWEEP_RETRY_MS - 1u);
+    T_CHECK(mt_pb_next_deadline_ms(g_x.d) <= MT_PB_SWEEP_RETRY_MS);
+    tick(MT_PB_SWEEP_RETRY_MS);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(status(sb), invalidStreamPtr);
     T_EQ(pbf_bad, 0);
 }
 
@@ -521,7 +604,7 @@ static void sweep_waits_for_glue_frames(void) {
 #define FA 3
 #define FS 3
 typedef struct {
-    int part, live, swept;
+    int part, live, swept, qstep;
     StreamPtr s[FS];
     pbt_conn c[FS];
     StreamPtr u;
@@ -585,11 +668,19 @@ static int pick_live(void) {
     return -1;
 }
 
-/* The driver's input path (mt_drv.c rx_cb) checks the owners before each frame, once per clock step. */
+/* The driver's input path (mt_drv.c rx_cb): before every frame while owners exist. */
 static void rx(void) {
     g_g.depth++;
-    if (g_x.d->n_own) mt_entry_sweep(&g_e, 0);
+    if (g_x.d->n_own && !mt_pb_owners_alive(g_x.d)) mt_entry_sweep(&g_e, 0);
     g_g.depth--;
+}
+/* The quit: MultiFinder frees the partition (no goodbye); from now on nothing may write into it. */
+static void fquit(int a, int step) {
+    pbf_mf_quit(F[a].part);
+    F[a].live = 0;
+    memset(pbf_p(pbf_parts[F[a].part].lo), 0xC5, pbf_parts[F[a].part].hi - pbf_parts[F[a].part].lo);
+    F[a].swept = 1;                                        /* canary armed at the quit */
+    F[a].qstep = step;
 }
 
 static unsigned long g_steps, g_gone, g_deadc, g_apps;
@@ -609,13 +700,14 @@ static void fuzz_one(uint32_t seed) {
             if (reuse >= 0) {
                 MacPtr32 lo = pbf_parts[F[reuse].part].lo + (rn(2) ? 0 : 0x100u);
                 uint32_t sz = pbf_parts[F[reuse].part].hi - lo;
-                if (lo == pbf_parts[F[reuse].part].lo) sz -= 0x800u;   /* same start: another size (else the
-                                                                           identical-block limit applies) */
+                if (lo == pbf_parts[F[reuse].part].lo && rn(2)) sz -= 0x800u;   /* same start: another size,
+                                                      or the same size under another name (never the identical
+                                                      application in the identical block: the documented limit) */
                 pbf_mf_forget(F[reuse].part);
                 F[reuse].part = -1;                      /* its memory is the new one's now */
                 a = g_nf++;
                 memset(&F[a], 0, sizeof F[a]);
-                F[a].part = pbf_mf_launch_at(lo, sz);
+                F[a].part = pbf_mf_launch_at(lo, sz, 0);
             } else {
                 a = g_nf++;
                 memset(&F[a], 0, sizeof F[a]);
@@ -630,6 +722,7 @@ static void fuzz_one(uint32_t seed) {
         }
         to(F[a].part);
         j = (int)rn(FS);
+        if (pbf_mf_left(F[a].part) < 0x5000u) r = 8;      /* its partition is nearly full: it quits */
         switch (r) {
         case 1: case 2:
             if (!F[a].s[j]) F[a].s[j] = est(&F[a].c[j]);
@@ -667,14 +760,12 @@ static void fuzz_one(uint32_t seed) {
             }
             break;
         case 8:                                            /* quit: no goodbye under MultiFinder */
-            pbf_mf_quit(F[a].part);
-            F[a].live = 0;
+            fquit(a, step);
             break;
         case 9:
             if (rn(6) == 0) {                              /* a goodbye kiss, then the quit */
                 T_EQ(ecall(apb(-1, 0), 0), 0);
-                pbf_mf_quit(F[a].part);
-                F[a].live = 0;
+                fquit(a, step);
             }
             break;
         default:
@@ -688,10 +779,6 @@ static void fuzz_one(uint32_t seed) {
             for (i = 0; i < g_nf; i++) {
                 if (F[i].live || F[i].part < 0) continue;
                 if (refers(&pbf_parts[F[i].part])) { fbad(seed, step, "object of a quit partition kept"); return; }
-                if (!F[i].swept) {                         /* canary: nothing writes here any more */
-                    memset(pbf_p(pbf_parts[F[i].part].lo), 0xC5, pbf_parts[F[i].part].hi - pbf_parts[F[i].part].lo);
-                    F[i].swept = 1;
-                }
             }
         }
         for (i = 0; i < g_nf; i++) {
@@ -699,11 +786,12 @@ static void fuzz_one(uint32_t seed) {
                 for (j = 0; j < FS; j++)
                     if (F[i].s[j] && !tcp_live(F[i].s[j])) { fbad(seed, step, "live app's TCP stream dropped"); return; }
                 if (F[i].u && !udp_live(F[i].u)) { fbad(seed, step, "live app's UDP stream dropped"); return; }
-            } else if (F[i].swept && F[i].part >= 0 && ((step & 15) == 0 || step == 299)) {
+            } else if (F[i].swept && F[i].part >= 0 &&
+                       (step - F[i].qstep < 48 || (step & 15) == 0 || step == 299)) {   /* every step soon after the quit */
                 static uint8_t ref[PART];
                 if (!ref[0]) memset(ref, 0xC5, sizeof ref);
                 if (memcmp(pbf_p(pbf_parts[F[i].part].lo), ref, pbf_parts[F[i].part].hi - pbf_parts[F[i].part].lo))
-                    { fbad(seed, step, "write into a quit partition after its sweep"); return; }
+                    { fbad(seed, step, "write into a quit partition (canary armed at the quit)"); return; }
             }
         }
     }
@@ -731,4 +819,6 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        sweep_by_timer_when_nobody_calls, gone_apps_routines_never_run_before_the_sweep,
        sweep_with_loans_dns_echo_of_both_apps, new_app_in_dead_apps_partition_is_not_the_old_owner,
        identical_relaunch_before_a_sweep_is_not_detected, classic_system6_records_no_owner,
+       different_app_in_identical_block_is_told_apart, echo_without_notify_is_capped,
+       timer_sweep_bailing_does_not_spin,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)

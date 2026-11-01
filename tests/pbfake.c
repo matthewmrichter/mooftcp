@@ -17,7 +17,8 @@ void (*pbf_leave_hook)(void);
 MacPtr32 pbf_app_lo, pbf_app_hi;
 MacPtr32 pbf_a5;
 int pbf_app_part;
-uint32_t pbf_app_h0;
+uint32_t pbf_app_h0, pbf_app_name;
+static uint32_t g_names;
 pbf_part pbf_parts[PBF_PARTS];
 int pbf_dead_calls;
 #define NCODE 64
@@ -55,7 +56,8 @@ void pbf_reset(void) {
     pbf_app_lo = 0;
     pbf_app_hi = 0xFFFFFFFFu;
     pbf_app_part = 0;
-    pbf_app_h0 = 0;
+    pbf_app_h0 = pbf_app_name = 0;
+    g_names = 0;
     memset(pbf_parts, 0, sizeof pbf_parts);
     pbf_dead_calls = 0;
     g_ncode = 0;
@@ -64,7 +66,7 @@ void pbf_reset(void) {
 
 /* ---- MultiFinder model ---- */
 
-static int part_new(MacPtr32 lo, uint32_t size) {
+static int part_new(MacPtr32 lo, uint32_t size, uint32_t name) {
     int i;
     for (i = 0; i < PBF_PARTS; i++)
         if (!pbf_parts[i].lo) break;
@@ -72,6 +74,7 @@ static int part_new(MacPtr32 lo, uint32_t size) {
     pbf_parts[i].lo = lo;
     pbf_parts[i].hi = lo + size;
     pbf_parts[i].h0 = 0x80000000u | (size + 8u);
+    pbf_parts[i].name = name ? name : 0x4E000000u + ++g_names;
     pbf_parts[i].a5 = lo + size - 0x100u;
     pbf_parts[i].used = 16;                     /* the "zone header" */
     pbf_parts[i].live = 1;
@@ -81,12 +84,12 @@ static int part_new(MacPtr32 lo, uint32_t size) {
 
 int pbf_mf_launch(uint32_t size) {
     void *m = pbf_alloc(size);
-    return part_new(m ? pbf_a(m) : 0, size);
+    return part_new(m ? pbf_a(m) : 0, size, 0);
 }
 
-int pbf_mf_launch_at(MacPtr32 lo, uint32_t size) {
+int pbf_mf_launch_at(MacPtr32 lo, uint32_t size, uint32_t name) {
     memset(pbf_p(lo), 0, size);                 /* the new application's memory */
-    return part_new(lo, size);
+    return part_new(lo, size, name);
 }
 
 void pbf_mf_switch(int i) {
@@ -95,6 +98,7 @@ void pbf_mf_switch(int i) {
     pbf_app_lo = p->lo;
     pbf_app_hi = p->hi;
     pbf_app_h0 = p->h0;
+    pbf_app_name = p->name;
     pbf_a5 = p->a5;
 }
 
@@ -103,6 +107,12 @@ void pbf_mf_quit(int i) {
 }
 
 void pbf_mf_forget(int i) { memset(&pbf_parts[i], 0, sizeof pbf_parts[i]); }
+
+uint32_t pbf_mf_left(int i) {
+    const pbf_part *p = &pbf_parts[i];
+    uint32_t a = (p->used + 7u) & ~7u, cap = p->hi - p->lo - 0x200u;
+    return a < cap ? cap - a : 0;
+}
 
 void *pbf_mf_alloc(int i, uint32_t n) {
     pbf_part *p = &pbf_parts[i];
@@ -277,6 +287,7 @@ int mt_os_app_mem(MtAppMem *m) {
     m->lo = pbf_app_lo;
     m->hi = pbf_app_hi;
     m->h0 = pbf_app_part ? pbf_app_h0 : 0;
+    m->name = pbf_app_name;
     return pbf_app_part != 0;
 }
 

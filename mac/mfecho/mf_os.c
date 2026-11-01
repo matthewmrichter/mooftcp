@@ -50,6 +50,7 @@ void os_init(void)
 uint32_t os_ticks(void) { return (uint32_t)TickCount(); }
 short os_open_ipp(short *ref) { return (short)OpenDriver("\p.IPP", ref); }
 short os_control_sync(void *pb) { return (short)PBControlSync((ParmBlkPtr)pb); }
+short os_control_async(void *pb) { return (short)PBControlAsync((ParmBlkPtr)pb); }
 uint32_t os_cur_a5(void) { return LM32(0x904); }
 uint32_t os_appl_zone(void) { return LM32(0x2AA); }
 

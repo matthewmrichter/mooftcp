@@ -268,22 +268,36 @@ static int overlaps(const MtAppMem *a, const MtAppMem *b) {
 }
 
 static int same(const MtAppMem *a, const MtAppMem *b) {
-    return a->lo == b->lo && a->hi == b->hi && a->h0 == b->h0;
+    return a->lo == b->lo && a->hi == b->hi && a->h0 == b->h0 && a->name == b->name;
 }
 
 /* Read-only pre-check (no gate: the table only changes inside it, and a stale read just sends us
  * through the full path or leaves the work to the next call or tick): every owner alive, none
  * overlapping the caller, and the caller (if any) already recorded. */
 static int quiet(const MtDrv *d, const MtAppMem *cur) {
-    uint8_t i;
+    const MtAppMem *o = d->own;
+    uint8_t left = d->n_own;
     int known = 0;
-    for (i = 0; i < MT_PB_OWNERS; i++) {
-        const MtAppMem *o = &d->own[i];
+    for (; left; o++) {                          /* stops after the n_own occupied slots */
         if (!o->lo) continue;
+        left--;
         if (cur && same(o, cur)) { known = 1; continue; }
         if (!mt_os_app_alive(o) || (cur && overlaps(o, cur))) return 0;
     }
     return !cur || known;
+}
+
+/* The input path's check (mt_drv.c rx_cb, before every frame while owners exist): every recorded
+ * partition still there? Inline header loads only; the full sweep runs when one is gone. */
+int mt_pb_owners_alive(const MtDrv *d) {
+    const MtAppMem *o = d->own;
+    uint8_t left = d->n_own;
+    for (; left; o++) {
+        if (!o->lo) continue;
+        left--;
+        if (!mt_os_app_alive(o)) return 0;
+    }
+    return 1;
 }
 
 int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx) {
@@ -293,12 +307,9 @@ int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), 
     if (!note && !d->n_own) return 0;            /* no MultiFinder caller recorded: nothing to watch */
     if (note) part = mt_os_app_mem(&cur);        /* task time: the caller's own globals */
     if (!part && !d->n_own) return 0;
-    if (!note) {                                 /* timer / input path (gate owner): once per clock step */
-        uint32_t now = mt_os_ms();
-        if (now == d->own_chk) return 0;
-        d->own_chk = now;
+    if (!note) {                                 /* timer / input path (gate owner): every time */
         if (quiet(d, NULL)) {
-            d->own_dl = now + MT_PB_SWEEP_MS;
+            d->own_dl = mt_os_ms() + MT_PB_SWEEP_MS;
             return 0;
         }
     } else if (quiet(d, part ? &cur : NULL)) {
@@ -306,6 +317,7 @@ int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), 
     }
     sv = mt_os_irq_save();
     if (d->depth || d->in_core) {                /* a glue frame is active: next call or tick */
+        d->own_dl = mt_os_ms() + MT_PB_SWEEP_RETRY_MS;   /* the timer must not re-fire at deadline 0 */
         mt_os_irq_restore(sv);
         return 0;
     }

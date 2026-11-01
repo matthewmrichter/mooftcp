@@ -10,6 +10,9 @@
     base+19  burst    sends 5000 bytes (pattern A..Z), then closes (clean FIN)
     base+37  reset    sends "x", then closes with RST
     base+7/udp, base+9/udp   UDP echo / UDP discard (used by mac/apiprobe)
+    "LATE" on the TCP or UDP echo: instead of echoing at once, the host waits 3 s, then sends 20 x 200 bytes
+    (TCP; the connection stays open) or echoes the datagram (UDP): data that arrives after a MultiFinder
+    application quit with reads pending (mac/mfecho option P, Plan 3 Task 12)
 
 Every connection, close and error is logged to stdout with a timestamp.
 Ctrl-C (SIGINT) or SIGTERM stops it.
@@ -50,7 +53,18 @@ class Service(socketserver.BaseRequestHandler):
                     break
                 total += len(data)
                 log(f"{self.name}:{port} {peer} recv {len(data)} bytes {data!r}")
-                if self.echo:
+                if self.echo and data.startswith(b"LATE"):
+                    sock = self.request
+
+                    def late():
+                        try:
+                            for _ in range(20):
+                                sock.sendall(b"L" * 200)
+                            log(f"{self.name}:{port} {peer} late burst sent (4000 bytes)")
+                        except OSError as e:
+                            log(f"{self.name}:{port} {peer} late burst error {e}")
+                    threading.Timer(3.0, late).start()
+                elif self.echo:
                     self.request.sendall(data)
         except OSError as e:
             log(f"{self.name}:{port} {peer} error {e}")
@@ -138,10 +152,16 @@ def udp_service(bind, port, echo):
                     # in_pktinfo: ifindex, spec_dst, addr (the header destination)
                     ctl = [(socket.IPPROTO_IP, socket.IP_PKTINFO,
                             struct.pack("I4s4s", 0, cdata[8:12], b"\0\0\0\0"))]
-            try:
-                sock.sendmsg([data], ctl, 0, addr)
-            except OSError as e:
-                log(f"udp:{port} send error {e}")
+            def send(data=data, ctl=ctl, addr=addr):
+                try:
+                    sock.sendmsg([data], ctl, 0, addr)
+                    log(f"udp:{port} {addr[0]}:{addr[1]} sent {len(data)} bytes")
+                except OSError as e:
+                    log(f"udp:{port} send error {e}")
+            if data.startswith(b"LATE"):
+                threading.Timer(3.0, send).start()
+            else:
+                send()
 
     threading.Thread(target=loop, daemon=True).start()
     return sock

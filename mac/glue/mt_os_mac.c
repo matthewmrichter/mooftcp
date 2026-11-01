@@ -158,11 +158,22 @@ static int mf_running(void)
  * partition is validated before it is trusted: an in-use block (tag 0x80 relocatable / 0x40
  * nonrelocatable), its end above the zone's bkLim and above CurrentA5, below BufPtr; anything
  * else falls back to ApplZone..BufPtr (the classic range). */
+/* FNV-1a of CurApName (Str31 at 0x910). */
+static uint32_t app_name_hash(void)
+{
+    const volatile uint8_t *p = (const volatile uint8_t *)0x910;
+    uint32_t h = 2166136261u;
+    uint8_t n = p[0] < 31 ? p[0] : 31, i;
+    for (i = 0; i <= n; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
 int mt_os_app_mem(MtAppMem *m)
 {
     uint32_t lo = *(volatile uint32_t *)0x2AA, hi = *(volatile uint32_t *)0x10C;
     uint32_t a5 = *(volatile uint32_t *)0x904;
     m->h0 = 0;
+    m->name = app_name_hash();
     if (hi > 0x00FFFFFFu) {                       /* 32-bit clean memory map: not System 6 on a Classic */
         m->lo = lo;
         m->hi = hi;
@@ -186,12 +197,6 @@ int mt_os_app_mem(MtAppMem *m)
     return 0;
 }
 
-int mt_os_app_alive(const MtAppMem *m)
-{
-    uint32_t lo = m->lo & 0x00FFFFFFu;
-    if (lo < 0x1000u || (lo & 1u)) return 0;
-    return *(volatile const uint32_t *)(lo - 8u) == m->h0;
-}
 
 int mt_os_gate_depth(void)
 {

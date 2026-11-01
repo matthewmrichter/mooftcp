@@ -55,6 +55,8 @@
 #define MT_PB_DNS         4      /* DNR lookups in flight (private csCode, mt_pb_dns.c); the core has 4 query slots */
 #define MT_PB_OWNERS      8      /* MultiFinder applications tracked for the per-application sweep (Task 12) */
 #define MT_PB_SWEEP_MS    250    /* periodic sweep while owners are recorded (mt_pb_sweep) */
+#define MT_PB_SWEEP_RETRY_MS 20  /* a timer sweep that found a glue frame active retries after this */
+#define MT_PB_ECHO_NONOTIFY_S 10 /* ICMPEcho without icmpCompletion: its slot is held at most this long */
 
 /* Results that are not .IPP codes: notOpenErr (Device Manager: driver not open, matrix
  * "Unconfigured run") and the -4 MacTCP returns for csCodes it does not implement (matrix 120). */
@@ -228,7 +230,6 @@ struct MtDrv {
      * objects of an owner whose partition is gone (no goodbye kiss under MultiFinder). */
     MtAppMem  own[MT_PB_OWNERS];
     uint32_t  own_dl;           /* next periodic sweep (ms clock) while n_own > 0 */
-    uint32_t  own_chk;          /* clock value of the last timer / input-path check (once per step) */
     uint32_t  n_own_gone;       /* owners found gone and swept */
     uint32_t  n_own_full;       /* callers not recorded: the table was full (their objects are never swept) */
     uint32_t  n_dead_calls;     /* routines of a gone owner not called (the sweep had not run yet) */
@@ -278,6 +279,9 @@ int      mt_pb_in_app(const MtAppMem *m, MacPtr32 p);
  * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
  * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
 int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
+/* 1 while every recorded owner's partition header is unchanged (the input path's per-frame check,
+ * no gate needed: reads only). */
+int      mt_pb_owners_alive(const MtDrv *d);
 
 /* The one table each for core -> MacTCP codes (exported so every row is tested). */
 uint16_t mt_pb_event_code(int core_ev);        /* mt_tcp_event -> TCP ASR eventCode, 0 = none */
