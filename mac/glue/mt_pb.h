@@ -56,6 +56,7 @@
 #define MT_PB_OWNERS      8      /* MultiFinder applications tracked for the per-application sweep (Task 12) */
 #define MT_PB_SWEEP_MS    250    /* periodic sweep while owners are recorded (mt_pb_sweep) */
 #define MT_PB_SWEEP_RETRY_MS 20  /* a timer sweep that found a glue frame active retries after this */
+#define MT_PB_CO_CTX      3      /* processes a call-out chain may span (yields inside routines; round 4) */
 #define MT_PB_ECHO_NONOTIFY_S 10 /* ICMPEcho without icmpCompletion: its slot is held at most this long */
 
 /* Results that are not .IPP codes: notOpenErr (Device Manager: driver not open, matrix
@@ -108,6 +109,7 @@ struct MtStream {
     uint8_t   used;             /* 0 free, 1 live, 2 released (core release deferred) */
     uint8_t   gen;              /* bumped on every TCPCreate of this slot */
     uint16_t  conn;             /* bumped on every open: PBs and requests of older connections are stale */
+    uint16_t  born;             /* MtDrv.own_ser at TCPCreate (mt_pb_in_gone) */
     uint8_t   fin;              /* the peer's FIN has arrived */
     uint8_t   closing_sent;     /* TCPClosing ASR delivered */
     uint8_t   close_deferred;   /* TCPClose waits for queued PB bytes to reach the core */
@@ -164,6 +166,7 @@ typedef struct MtUdpStream {
     uint8_t   gen;
     uint8_t   rq_n;
     uint8_t   loan_n;
+    uint16_t  born;             /* MtDrv.own_ser at UDPCreate (mt_pb_in_gone) */
     MtUdpRead rq[MT_PB_UDPRQ];
     MacPtr32  loan[MT_PB_UDPLOANS];
 } MtUdpStream;
@@ -175,6 +178,7 @@ typedef struct MtEcho {
     uint32_t dl, dest;          /* absolute ms deadline, target address */
     uint32_t tk0, user;         /* Ticks at the request; the request's IPEchoPB.userDataPtr */
     uint16_t id, seq;
+    uint16_t born;              /* MtDrv.own_ser at the request (mt_pb_in_gone) */
     uint8_t  state;             /* 0 free, 1 waiting, 2 notifying (slot not reusable yet) */
 } MtEcho;
 
@@ -187,6 +191,7 @@ typedef struct MtDnsSlot {
     mt_dns_result res;          /* A / HINFO / MX answer; a PTR answer is res.cname */
     MacPtr32    out;            /* the caller's hostInfo / returnRec */
     uint32_t    addr;           /* PTR: the address */
+    uint16_t    born;           /* MtDrv.own_ser at the request (mt_pb_in_gone) */
     uint8_t     state;          /* 0 free, 1 query in the core, 2 PTR waiting for the reverse-lookup scratch */
     uint8_t     op;             /* MT_DNR_A / PTR / HINFO / MX */
 } MtDnsSlot;
@@ -229,17 +234,29 @@ struct MtDrv {
      * at task time (mt_os_app_mem returned 1). own[i].lo == 0 = free. mt_pb_sweep forgets the
      * objects of an owner whose partition is gone (no goodbye kiss under MultiFinder). */
     MtAppMem  own[MT_PB_OWNERS];
+    uint16_t  own_born[MT_PB_OWNERS];   /* own_ser when the slot was recorded (round 4, mt_pb_in_gone) */
+    uint16_t  own_ser;          /* owner serial: bumped at every record, never 0 (0 = unknown age) */
     uint32_t  own_dl;           /* next periodic sweep (ms clock) while n_own > 0 */
     uint32_t  n_own_gone;       /* owners found gone and swept */
     uint32_t  n_own_full;       /* callers not recorded: the table was full (their objects are never swept) */
     uint32_t  n_dead_calls;     /* routines of a gone owner not called (the sweep had not run yet) */
     uint32_t  n_dead_drops;     /* frames dropped / ticks skipped: an owner was gone and the sweep could not run */
     uint32_t  n_gone_call, n_gone_timer, n_gone_rx;   /* owners swept from a Control entry / the timer / the input path */
-    MtAppMem  co_own;           /* owner of the routine running at depth 1 (lo 0 = none recorded): if it is gone,
-                                 * that routine will never return (Task 12 round 3, mt_pb_unstick) */
-    uint32_t  n_unstuck;        /* glue (and gate) frames abandoned because their routine's application is gone */
+    /* The processes whose stacks hold the active call-out chain (Task 12 round 4, mt_pb_unstick): co_ctx[0] is
+     * the CURRENT application's partition when the outermost call-out began at task time (none when it began at
+     * interrupt time, or without MultiFinder: co_n 0); a nested task-time call-out made while another process
+     * is current (the chain yielded, or it is dead and not proven so yet) appends that process with the depth
+     * below it, and is dropped again when depth returns there. If every listed process quit, the frames never
+     * return. More than MT_PB_CO_CTX processes: co_over = that depth + 1 (nothing is abandoned until it clears). */
+    MtAppMem  co_ctx[MT_PB_CO_CTX];
+    uint8_t   co_depth[MT_PB_CO_CTX];
+    uint8_t   co_n, co_over;
+    uint32_t  n_unstuck;        /* glue (and gate) frames abandoned because the processes running them are gone */
+    uint32_t  n_unstick_wait;   /* abandonment postponed: a live frame holds the gate above the routine, or co_over */
     uint8_t   n_own;            /* used entries of own[] */
-    uint8_t   dead_n;           /* last: a lone byte before the buffers above made them odd (Task 12) */
+    uint8_t   dead_n;           /* a lone byte before the buffers above made them odd (Task 12) */
+    uint8_t   co_gen;           /* bumped by every abandonment: a routine that resumes after one skips its depth-- */
+    uint8_t   pad_co;
 };
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
@@ -274,6 +291,14 @@ void     mt_pb_goodbye(MtDrv *d);
 void     mt_pb_forget(MtDrv *d, const MtAppMem *m);
 /* Nonzero if p lies in [m->lo, m->hi) (24-bit compare when hi fits in 24 bits). */
 int      mt_pb_in_app(const MtAppMem *m, MacPtr32 p);
+/* mt_pb_in_app(m, p), minus the objects of a new tenant of the range (round 4; used by every forget): a
+ * dead owner that could not be swept at once (a glue frame was active) may have had its block reused by
+ * an application that already called and created objects there. Those are told apart by age: an object
+ * born (MtDrv.own_ser at its creation) at or after the live overlapping owner's record (own_born) is the
+ * tenant's; born 0 = unknown (the entry's queued PBs): the range alone decides. */
+int      mt_pb_in_gone(const MtDrv *d, const MtAppMem *m, uint16_t m_born, MacPtr32 p, uint16_t born);
+                                 /* m_born: the age of m's own record (a tenant is an owner recorded AFTER
+                                  * it; an older overlapping record is a previous occupant's, alias or not) */
 
 /* MultiFinder per-application cleanup (Plan 3 Task 12). note != 0: the call is made at task time by
  * an application, so record its partition (a recorded owner whose range the new partition overlaps
@@ -284,16 +309,24 @@ int      mt_pb_in_app(const MtAppMem *m, MacPtr32 p);
  * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
  * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
 int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
-/* A routine (completion / ASR) whose application quits from inside it (ExitToShell, a MultiFinder
- * force quit) never returns: depth (and co_gate, in_core) stay set and every sweep would bail. When the
- * outermost routine starts, the glue records its owner (co_lo / co_h0, from the PB, its completion or
- * the ASR address); if depth != 0 and that owner is gone, mt_pb_unstick clears depth, co_gate and
- * in_core (as the goodbye kiss does for ExitToShell from a routine) and returns 1; a routine of a live
- * application (merely slow, or hung) is never reset. The driver entry also clears the gate (it can be
- * held by the abandoned frames). */
-int      mt_pb_unstick(MtDrv *d, const MtAppMem *cur);   /* cur: the task-time caller with the gate free
-                                 * (or NULL): a different application than the routine's owner proves the
-                                 * routine abandoned (no process switch inside a routine) */
+#define MT_PB_SWEEP_NOTE_ONLY 2  /* note value: a task-time call while the gate is held (abandoned frames whose
+                                  * release is postponed, or a nested call-out): record the caller, forget nothing */
+/* A routine (completion / ASR) run inline by the glue whose PROCESS quits from inside it (ExitToShell,
+ * a MultiFinder force quit) never returns: depth (and co_gate, in_core) stay set and every sweep would
+ * bail. When the outermost call-out starts at task time, the glue records the current application's
+ * partition (co_ctx: the process whose stack holds the frames; under MultiFinder the glue runs app A's
+ * routine inline while app B is current, so this is NOT the routine's owner, and ExitToShell from inside
+ * it ends B). A call-out that begins at interrupt time records nothing (no process can quit there, and
+ * the interrupted process may be mid-quit). If depth != 0 and co_ctx is provably dead (its partition
+ * header changed, or the task-time caller's partition overlaps it with another identity: the block was
+ * reused), and the gate holds exactly the levels the abandoned chain entered (gate_below == co_gate:
+ * no live frame above it), mt_pb_unstick clears depth, co_gate and in_core, bumps co_gen and returns 1;
+ * the caller then releases the gate levels the chain held (co_gate, read before the call). A routine
+ * of a live process (merely slow, hung, or yielding) is never reset; a different application calling
+ * proves nothing (it may be running the routine's drain). */
+int      mt_pb_unstick(MtDrv *d, const MtAppMem *cur, unsigned gate_below);   /* cur: the task-time
+                                 * caller's partition (NULL at interrupt time / classic); gate_below: the
+                                 * gate depth without the detector's own holding */
 
 /* 1 while every recorded owner's partition header is unchanged (the input path's per-frame check,
  * no gate needed: reads only). */
@@ -323,7 +356,8 @@ void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
 uint32_t mt_pb_udp_deadline(MtDrv *d);
 int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
 int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
-void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m);   /* cancel the lookups of the application in m */
+void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m, uint16_t m_born);   /* cancel the lookups of the
+                                                 * application in m (m_born as mt_pb_in_gone) */
 /* Nonzero if p lies in a recorded MultiFinder owner whose partition is gone (counts n_dead_calls): the
  * glue then neither calls that owner's routines nor writes its result records (Task 12). */
 int      mt_pb_gone(MtDrv *d, MacPtr32 p);

@@ -185,6 +185,7 @@ static int16_t lookup(MtDrv *d, MtAnyPb *pb) {
         }
         q->state = (uint8_t)(r == MT_DNS_IN_PROGRESS ? 1 : 2);
         q->pb = pb;
+        q->born = d->own_ser;                            /* owner serial at creation (mt_pb_in_gone) */
         p->slot = (int16_t)i;
         p->deferred = 1;                                 /* before inProgress: the PB is the glue's now */
         return inProgress;
@@ -280,14 +281,14 @@ int16_t mt_pb_dns_control(MtDrv *d, MtAnyPb *pb) {
 
 /* The departing application's lookups (PB, result record or completion routine in its memory): forget
  * them without a completion (its code is going away), and tell the core to stop (it never writes `res` afterwards; nothing of ours points into the heap). */
-void mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m) {
+void mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
     uint32_t i;
     int any = 0;
     for (i = 0; i < MT_PB_DNS; i++) {
         MtDnsSlot *q = &d->dns[i];
         if (!q->state || !q->pb ||
-            !(mt_pb_in_app(m, mt_os_addr(q->pb)) || mt_pb_in_app(m, q->out) ||
-              (q->pb->hdr.ioCompletion && mt_pb_in_app(m, q->pb->hdr.ioCompletion)))) continue;
+            !(mt_pb_in_gone(d, m, m_born, mt_os_addr(q->pb), q->born) || mt_pb_in_gone(d, m, m_born, q->out, q->born) ||
+              (q->pb->hdr.ioCompletion && mt_pb_in_gone(d, m, m_born, q->pb->hdr.ioCompletion, q->born)))) continue;
         cancel_core(d, q);
         q->state = 0;
         q->pb = NULL;

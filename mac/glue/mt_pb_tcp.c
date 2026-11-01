@@ -608,6 +608,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     d->next_slot = (uint8_t)((i + 1u) % d->ntcp);
     s->d = d;
     s->used = LIVE;
+    s->born = d->own_ser;                                        /* owner serial at creation (mt_pb_in_gone) */
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->tcp.csParam.create.notifyProc;                  /* 0 is fine (matrix 202b) */
     s->user = pb->tcp.csParam.create.userDataPtr;

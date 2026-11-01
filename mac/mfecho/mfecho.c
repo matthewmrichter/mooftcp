@@ -14,6 +14,19 @@
  *         ASR (notifyProc), and just before the quit the app queues an async TCPRcv (and UDPRead) with a
  *         completion routine and sends "LATE": testnet.py answers 3 s later (TCP: 4000 bytes, UDP: the
  *         datagram), i.e. after the quit. The driver must never call those routines or fill those PBs.
+ *   Y     async reader (Task 12 round 4): every echo is read with an async TCPRcv whose completion routine
+ *         re-issues an async TCPStatus (the ordinary async-client pattern), and each echo is followed by a
+ *         1 s probe read that times out (its completion comes from the driver's timer tick). When the reply or
+ *         the tick is drained from the OTHER copy's gate leave at task time, the routine runs with the other
+ *         copy current (CurApName differs, SR mask 0): counted as "cross-app"; the re-issued call is then
+ *         "another application calling at depth 1", which round 3 took for an abandoned routine.
+ *   Z     like Y, and the first time the routine runs cross-app at task time it calls _ExitToShell: that
+ *         ends the CURRENT process, i.e. the other copy, inside its own driver call; this copy must keep
+ *         echoing (its own frames were never involved) and the driver must abandon the dead frames.
+ *   S     spin: bursts of sync UDPWrites (512 bytes to the host's discard port; sync TCPStatus without U) every
+ *         loop: the Ethernet driver delivers received frames from inside EWrite, i.e. inside this copy's
+ *         calls, so the other copy's replies wait in the gate's ring and are drained at this copy's gate
+ *         leave with this copy current (the partner of Y / Z)
  * It connects to 172.17.0.1 (Snow's host) echo port, sends "<name> <seq>" every 2 s and checks the
  * echo; it logs the process low-memory globals (mf_os.c), the driver's goodbye counters and the
  * driver's TCP/UDP stream tables (through the private Status call) at start, every 10 s and at the end.
@@ -23,11 +36,11 @@
 #include <stdlib.h>
 #include "mt_pb.h"
 #include "mf_os.h"
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* CurApName at 0x910 */
 
 #define HOST 0xAC110001u
 #define P32(p) ((MacPtr32)(uintptr_t)(p))
 
-static short ref;
 static char name[40];
 static TCPiopb tpb;
 static UDPiopb upb;
@@ -39,6 +52,14 @@ static UDPiopb lurd, luw;
 static char lbuf[1024];
 static wdsEntry lw[2];
 volatile long g_tasr_n, g_uasr_n, g_compl_n;
+/* options Y / Z: the async read, its completion's counters and the call it re-issues */
+static TCPiopb rpb, ypb;
+static int yre, zkill;
+static UDPiopb spb;                       /* option S: the burst's UDPWrite */
+static wdsEntry sw[2];
+static char sbuf[512];
+volatile long g_rd_n, g_xapp, g_xapp_irq, g_xkill;
+volatile int g_rd_done;
 
 /* Option P's routines. The ASRs are Pascal (callee pops: TCP 16 bytes, UDP 14 bytes); the completion
  * routine is entered with A0 = PB and returns with RTS. The driver runs them with this app's A5. */
@@ -67,9 +88,48 @@ __asm__(
 ".globl exit_stub\n"
 "exit_stub:\n"
 "  .short 0xA9F4\n"                 /* _ExitToShell: never returns */
+".globl rd_stub\n"                  /* options Y / Z: A0 = PB -> rd_done(pb); the driver saved D2-D7/A2-A6 */
+"rd_stub:\n"
+"  move.l %a0,-(%sp)\n"
+"  jsr rd_done\n"
+"  addq.l #4,%sp\n"
+"  rts\n"
+".globl cur_sr\n"
+"cur_sr:\n"
+"  move.w %sr,%d0\n"
+"  rts\n"
 );
 extern void exit_stub(void);
+extern void rd_stub(void);
+extern unsigned short cur_sr(void);
 static TCPiopb xpb;
+static short ref;
+
+/* The async read's completion (Y / Z), run by the driver with this app's A5. Cross-app = the current
+ * application (CurApName) is not this one AND we run at task time (SR mask 0: the gate owner's drain,
+ * not an interrupt-time delivery while the other copy happened to be interrupted). */
+void rd_done(void *vpb)
+{
+    const unsigned char *cap = (const unsigned char *)0x910;
+    int n = cap[0] < 31 ? cap[0] : 31, other, task;
+    (void)vpb;
+    other = n != (int)strlen(name) || memcmp(cap + 1, name, (size_t)n) != 0;
+    task = (cur_sr() & 0x0700u) == 0;
+    g_rd_n++;
+    if (other && task) g_xapp++;
+    else if (other) g_xapp_irq++;
+    g_rd_done = 1;
+    if (other && task && zkill && !g_xkill) {
+        g_xkill++;
+        exit_stub();                              /* ends the CURRENT process: the other copy */
+    }
+    if (yre) {                                    /* the re-issue: an async TCPStatus with a completion */
+        memset(&ypb, 0, sizeof ypb);
+        ypb.ioCRefNum = ref; ypb.csCode = TCPStatus; ypb.tcpStream = rpb.tcpStream;
+        ypb.ioCompletion = P32(compl_stub);
+        (void)os_control_async(&ypb);
+    }
+}
 
 static void tables(const char *tag)
 {
@@ -80,9 +140,12 @@ static void tables(const char *tag)
     os_out("%s: goodbye %lu forced %lu dropped %lu owners %u gone %lu full %lu dead-calls %lu\r", tag,
            (unsigned long)gb, (unsigned long)gf, (unsigned long)dr, d->n_own, (unsigned long)d->n_own_gone,
            (unsigned long)d->n_own_full, (unsigned long)d->n_dead_calls);
-    os_out("%s: swept call %lu timer %lu rx %lu dead-drops %lu abandoned %lu depth %u\r", tag, (unsigned long)d->n_gone_call,
-           (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx, (unsigned long)d->n_dead_drops,
-           (unsigned long)d->n_unstuck, d->depth);
+    os_out("%s: swept call %lu timer %lu rx %lu dead-drops %lu abandoned %lu postponed %lu depth %u\r", tag,
+           (unsigned long)d->n_gone_call, (unsigned long)d->n_gone_timer, (unsigned long)d->n_gone_rx,
+           (unsigned long)d->n_dead_drops, (unsigned long)d->n_unstuck, (unsigned long)d->n_unstick_wait, d->depth);
+    if (yre || zkill)
+        os_out("%s: async reads %ld cross-app %ld (at interrupt time %ld) xkill %ld re-issued completions %ld\r", tag,
+               g_rd_n, g_xapp, g_xapp_irq, g_xkill, g_compl_n);
     for (i = 0; i < MT_PB_OWNERS; i++)
         if (d->own[i].lo)
             os_out("  owner[%u] %08lx-%08lx hdr %08lx\r", i, (unsigned long)d->own[i].lo,
@@ -109,10 +172,53 @@ static void tinit(int16_t cs, StreamPtr sp)
     tpb.tcpStream = sp;
 }
 
+/* One receive of up to n bytes into buf: sync TCPRcv, or (Y / Z) an async one waited for by yielding, so
+ * the reply can arrive while the other copy is current. *got = bytes received. */
+static short rcv_async(StreamPtr sp, char *buf, uint16_t n, int8_t tmo, uint16_t *got);
+static short rcv_once(StreamPtr sp, char *buf, uint16_t n, uint16_t *got)
+{
+    short r;
+    if (!yre && !zkill) {
+        tinit(TCPRcv, sp);
+        tpb.csParam.receive.commandTimeoutValue = 5;
+        tpb.csParam.receive.rcvBuff = P32(buf);
+        tpb.csParam.receive.rcvBuffLen = n;
+        r = os_control_sync(&tpb);
+        *got = tpb.csParam.receive.rcvBuffLen;
+        return r;
+    }
+    return rcv_async(sp, buf, n, 5, got);
+}
+static short rcv_async(StreamPtr sp, char *buf, uint16_t n, int8_t tmo, uint16_t *got)
+{
+    short r;
+    memset(&rpb, 0, sizeof rpb);
+    rpb.ioCRefNum = ref; rpb.csCode = TCPRcv; rpb.tcpStream = sp;
+    rpb.ioCompletion = P32(rd_stub);
+    rpb.csParam.receive.commandTimeoutValue = tmo;
+    rpb.csParam.receive.rcvBuff = P32(buf);
+    rpb.csParam.receive.rcvBuffLen = n;
+    g_rd_done = 0;
+    r = os_control_async(&rpb);
+    if (r) { *got = 0; return r; }
+    {
+        uint32_t t1 = os_ticks();
+        while (!g_rd_done && os_ticks() - t1 < (uint32_t)(tmo + 2) * 60u) (void)os_yield(1);
+    }
+    if (!g_rd_done) { *got = 0; return -1; }
+    *got = rpb.csParam.receive.rcvBuffLen;
+    return rpb.ioResult;
+}
+static short rcv_probe(StreamPtr sp, uint16_t *got)
+{
+    static char one[2];
+    return rcv_async(sp, one, 1, 1, got);
+}
+
 int main(void)
 {
     char cfg[64];
-    int n, i, release = 0, udp = 0, quit = 0, pend = 0, xquit = 0;
+    int n, i, release = 0, udp = 0, quit = 0, pend = 0, xquit = 0, spin = 0;
     long secs = 60, base = 17000;
     uint32_t t0, next, nextdump;
     StreamPtr sp = 0, us = 0;
@@ -132,8 +238,12 @@ int main(void)
         else if (cfg[i] == 'U') udp = 1;
         else if (cfg[i] == 'P') pend = 1;
         else if (cfg[i] == 'X') xquit = 1;
+        else if (cfg[i] == 'Y') yre = 1;
+        else if (cfg[i] == 'Z') zkill = 1;
+        else if (cfg[i] == 'S') spin = 1;
     }
-    os_out("MfEcho '%s' T%ld B%ld R%d U%d P%d X%d\r", name, secs, base, release, udp, pend, xquit);
+    os_out("MfEcho '%s' T%ld B%ld R%d U%d P%d X%d Y%d Z%d S%d\r", name, secs, base, release, udp, pend, xquit,
+           yre, zkill, spin);
     os_dump_lowmem("start");
     r = os_open_ipp(&ref);
     os_out("OpenDriver %d ref %d rbuf %08lx pb %08lx\r", r, ref, (unsigned long)P32(rbuf), (unsigned long)P32(&tpb));
@@ -189,16 +299,20 @@ int main(void)
             if (r == 0) {
                 int got = 0;
                 while (got < len) {
-                    tinit(TCPRcv, sp);
-                    tpb.csParam.receive.commandTimeoutValue = 5;
-                    tpb.csParam.receive.rcvBuff = P32(back + got);
-                    tpb.csParam.receive.rcvBuffLen = (uint16_t)(len - got);
-                    r = os_control_sync(&tpb);
+                    uint16_t g = 0;
+                    r = rcv_once(sp, back + got, (uint16_t)(len - got), &g);
                     if (r) break;
-                    got += tpb.csParam.receive.rcvBuffLen;
+                    got += g;
                 }
                 if (r == 0 && memcmp(back, line, (size_t)len) == 0) ok++;
                 else { bad++; os_out("t %lu seq %ld echo FAIL rcv %d\r", (unsigned long)(os_ticks() - t0), seq, r); }
+                if ((yre || zkill) && r == 0) {
+                    /* a probe read that times out after 1 s: its completion comes from the driver's timer tick,
+                     * which runs from whichever gate leave drains a deferred tick, often the other copy's (in
+                     * Snow frames never arrive while the gate is held, ticks do: MoofDiag "ticks ... deferred") */
+                    uint16_t g = 0;
+                    (void)rcv_probe(sp, &g);
+                }
             } else {
                 bad++;
                 os_out("t %lu seq %ld send FAIL %d\r", (unsigned long)(os_ticks() - t0), seq, r);
@@ -211,7 +325,28 @@ int main(void)
             os_dump_lowmem(tag);
             tables(tag);
         }
-        quit = os_yield(10);
+        if (spin) {                               /* S: bursts of sends (UDPWrite to the discard port): received
+                                                   * frames are delivered from inside EWrite, i.e. inside OUR
+                                                   * call, and drained at its gate leave with us current */
+            int k;
+            for (k = 0; k < 40; k++) {
+                if (us) {
+                    sw[0].length = sizeof sbuf; sw[0].ptr = P32(sbuf); sw[1].length = 0; sw[1].ptr = 0;
+                    memset(&spb, 0, sizeof spb);
+                    spb.ioCRefNum = ref; spb.csCode = UDPWrite; spb.udpStream = us;
+                    spb.csParam.send.remoteHost = HOST;
+                    spb.csParam.send.remotePort = (udp_port)(base + 9);
+                    spb.csParam.send.wdsPtr = P32(sw);
+                    spb.csParam.send.checkSum = 1;
+                    (void)os_control_sync(&spb);
+                } else {
+                    tinit(TCPStatus, sp); (void)os_control_sync(&tpb);
+                }
+            }
+            quit = os_yield(1);
+        } else {
+            quit = os_yield(10);
+        }
     }
     os_dump_lowmem("end");
     tables("end");

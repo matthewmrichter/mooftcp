@@ -12,6 +12,16 @@
 #     --xquit      the short one quits from INSIDE a completion routine (ExitToShell from the routine the driver
 #                  runs inline: MfEcho option X); the survivor must keep echoing and MoofDiag must show
 #                  "routine frames abandoned ... 1"
+#     --xapp       round 4: the long copy reads its echoes with async TCPRcvs whose completion re-issues an
+#                  async TCPStatus (MfEcho option Y); the short copy spins on sync TCPStatus calls (option S) so
+#                  it holds the gate and drains the long copy's replies at task time: the long copy's routine then
+#                  runs with the short copy current and calls the driver. The long copy must echo 100% and count
+#                  cross-app >= 1; MoofDiag must show depth 0 and no abandoned frames
+#     --xkill      round 4: like --xapp, but the first time the long copy's completion runs cross-app it calls
+#                  _ExitToShell (option Z), which ends the CURRENT process: the short copy dies inside its own
+#                  driver call (the launch loop then relaunches it, see below). The long copy must echo 100%
+#                  (xkill 1); MoofDiag must show the dead frames abandoned (>= 1), depth 0 and the dead copy's
+#                  partition gone (both copies run T120)
 #     --release    the short one releases its streams before quitting (default: it quits with them live,
 #                  so the driver's per-application cleanup must forget them)
 #     --keep-disk  do not run fresh-disk.sh / install-moof.sh
@@ -23,9 +33,9 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
 die() { echo "mf-run.sh: $*" >&2; exit 1; }
-usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--xquit] [--keep-disk] <label>" >&2; exit 2; }
+usage() { echo "usage: mf-run.sh [--finder] [--base N] [--long A|B] [--release] [--pending] [--xquit] [--xapp] [--xkill] [--keep-disk] <label>" >&2; exit 2; }
 
-mf=1; base=18000; long=A; rel=""; pend=""; xq=""; keepdisk=""; label=""
+mf=1; base=18000; long=A; rel=""; pend=""; xq=""; xapp=""; xkill=""; keepdisk=""; label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --finder) mf=""; shift;;
@@ -34,6 +44,8 @@ while [ $# -gt 0 ]; do
     --release) rel=R; shift;;
     --pending) pend=P; shift;;
     --xquit) xq=X; shift;;
+    --xapp) xapp=Y; shift;;
+    --xkill) xkill=Z; shift;;
     --keep-disk) keepdisk=1; shift;;
     -*) usage;;
     *) [ -z "$label" ] || usage; label="$1"; shift;;
@@ -42,7 +54,12 @@ done
 [ -n "$label" ] || usage
 case "$label" in *[!A-Za-z0-9._-]*) die "label may only contain A-Z a-z 0-9 . _ -";; esac
 case "$long" in A|B) ;; *) usage;; esac
-if [ "$long" = A ]; then cfgA="T120 B$base"; cfgB="T30 B$base U $rel $pend $xq"; else cfgA="T30 B$base U $rel $pend $xq"; cfgB="T120 B$base"; fi
+longcfg="T120 B$base $xapp $xkill"
+shortT=T30; spin=""
+if [ -n "$xapp$xkill" ]; then spin=S; fi
+if [ -n "$xkill" ]; then shortT=T120; fi          # the short copy is ended by the long copy's routine
+shortcfg="$shortT B$base U $rel $pend $xq $spin"
+if [ "$long" = A ]; then cfgA="$longcfg"; cfgB="$shortcfg"; else cfgA="$shortcfg"; cfgB="$longcfg"; fi
 
 cd "$ROOT"
 out="$ROOT/build-mac/mf/$label"
@@ -194,8 +211,9 @@ with_volume fetch
 for f in MfEchoA MfEchoB; do [ -f "$out/$f.out.txt" ] || echo "missing $f.out"; done
 [ -z "$mf" ] || [ -f "$out/MoofDiag.out.txt" ] || echo "missing MoofDiag.out"
 L="MfEcho$long"; S="MfEcho$([ "$long" = A ] && echo B || echo A)"
-[ -f "$out/$L.out.txt" ] && [ -f "$out/$S.out.txt" ] || die "outputs missing (see $out)"
-grep -h "^RESULT" "$out/$L.out.txt" "$out/$S.out.txt"
+[ -f "$out/$L.out.txt" ] || die "the long copy's output is missing (see $out)"
+[ -f "$out/$S.out.txt" ] || [ -n "$xkill" ] || die "outputs missing (see $out)"
+grep -h "^RESULT" "$out/$L.out.txt" "$out/$S.out.txt" 2>/dev/null || true
 shandle="$(sed -n "s/^TCPCreate 0 stream \([0-9a-f]*\).*/\1/p" "$out/$S.out.txt")"
 # the short copy's own table line for that stream: handle + rbuf + A5 + connection serial (conn moves on
 # at every open and at every forget), so a later stream in the same slot can never match it
@@ -205,9 +223,28 @@ tail -n 30 "$out/$L.out.txt" | grep "^end: goodbye" || true
 grep -E "^(connected|t[0-9]+ ok[0-9]+ bad[0-9]+|end): swept" "$out/$L.out.txt" | sed "s/^/  /" || true
 ok=1
 grep -q "^RESULT PASS" "$out/$L.out.txt" || { echo "FAIL: the long copy lost echoes"; ok=""; }
-[ -n "$sline" ] || { echo "FAIL: the short copy's stream line was not found"; ok=""; }
-if [ -z "$rel" ] && [ -n "$sline" ] && sed -n '/^end: goodbye/,$p' "$out/$L.out.txt" | grep -qF "$sline"; then
+if [ -n "$xkill" ]; then
+  : # the short copy is ended by the long copy's routine; the launch loop above then relaunches it (it retries
+    # while the Finder stays frontmost), so its output and streams at the end are the relaunched copy's
+elif [ -z "$sline" ]; then echo "FAIL: the short copy's stream line was not found"; ok=""
+elif [ -z "$rel" ] && sed -n '/^end: goodbye/,$p' "$out/$L.out.txt" | grep -qF "$sline"; then
   echo "FAIL: the short copy's stream ($sline) is still in the driver at the end"; ok=""
+fi
+if [ -n "$xapp$xkill" ]; then
+  grep -h "^end: async reads" "$out/$L.out.txt" || true
+  xa="$(sed -n 's/^end: async reads [0-9]* cross-app \([0-9]*\) .*/\1/p' "$out/$L.out.txt")"
+  [ -n "$xa" ] && [ "$xa" -ge 1 ] || { echo "FAIL: the long copy's routine never ran with the short copy current (cross-app 0)"; ok=""; }
+  grep -E "^(owners|swept|tcp\[)" "$out/MoofDiag.out.txt" || true
+  grep -q "; depth 0" "$out/MoofDiag.out.txt" || { echo "FAIL: MoofDiag shows a glue depth != 0"; ok=""; }
+fi
+if [ -n "$xapp" ]; then
+  grep -q "routine frames abandoned (app quit inside it) 0" "$out/MoofDiag.out.txt" || { echo "FAIL: frames were abandoned in the cross-app run"; ok=""; }
+fi
+if [ -n "$xkill" ]; then
+  xk="$(sed -n 's/^end: async reads .* xkill \([0-9]*\) .*/\1/p' "$out/$L.out.txt")"
+  [ "${xk:-0}" = 1 ] || { echo "FAIL: the long copy's routine did not end the short copy (xkill $xk)"; ok=""; }
+  grep -q "routine frames abandoned (app quit inside it) [1-9]" "$out/MoofDiag.out.txt" || { echo "FAIL: no abandoned routine frames counted"; ok=""; }
+  grep -q "^owners: .* gone [1-9]" "$out/MoofDiag.out.txt" || { echo "FAIL: MoofDiag shows no gone owner"; ok=""; }
 fi
 if [ -z "$mf" ] && ! sed -n 's/^end: goodbye \([0-9]*\) .*/\1/p' "$out/$L.out.txt" | grep -q '^[1-9]'; then
   echo "FAIL: no goodbye kiss counted without MultiFinder"; ok=""

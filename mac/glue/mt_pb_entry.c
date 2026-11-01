@@ -23,15 +23,16 @@ static MtAnyPb *pop(MtDrvPend *q) {
     return pb;
 }
 
-/* Keep only the PBs that do not live in the application's memory (PB or completion routine in m). */
-static uint32_t drop_app(MtDrvPend *q, const MtAppMem *m) {
+/* Keep only the PBs that do not live in the application's memory (PB or completion routine in m;
+ * a live new tenant of the range keeps its own, mt_pb_in_gone). */
+static uint32_t drop_app(const MtDrv *d, MtDrvPend *q, const MtAppMem *m) {
     void *keep[MT_DRV_PENDQ];
     uint32_t n = 0, k, dropped = 0;
     int sm = mt_os_mask();
     void *pb;
     while ((pb = mt_drv_pend_pop(q)) != NULL) {
         MacPtr32 c = ((const MtAnyPb *)pb)->hdr.ioCompletion;
-        if (mt_pb_in_app(m, mt_os_addr(pb)) || (c && mt_pb_in_app(m, c))) dropped++;
+        if (mt_pb_in_gone(d, m, 0, mt_os_addr(pb), 0) || (c && mt_pb_in_gone(d, m, 0, c, 0))) dropped++;
         else keep[n++] = pb;
     }
     for (k = 0; k < n; k++) (void)mt_drv_pend_push(q, keep[k]);
@@ -42,7 +43,7 @@ static uint32_t drop_app(MtDrvPend *q, const MtAppMem *m) {
 
 static void drop_queues(void *ctx, const MtAppMem *m) {
     MtEntry *e = (MtEntry *)ctx;
-    e->n_pend_dropped += drop_app(&e->pend, m) + drop_app(&e->refq, m) + drop_app(&e->doneq, m);
+    e->n_pend_dropped += drop_app(e->d, &e->pend, m) + drop_app(e->d, &e->refq, m) + drop_app(e->d, &e->doneq, m);
 }
 
 /* MultiFinder per-application cleanup (mt_pb_sweep): from every Control entry (note = a task-time
@@ -52,8 +53,23 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
  * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
  * (the timer and the gate's after-callback use this). */
 void mt_entry_drain_ok(MtEntry *e, int why) {
-    if (e->d->n_own && !mt_entry_core_ok(e, why)) return;
+    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return;
     mt_entry_drain(e);
+}
+
+/* Glue frames left by a routine whose process quit inside it (Task 12 round 4): abandon them if that
+ * is proven (mt_pb_unstick) and release the gate levels the dead chain held. gate_own = the detector's
+ * own gate holding (1 inside the gate owner's callbacks, 0 at a Control entry). Returns 1 if abandoned. */
+static int unstick(MtEntry *e, const MtAppMem *cur, unsigned gate_own) {
+    MtDrv *d = e->d;
+    MtGate *g = e->gate;
+    unsigned held = d->co_gate, below = g->depth >= gate_own ? g->depth - gate_own : 0;
+    if (!mt_pb_unstick(d, cur, below)) return 0;
+    if (held) {                                  /* the dead chain entered the gate this many times */
+        g->depth = (uint8_t)(g->depth - held);   /* below == held, so this never drops the detector's own */
+        if (!g->depth) g->in_irq = 0;
+    }
+    return 1;
 }
 
 int mt_entry_sweep(MtEntry *e, int note, int why) {
@@ -74,8 +90,11 @@ int mt_entry_sweep(MtEntry *e, int note, int why) {
  * frame or tick (MT_PB_SWEEP_RETRY_MS) sweeps. */
 int mt_entry_core_ok(MtEntry *e, int why) {
     MtDrv *d = e->d;
+    if (d->depth && d->co_n)
+        (void)unstick(e, NULL, 1);               /* the processes running that routine quit inside it (round 4):
+                                                 * its chain cannot hold the gate (we are its owner now), so
+                                                 * only the glue accounting is cleared */
     if (!d->n_own || mt_pb_owners_alive(d)) return 1;
-    if (d->depth) mt_pb_unstick(d, NULL);        /* a routine of the gone app never returns (round 3) */
     mt_entry_sweep(e, 0, why);
     if (mt_pb_owners_alive(d)) return 1;
     d->n_dead_drops++;
@@ -95,6 +114,9 @@ static void goodbye(MtEntry *e) {
         d->depth = 0;
         d->co_gate = 0;
         d->in_core = 0;
+        d->co_n = 0;
+        d->co_over = 0;
+        d->co_gen++;                             /* should a frame resume anyway, it must not depth-- */
         g->in_irq = 0;
         g->depth = 0;
     }
@@ -137,19 +159,16 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     }
     /* MultiFinder sends no goodbye kiss when an application quits: notice gone partitions here (and
      * from the timer). Only a task-time call outside any frame of ours names its caller reliably. */
-    /* Frames abandoned by a routine whose application quit inside it (no goodbye under MultiFinder)
-     * may still hold the gate: clear it as goodbye() does, then sweep (round 3). */
-    if ((e->gate->depth || e->d->depth) && e->d->n_own) {
+    /* Frames abandoned by a routine whose process quit inside it (no goodbye under MultiFinder) may
+     * still hold the gate: abandon them and release those levels, then sweep (round 4). A Control entry
+     * holds nothing of its own yet (gate_own 0). */
+    if (d->depth) {
         MtAppMem cur;
-        int part = !irq && mt_os_app_mem(&cur);  /* task time: the caller names itself (task code never
-                                                 * preempts: a held gate at task time is the caller's own
-                                                 * frames or abandoned ones) */
-        if (mt_pb_unstick(e->d, part ? &cur : NULL)) {
-            e->gate->in_irq = 0;
-            e->gate->depth = 0;
-        }
+        int part = !irq && mt_os_app_mem(&cur);  /* task time: the caller names itself */
+        (void)unstick(e, part ? &cur : NULL, 0);
     }
     if (!irq && !e->gate->depth) mt_entry_sweep(e, 1, MT_SWEEP_CALL);
+    else if (!irq) mt_entry_sweep(e, MT_PB_SWEEP_NOTE_ONLY, MT_SWEEP_CALL);   /* gate held: record only */
     else if (e->d->n_own && !e->gate->depth) mt_entry_sweep(e, 0, MT_SWEEP_CALL);
     if (cs == 1) {                               /* killCode (KillIO): nothing of ours is queued */
         pb->hdr.ioResult = 0;                    /* in the Device Manager; MacTCP answers 0 (120.1) */

@@ -21,7 +21,7 @@ uint32_t pbf_app_h0, pbf_app_name;
 static uint32_t g_names;
 pbf_part pbf_parts[PBF_PARTS];
 int pbf_dead_calls;
-#define NCODE 64
+#define NCODE 512                 /* routines inside partitions (fuzz_apps registers one per read with a special completion) */
 static struct { MacPtr32 at; pbf_compl_fn c; pbf_asr_fn a; } g_code[NCODE];
 static int g_ncode;
 

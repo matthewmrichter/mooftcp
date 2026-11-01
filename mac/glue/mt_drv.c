@@ -82,15 +82,16 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     MtRes *r = (MtRes *)ctx;
     /* MultiFinder: notice a quit application before the core writes into its receive buffers: every
      * frame, one header load per recorded owner (a load and a branch without MultiFinder; Task 12) */
-    if (r->d->n_own && !mt_entry_core_ok(&r->entry, MT_SWEEP_RX)) return;   /* dropped (TCP retransmits) */
+    if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_RX)) return;   /* dropped (TCP
+                                                 * retransmits); depth: frames a quit process left (round 4) */
     mt_pb_input(r->d, frame, len);
 }
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
-    if (r->d->n_own && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner not yet
-                                                 * forgotten: no core work (no drain either) */
+    if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
+                                                 * not yet forgotten: no core work (no drain either) */
     mt_entry_drain(&r->entry);
     mt_pb_tick(r->d);
 }

@@ -128,9 +128,10 @@ void mt_os_unmask(int saved);
 typedef struct MtAppMem {
     MacPtr32 lo, hi;
     uint32_t h0;
-    uint32_t name;                  /* hash of CurApName (0x910): a different application of the same size
-                                     * in the same place is a different owner; a relaunch of the SAME
-                                     * application there is not told apart (the sweep period bounds it) */
+    uint32_t name;                  /* hash of CurApName (0x910), partition only (0 for the classic range):
+                                     * a different application of the same size in the same place is a
+                                     * different owner; a relaunch of the SAME application there is not
+                                     * told apart (the sweep period bounds it) */
 } MtAppMem;
 int  mt_os_app_mem(MtAppMem *m);
 

@@ -173,7 +173,9 @@ int mt_os_app_mem(MtAppMem *m)
     uint32_t lo = *(volatile uint32_t *)0x2AA, hi = *(volatile uint32_t *)0x10C;
     uint32_t a5 = *(volatile uint32_t *)0x904;
     m->h0 = 0;
-    m->name = app_name_hash();
+    m->name = 0;                                  /* the hash is part of the identity only with a partition
+                                                   * (the classic range is never recorded; keeps the per
+                                                   * call-out cost of co_note at a few loads there) */
     if (hi > 0x00FFFFFFu) {                       /* 32-bit clean memory map: not System 6 on a Classic */
         m->lo = lo;
         m->hi = hi;
@@ -191,6 +193,7 @@ int mt_os_app_mem(MtAppMem *m)
             bklim > lo && bklim <= end && a5 > lo && a5 < end) {
             m->hi = end;
             m->h0 = h0;
+            m->name = app_name_hash();
             return 1;
         }
     }

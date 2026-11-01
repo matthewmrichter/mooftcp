@@ -97,6 +97,7 @@ static int16_t do_echo(MtDrv *d, MtAnyPb *pb) {
     if (!e->blk.ioCompletion && tmo > MT_PB_ECHO_NONOTIFY_S) tmo = MT_PB_ECHO_NONOTIFY_S;   /* nobody waits:
                                                  * free the slot soon (no goodbye drops it; Task 12) */
     e->dl = d->now + (uint32_t)tmo * 1000u;
+    e->born = d->own_ser;                                    /* owner serial at creation (mt_pb_in_gone) */
     e->state = ECHO_WAIT;
     return 0;                                                /* matrix A00: our PB completes 0 */
 }

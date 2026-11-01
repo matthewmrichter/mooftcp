@@ -44,6 +44,7 @@ static void msetup(void) {
     memset(&g_g, 0, sizeof g_g);
     mt_entry_init(&g_e, g_x.d, &g_g);
     pbf_gate = &g_g;
+    pbf_leave_hook = NULL;
     memset(g_asr_n, 0, sizeof g_asr_n);
 }
 
@@ -75,16 +76,28 @@ static int ncompl(const void *pb) {
     for (i = 0; i < pbf_nlog && i < PBF_LOG; i++) n += pbf_log[i].kind == 'C' && pbf_log[i].pb == pbf_a(pb);
     return n;
 }
-/* The timer tick of the driver (mt_drv.c tick_cb) after `ms`. */
+/* The timer tick of the driver (mt_drv.c tick_cb) after `ms`. A gate held by someone else (on the Mac:
+ * frames a quit process left inside the gate) defers the Time Manager task: nothing runs. */
 static void tick(uint32_t ms) {
     pbf_now += ms;
+    if (g_g.depth) return;
     g_g.depth++;
     mt_entry_sweep(&g_e, 0, MT_SWEEP_TIMER);
-    if (!g_x.d->n_own || mt_entry_core_ok(&g_e, MT_SWEEP_TIMER)) {
+    if (!(g_x.d->n_own || g_x.d->depth) || mt_entry_core_ok(&g_e, MT_SWEEP_TIMER)) {
         mt_entry_drain(&g_e);
         mt_pb_tick(g_x.d);
     }
     g_g.depth--;
+}
+/* The running routine's context as the glue records it (co_ctx): the current application. */
+static void co_ctx_is(int part) {
+    g_x.d->co_ctx[0].lo = pbf_parts[part].lo;
+    g_x.d->co_ctx[0].hi = pbf_parts[part].hi;
+    g_x.d->co_ctx[0].h0 = pbf_parts[part].h0;
+    g_x.d->co_ctx[0].name = pbf_parts[part].name;
+    g_x.d->co_depth[0] = 0;
+    g_x.d->co_n = 1;
+    g_x.d->co_over = 0;
 }
 /* The input path's check (mt_drv.c rx_cb), optionally while an application routine runs (glue depth
  * 1, gate free: an Ethernet interrupt took the gate). 1 = the frame may be delivered. */
@@ -94,13 +107,8 @@ static int rx_check(int depth) {
     if (sv) depth = -1;                          /* frames abandoned by a quit routine: keep them as they are */
     g_g.depth++;
     if (depth >= 0) g_x.d->depth = (uint8_t)depth;   /* -1: as it is */
-    if (depth > 0) {                                 /* a routine of the current (live) application runs */
-        g_x.d->co_own.lo = pbf_parts[g_cur].lo;
-        g_x.d->co_own.hi = pbf_parts[g_cur].hi;
-        g_x.d->co_own.h0 = pbf_parts[g_cur].h0;
-        g_x.d->co_own.name = pbf_parts[g_cur].name;
-    }
-    ok = !g_x.d->n_own || mt_entry_core_ok(&g_e, MT_SWEEP_RX);
+    if (depth > 0) co_ctx_is(g_cur);                 /* a routine runs on the current (live) app's stack */
+    ok = !(g_x.d->n_own || g_x.d->depth) || mt_entry_core_ok(&g_e, MT_SWEEP_RX);
     if (depth >= 0) g_x.d->depth = sv;
     g_g.depth--;
     return ok;
@@ -641,8 +649,7 @@ static void frame_dropped_when_dead_owner_cannot_be_swept(void) {
     T_EQ(g_x.d->n_dead_drops, 1);
     T_EQ(g_x.d->n_own_gone, 0);
     g_x.d->depth = 1;                                     /* the timer during that routine: no core work */
-    g_x.d->co_own.lo = pbf_parts[a].lo;                   /* (a routine of A, which is alive) */
-    g_x.d->co_own.h0 = pbf_parts[a].h0;
+    co_ctx_is(a);                                         /* (a routine on A's stack; A is alive) */
     g_g.depth++;
     T_EQ(mt_entry_core_ok(&g_e, MT_SWEEP_TIMER), 0);
     g_g.depth--;
@@ -723,8 +730,10 @@ static void rewritten_pending_pb_is_never_filled(void) {
  * those frames and sweeps: the survivors' network keeps working, nothing of the quit app is written. */
 static jmp_buf g_quitjmp;
 static int g_quitpart;
+static const void *g_quit_pb;                    /* the fuzzer arms one PB at a time: a completion that did not
+                                                  * fire inline (deferred, pending) is an ordinary one later */
 static void quit_in_routine(MtAnyPb *pb) {
-    (void)pb;
+    if (g_quit_pb && pb != g_quit_pb) return;
     pbf_mf_quit(g_quitpart);
     memset(pbf_p(pbf_parts[g_quitpart].lo), 0xC5, pbf_parts[g_quitpart].hi - pbf_parts[g_quitpart].lo);
     longjmp(g_quitjmp, 1);                               /* never returns */
@@ -771,6 +780,7 @@ static void quit_inside_own_routine_keeps_network_alive(void) {
         if (pass == 0) {
             T_EQ(rx_check(-1), 1);                        /* the next frame: abandoned, swept, delivered */
             T_EQ(g_x.d->n_gone_rx, 1);
+            T_EQ(g_g.depth, 0);                           /* the detector's own gate holding was left alone */
         } else {
             T_EQ(status(sa), 0);                          /* a Control call clears the gate as well */
             T_EQ(g_g.depth, 0);
@@ -788,10 +798,12 @@ static void quit_inside_own_routine_keeps_network_alive(void) {
     }
 }
 
-/* Fix round 3: B quits inside its routine and a DIFFERENT application of the same size lands in B's
+/* Fix round 3 / 4: B quits inside its routine and a DIFFERENT application of the same size lands in B's
  * block before any check: the header looks alive. Its first task-time Control call proves the routine
- * abandoned (task code runs only in the current process; no process switch inside a routine). */
-static void different_app_calling_unsticks_abandoned_routine(void) {
+ * abandoned because its partition OVERLAPS the recorded context under another identity (the block was
+ * reused: two live partitions cannot overlap); NOT because "a different application is calling" (round
+ * 4: that happens legitimately, see xapp_routine_during_other_apps_drain). */
+static void reused_block_unsticks_abandoned_routine(void) {
     int a, b, c;
     pbt_conn ca, cb, cc;
     StreamPtr sa, sb, sc;
@@ -849,9 +861,8 @@ static void queued_pbs_of_gone_owner_not_drained(void) {
     T_EQ(g_e.pend.queued, 1);
     pbf_mf_quit(b);
     to(a);
-    g_x.d->depth = 1;                                     /* a routine of A (alive) runs */
-    g_x.d->co_own.lo = pbf_parts[a].lo;
-    g_x.d->co_own.h0 = pbf_parts[a].h0;
+    g_x.d->depth = 1;                                     /* a routine runs on A's stack (A is alive) */
+    co_ctx_is(a);
     g_g.depth++;
     mt_entry_drain_ok(&g_e, MT_SWEEP_TIMER);
     g_g.depth--;
@@ -865,6 +876,375 @@ static void queued_pbs_of_gone_owner_not_drained(void) {
     T_EQ(g_e.n_pend_dropped, 1);
     T_EQ(g_x.d->n_gone_timer, 1);
     T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 4 (the round-3 re-review's finding): the glue runs app A's completion routine inline while
+ * app B is the CURRENT process (B's task-time call leaves the gate, own_and_run drains the ring, rx_cb ->
+ * mt_pb_input -> A's TCPRcv completion; only A5 is A's, the low-memory globals stay B's). A's routine
+ * re-issues an async call, the ordinary pattern: that arrives as "B calling at depth 1". Round 3 took a
+ * different current application as proof of an abandoned routine and reset depth, co_gate, in_core and
+ * the gate under B's running drain: depth wrapped to 255 when A's routine returned and every later sweep
+ * bailed forever. Now the context recorded is the process running the chain (B), and B is alive. */
+static int g_xa, g_xkillb = -1;                  /* A; pass 1: the routine ends the current process (B) */
+static StreamPtr g_xs;
+static pbt_conn *g_xc;
+static int g_xdeliver;
+static TCPiopb *g_xre;
+static void reissue_compl(MtAnyPb *pb) {         /* A's completion: an async TCPStatus with A's completion */
+    TCPiopb *st;
+    (void)pb;
+    if (g_xkillb >= 0) {                         /* ExitToShell from A's routine on B's stack: B ends */
+        g_quitpart = g_xkillb;
+        quit_in_routine(pb);
+    }
+    st = (TCPiopb *)pbf_mf_alloc(g_xa, sizeof(MtAnyPb));
+    st->ioCompletion = g_compl[g_xa];
+    st->csCode = TCPStatus;
+    st->tcpStream = g_xs;
+    st->ioResult = inProgress;
+    (void)mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_ASYNC, 0);
+    g_xre = st;
+}
+static void drain_hook(void) {                   /* the caller's outermost gate leave: own_and_run drains a
+                                                  * frame for A's connection (task time, caller current) */
+    if (!g_xdeliver || g_g.depth) return;
+    g_xdeliver = 0;
+    g_g.depth = 1;
+    if (!(g_x.d->n_own || g_x.d->depth) || mt_entry_core_ok(&g_e, MT_SWEEP_RX)) {
+        uint32_t seq = g_xc->ps;
+        g_xc->ps += 4;                           /* before the send: pass 1 longjmps out of it */
+        pbt_peer(&g_x, g_xc->lport, seq, g_xc->ms, TF_ACK | TF_PSH, 8192, "xapp", 4);
+    }
+    g_g.depth = 0;
+}
+static void xapp_routine_during_other_apps_drain(void) {
+    int a, b, pass;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    TCPiopb *ra;
+    for (pass = 0; pass < 2; pass++) {
+        msetup();
+        a = launch();
+        sa = est(&ca);
+        b = launch();
+        sb = est(&cb);
+        T_CHECK(sa && sb);
+        to(a);
+        ra = (TCPiopb *)apb(TCPRcv, sa);                  /* A's pending read, completion in A */
+        ra->ioCompletion = pbf_mf_compl(a, reissue_compl);
+        ra->csParam.receive.rcvBuff = pbf_a(pbf_mf_alloc(a, 64));
+        ra->csParam.receive.rcvBuffLen = 64;
+        T_EQ(ecall(ra, 1), 0);
+        T_EQ(ra->ioResult, inProgress);
+        g_xa = a; g_xs = sa; g_xc = &ca; g_xre = NULL; g_xdeliver = 1;
+        g_xkillb = pass == 1 ? b : -1;
+        to(b);
+        pbf_leave_hook = drain_hook;
+        if (pass == 0) {
+            T_EQ(status(sb), 0);                          /* B's call: its gate leave delivers A's data */
+            pbf_leave_hook = NULL;
+            T_EQ(g_xdeliver, 0);
+            T_EQ(ra->ioResult, 0);                        /* A's read completed inside B's drain... */
+            T_CHECK(g_xre != NULL);
+            T_EQ(ncompl(g_xre), 1);                       /* ...and its re-issued call ran as a call-out */
+            T_EQ(g_xre->ioResult, 0);
+            T_EQ(g_x.d->depth, 0);                        /* accounting intact: nothing abandoned */
+            T_EQ(g_x.d->n_unstuck, 0);
+            T_EQ(g_x.d->co_gate, 0);
+            T_EQ(g_g.depth, 0);
+            pbf_mf_quit(b);                               /* later B quits: A's network must survive */
+            to(a);
+            T_EQ(rx_check(0), 1);
+            T_EQ(g_x.d->n_unstuck, 0);
+        } else {
+            /* A's routine, run from B's drain, calls ExitToShell: the CURRENT process (B) ends inside
+             * its own driver call; the context recorded for the chain is B, so B's death frees the
+             * frames and the gate levels B's drain held (own_and_run + mt_pb_input) */
+            if (!setjmp(g_quitjmp)) { status(sb); T_CHECK(0); }
+            pbf_leave_hook = NULL;
+            T_EQ(g_x.d->depth, 1);
+            T_EQ(g_g.depth, 2);                           /* B's drain (1) + its core call (1): dead */
+            T_EQ(g_x.d->co_gate, 2);
+            T_EQ(g_x.d->co_n, 1);
+            T_EQ(g_x.d->co_ctx[0].lo, pbf_parts[b].lo);  /* B's stack, not A's partition */
+            pbf_irq = 0;
+            pbf_in_int = 0;
+            to(a);
+            T_EQ(status(sa), 0);                          /* A's next call: abandoned, gate released, swept */
+            T_EQ(g_x.d->n_unstuck, 1);
+            T_EQ(g_g.depth, 0);
+            T_EQ(g_x.d->n_gone_call, 1);
+        }
+        T_EQ(g_x.d->n_own_gone, 1);
+        T_EQ(g_x.d->n_dead_drops, 0);
+        T_EQ(status(sb), invalidStreamPtr);
+        T_CHECK(echoes(sa, &ca, "A lives"));
+        T_EQ(g_x.d->depth, 0);
+        T_EQ(g_g.depth, 0);
+        tick(MT_PB_SWEEP_MS);
+        if (pass == 1) T_CHECK(canary_ok(b));
+        T_EQ(pbf_dead_calls, 0);
+        T_EQ(pbf_bad, 0);
+    }
+    g_xkillb = -1;
+}
+
+/* Fix round 4 (safety net co_gen): a routine whose frames were abandoned, but which resumes anyway (a
+ * wrongful unstick: here a frame's check sees the running process's header as changed for a moment),
+ * must not wrap depth to 255 nor restore a stale co_gate; the driver keeps working afterwards. */
+static int g_resumed;
+static void resume_compl(MtAnyPb *pb) {
+    int live = pbf_parts[g_quitpart].live;
+    (void)pb;
+    pbf_parts[g_quitpart].live = 0;                       /* the header "changes" while the routine runs */
+    T_EQ(rx_check(-1), 1);                                /* a frame: abandons the chain (and sweeps B) */
+    pbf_parts[g_quitpart].live = live;
+    T_EQ(g_x.d->n_unstuck, 1);
+    T_EQ(g_x.d->depth, 0);
+    g_resumed++;                                          /* ...and the routine returns into the glue */
+}
+static void routine_resuming_after_unstick_keeps_accounting(void) {
+    int a, b;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    TCPiopb *pb;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    g_quitpart = b;
+    g_resumed = 0;
+    pb = (TCPiopb *)apb(TCPStatus, sb);
+    pb->ioCompletion = pbf_mf_compl(b, resume_compl);
+    T_EQ(ecall(pb, 1), 0);
+    T_EQ(g_resumed, 1);
+    T_EQ(g_x.d->depth, 0);                                /* not 255 */
+    T_EQ(g_x.d->co_gate, 0);
+    T_EQ(g_x.d->in_core, 0);
+    T_EQ(g_g.depth, 0);
+    T_EQ(g_x.d->n_unstuck, 1);
+    to(a);
+    T_EQ(status(sa), 0);                                  /* call-outs nest and return as before */
+    T_EQ(g_x.d->depth, 0);
+    T_CHECK(echoes(sa, &ca, "after a resume"));
+    T_EQ(g_x.d->depth, 0);
+    tick(MT_PB_SWEEP_MS);
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 4: B quits inside a completion routine fired INSIDE the gate (a TCPRcv served inline from
+ * mt_pb_control), so the dead frames hold the gate: frames and ticks are deferred (nothing can enter),
+ * only a Control call can rescue. Pass 0: B's header changed, A's call abandons the chain and releases
+ * exactly the gate level the chain held. Pass 1: D (same size, another name) sits in B's block before
+ * any call (header alive); D's first call proves the chain dead by the overlap and releases the gate,
+ * then D works. Pass 2: the SAME application relaunched identically (the documented limit) nests under
+ * the dead chain and proves nothing; when it quits, A's call releases the whole gate. */
+static void gate_held_while_abandoned_routines_process_quits(void) {
+    int a, b, c, pass;
+    pbt_conn ca, cb, cc;
+    StreamPtr sa, sb, sc;
+    TCPiopb *pb;
+    MacPtr32 blo;
+    uint32_t bname;
+    for (pass = 0; pass < 3; pass++) {
+        msetup();
+        a = launch();
+        sa = est(&ca);
+        b = launch();
+        sb = est(&cb);
+        T_CHECK(sa && sb);
+        g_quitpart = b;
+        pbt_peer(&g_x, cb.lport, cb.ps, cb.ms, TF_ACK | TF_PSH, 8192, "abcdef", 6);
+        cb.ps += 6;
+        pb = (TCPiopb *)apb(TCPRcv, sb);
+        pb->csParam.receive.rcvBuff = pbf_a(pbf_mf_alloc(b, 2));
+        pb->csParam.receive.rcvBuffLen = 2;
+        pb->ioCompletion = pbf_mf_compl(b, quit_in_routine);
+        if (!setjmp(g_quitjmp)) { ecall(pb, 1); T_CHECK(0); }
+        T_EQ(g_x.d->depth, 1);
+        T_EQ(g_g.depth, 1);                               /* the dead chain holds the gate once */
+        T_EQ(g_x.d->co_gate, 1);
+        pbf_irq = 0;
+        pbf_in_int = 0;
+        blo = pbf_parts[b].lo;
+        bname = pbf_parts[b].name;
+        tick(MT_PB_SWEEP_MS);                             /* deferred: the gate is held */
+        T_EQ(g_x.d->n_unstuck, 0);
+        T_EQ(g_g.depth, 1);
+        if (pass == 0) {
+            to(a);
+            T_EQ(status(sa), 0);                          /* the rescue: header changed */
+            T_EQ(g_x.d->n_unstuck, 1);
+            T_EQ(g_x.d->n_gone_call, 1);
+        } else {
+            pbf_mf_forget(b);
+            c = pbf_mf_launch_at(blo, PART, pass == 2 ? bname : 0);
+            g_compl[c] = pbf_mf_compl(c, compl_rec);
+            g_asr[c] = pbf_mf_asr(c, asr_rec);
+            g_cur = c;
+            sc = est(&cc);                                /* the new tenant's first calls */
+            T_CHECK(sc != 0);
+            if (pass == 1) {
+                T_EQ(g_x.d->n_unstuck, 1);                /* overlap under another identity: abandoned */
+                T_EQ(g_x.d->n_own_gone, 1);               /* ...and B's objects swept by the same rule */
+                T_EQ(g_g.depth, 0);
+                T_EQ(status(sc), 0);
+            } else {
+                T_EQ(g_x.d->n_unstuck, 0);                /* indistinguishable: nothing proven */
+                T_EQ(g_x.d->depth, 1);
+                T_EQ(g_g.depth, 1);                       /* its calls nested under the dead chain */
+                T_EQ(status(sc), 0);
+                T_EQ(g_x.d->depth, 1);
+                T_EQ(g_g.depth, 1);
+                pbf_mf_quit(c);                           /* when it quits the header changes at last */
+                to(a);
+                T_EQ(status(sa), 0);
+                T_EQ(g_x.d->n_unstuck, 1);
+                T_EQ(status(sc), invalidStreamPtr);
+            }
+        }
+        T_EQ(g_x.d->depth, 0);
+        T_EQ(g_g.depth, 0);
+        T_EQ(g_g.in_irq, 0);
+        T_EQ(g_x.d->in_core, 0);
+        T_EQ(status(sb), invalidStreamPtr);
+        to(a);
+        T_CHECK(echoes(sa, &ca, "A"));
+        T_EQ(g_x.d->depth, 0);
+        T_EQ(g_g.depth, 0);
+        tick(MT_PB_SWEEP_MS);
+        if (pass == 0) T_CHECK(canary_ok(b));
+        T_EQ(pbf_dead_calls, 0);
+        T_EQ(pbf_bad, 0);
+    }
+}
+
+/* Fix round 4 (rule 3): a call-out that begins at interrupt time records no context. The low-memory
+ * globals then belong to whichever process was interrupted, possibly one in the middle of quitting
+ * (partition already freed): A's ASR runs from a frame delivered at interrupt time while B (never a
+ * caller) is current and gone; the ASR calls the driver. Nothing may be abandoned: the chain is live. */
+static int g_asr_calls;
+static void asr_calls_driver(StreamPtr s, uint16_t ev, MacPtr32 user, uint16_t reason, MacPtr32 icmp) {
+    TCPiopb *st = (TCPiopb *)pbf_mf_alloc((int)user, sizeof(MtAnyPb));
+    (void)ev; (void)reason; (void)icmp;
+    st->csCode = TCPStatus;
+    st->tcpStream = s;
+    st->ioResult = inProgress;
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_SYNC, 1), 0);
+    g_asr_calls++;
+}
+static void interrupt_time_routine_is_never_abandoned(void) {
+    int a, b;
+    pbt_conn ca;
+    StreamPtr sa;
+    msetup();
+    a = launch();
+    g_asr[a] = pbf_mf_asr(a, asr_calls_driver);
+    sa = est(&ca);
+    T_CHECK(sa != 0);
+    b = pbf_mf_launch(PART);                              /* B: current, never calls the driver... */
+    pbf_mf_quit(b);                                       /* ...and mid-quit when the frame interrupts */
+    g_asr_calls = 0;
+    g_g.depth++;                                          /* the protocol handler owns the core */
+    pbf_in_int++;
+    T_EQ(mt_entry_core_ok(&g_e, MT_SWEEP_RX), 1);
+    pbt_peer(&g_x, ca.lport, ca.ps, ca.ms, TF_ACK | TF_PSH, 8192, "data", 4);
+    ca.ps += 4;
+    pbf_in_int--;
+    g_g.depth--;
+    T_EQ(g_asr_calls, 1);                                 /* A's ASR ran and called the driver */
+    T_EQ(g_x.d->n_unstuck, 0);                            /* no context: never abandoned */
+    T_EQ(g_x.d->co_n, 0);
+    T_EQ(g_x.d->depth, 0);
+    T_EQ(g_g.depth, 0);
+    to(a);
+    T_EQ(status(sa), 0);
+    T_EQ(g_x.d->n_unstuck, 0);
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* Fix round 4 (found by fuzz_apps): while a dead owner cannot be swept (a routine of live app A runs),
+ * a new application D is launched into the dead one's block and calls: it is recorded anyway, and when
+ * the sweep finally runs, the dead owner's objects go while D's (created later, inside the same address
+ * range) stay. The classic case B's objects are told from D's by age (MtDrv.own_ser / born). */
+static void tenant_of_unswept_block_keeps_its_objects(void) {
+    int a, b, d, pass;
+    pbt_conn ca, cb, cd;
+    StreamPtr sa, sb, sd;
+    TCPiopb *rb;
+    MacPtr32 blo;
+    for (pass = 0; pass < 2; pass++) {                    /* pass 1: that routine fired inside the gate, so the
+                                                           * gate is held too (D's calls nest as call-outs) */
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    rb = rcv(sb, 32);                                     /* B quits with a read pending */
+    blo = pbf_parts[b].lo;
+    pbf_mf_quit(b);
+    pbf_mf_forget(b);
+    g_x.d->depth = 1;                                     /* a routine runs on A's stack: no forgetting now */
+    co_ctx_is(a);
+    if (pass == 1) { g_g.depth = 1; g_x.d->co_gate = 1; }
+    d = pbf_mf_launch_at(blo, PART - 0x1000u, 0);         /* D in B's block (another size: B's header gone) */
+    g_compl[d] = pbf_mf_compl(d, compl_rec);
+    g_asr[d] = pbf_mf_asr(d, asr_rec);
+    g_cur = d;
+    {                                                     /* D creates and opens while the sweep must wait... */
+        TCPiopb *pb = (TCPiopb *)apb(TCPCreate, 0), *op;
+        tcpv v;
+        pb->csParam.create.rcvBuff = pbf_a(pbf_mf_alloc(d, 8192));
+        pb->csParam.create.rcvBuffLen = 8192;
+        pb->csParam.create.notifyProc = g_asr[d];
+        T_EQ(ecall(pb, 0), 0);                            /* sync: ioResult is set by the entry */
+        sd = pb->tcpStream;
+        fake_clear(&g_x.fl);
+        op = (TCPiopb *)apb(TCPActiveOpen, sd);
+        op->csParam.open.remoteHost = T_PEER;
+        op->csParam.open.remotePort = PBT_PEER_PORT;
+        T_EQ(ecall(op, 1), 0);
+        T_CHECK(pbt_last_tcp(&g_x, &v) && v.flags == TF_SYN);
+        cd.lport = v.sport; cd.ps = 5000; cd.ms = v.seq + 1;
+        pbt_peer(&g_x, cd.lport, cd.ps, cd.ms, TF_SYN | TF_ACK, 8192, NULL, 0);
+        cd.ps++;
+        T_EQ(op->ioResult, inProgress);                   /* the documented cost of the limbo: its async PB in
+                                                           * the dead owner's range is withheld (mt_pb_gone cannot
+                                                           * tell it from a stale one by address); the stream
+                                                           * itself is connected */
+        T_CHECK(g_x.d->n_dead_calls > 0);
+    }
+    T_EQ(g_x.d->n_own_gone, 0);
+    T_EQ(g_x.d->n_own, 3);                                /* ...and is recorded nevertheless */
+    T_EQ(status(sd), 0);
+    g_x.d->depth = 0;                                     /* A's routine returned */
+    if (pass == 1) { g_g.depth = 0; g_x.d->co_gate = 0; }
+    to(a);
+    T_EQ(status(sa), 0);                                  /* the sweep: B goes, D stays */
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_own, 2);
+    T_EQ(status(sb), invalidStreamPtr);
+    T_EQ(ncompl(rb), 0);
+    T_CHECK(rst_to(cb.lport));
+    to(d);
+    T_EQ(status(sd), 0);
+    T_CHECK(echoes(sd, &cd, "D works"));
+    to(a);
+    T_CHECK(echoes(sa, &ca, "A works"));
+    pbf_mf_quit(d);                                       /* and when D quits, its record (made while the sweep
+                                                           * had to wait) is what lets its objects go */
+    T_EQ(status(sa), 0);
+    T_EQ(g_x.d->n_own_gone, 2);
+    T_EQ(status(sd), invalidStreamPtr);
+    T_CHECK(rst_to(cd.lport));
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+    }
 }
 
 /* ---- randomized: up to three applications launching, calling, quitting without a goodbye, a new one
@@ -943,17 +1323,80 @@ static int pick_live(void) {
 /* The driver's input path (mt_drv.c rx_cb): before every frame while owners exist; half of the
  * frames arrive while some application routine runs (depth 1: the sweep cannot run, the frame must
  * then be dropped). rx() checks; rx_end() restores depth after the delivery. */
-static int g_rxdepth;
+static int g_rxdepth, g_rxirq;
 static uint8_t g_rxsv;
 static int rx(void) {
     int ok;
+    if (g_g.depth) return 0;                     /* the gate is held (by frames a quit process left): the
+                                                  * frame waits in the ring; here it is lost to the model */
     g_rxdepth = (int)rn(2);
     ok = rx_check(g_rxdepth);
     g_rxsv = g_x.d->depth;
     if (ok && g_rxdepth && !g_rxsv) g_x.d->depth = 1;   /* the frame is delivered inside that routine's time */
+    g_rxirq = ok && rn(2);                       /* from the protocol handler (interrupt time) or a task-time drain */
+    if (g_rxirq) pbf_in_int++;
     return ok;
 }
-static void rx_end(void) { g_x.d->depth = g_rxsv; }
+static void rx_end(void) {
+    g_x.d->depth = g_rxsv;
+    if (g_rxirq) pbf_in_int--;
+}
+/* Round 4: frames that wait in the gate's ring and are delivered by the gate owner's drain, i.e. at the
+ * outermost gate leave of whichever application's task-time call comes next (own_and_run in mt_gate.c):
+ * the routines they fire (another app's completion, which may re-issue a call) then run inline with
+ * THAT application current. pbf_leave_hook plays own_and_run. */
+typedef struct { int b, k; } fring_ent;
+static fring_ent g_ring[8];
+static int g_ring_n, g_in_hook;
+static unsigned long g_drained, g_reissued;
+static void fring_push(int b, int k) { if (g_ring_n < 8) { g_ring[g_ring_n].b = b; g_ring[g_ring_n].k = k; g_ring_n++; } }
+static void fdeliver(int b, int k) {             /* the caller holds the gate (depth 1) */
+    if (!(g_x.d->n_own || g_x.d->depth) || mt_entry_core_ok(&g_e, MT_SWEEP_RX)) {
+        pbt_peer(&g_x, F[b].c[k].lport, F[b].c[k].ps, F[b].c[k].ms, TF_ACK | TF_PSH, 8192, "datadata", 8);
+        F[b].c[k].ps += 8;
+    }
+}
+static void fhook(void) {
+    if (g_in_hook || g_g.depth) return;          /* nested leaves are not the outermost one */
+    g_in_hook = 1;
+    g_g.depth = 1;
+    while (g_ring_n) {
+        fring_ent r = g_ring[0];
+        memmove(g_ring, g_ring + 1, (size_t)(--g_ring_n) * sizeof r);
+        g_drained++;
+        fdeliver(r.b, r.k);
+    }
+    g_g.depth = 0;
+    g_in_hook = 0;
+}
+/* Data for connection (b, k): delivered now (depth 0 or 1, interrupt or task time), or left in the ring
+ * for the next drain. 1 = delivered now. */
+static int rx_tcp(int b, int k) {
+    if (g_g.depth || rn(4) == 0) { fring_push(b, k); return 0; }
+    if (!rx()) return 0;
+    pbt_peer(&g_x, F[b].c[k].lport, F[b].c[k].ps, F[b].c[k].ms, TF_ACK | TF_PSH, 8192, "datadata", 8);
+    rx_end();
+    F[b].c[k].ps += 8;
+    return 1;
+}
+/* A completion routine (of the app whose partition holds the PB) that re-issues an async TCPStatus with
+ * the same app's ordinary completion: the pattern of every async client. */
+static void compl_reissue(MtAnyPb *pb) {
+    int i;
+    MacPtr32 at = pbf_a(pb);
+    for (i = 0; i < PBF_PARTS; i++)
+        if (pbf_parts[i].lo && pbf_parts[i].live && at >= pbf_parts[i].lo && at < pbf_parts[i].hi) break;
+    if (i == PBF_PARTS || pbf_mf_left(i) < 0x400u) return;
+    {
+        TCPiopb *st = (TCPiopb *)pbf_mf_alloc(i, sizeof(MtAnyPb));
+        st->ioCompletion = g_compl[i];
+        st->csCode = TCPStatus;
+        st->tcpStream = pb->tcp.tcpStream;
+        st->ioResult = inProgress;
+        (void)mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_ASYNC, 0);
+        g_reissued++;
+    }
+}
 /* The quit: MultiFinder frees the partition (no goodbye); from now on nothing may write into it. */
 static void fquit(int a, int step) {
     pbf_mf_quit(F[a].part);
@@ -963,15 +1406,18 @@ static void fquit(int a, int step) {
     F[a].qstep = step;
 }
 
-static unsigned long g_steps, g_gone, g_deadc, g_apps, g_inroutine, g_unstuck;
+static unsigned long g_steps, g_gone, g_deadc, g_apps, g_inroutine, g_ingate, g_unstuck, g_wait;
 static void fuzz_one(uint32_t seed) {
     int step, i, j;
     msetup();
     g_rng = seed * 2654435761u + 1u;
     g_nf = 0;
+    g_ring_n = 0;
+    g_in_hook = 0;
+    pbf_leave_hook = fhook;
     memset(F, 0, sizeof F);
     for (step = 0; step < 300 && !g_fail; step++) {
-        int a = pick_live(), r = (int)rn(12);
+        int a = pick_live(), r = (int)rn(14), ticked = 0;
         g_steps++;
         if (a < 0 && g_nf >= FMAX) break;
         if (a < 0 || (r == 0 && live_apps() < FA && g_nf < FMAX)) {   /* launch */
@@ -1012,13 +1458,55 @@ static void fuzz_one(uint32_t seed) {
             break;
         case 4: {                                          /* data for any connection, dead ones too */
             int b = (int)rn((uint32_t)g_nf), k = (int)rn(FS);
-            if (F[b].s[k] && rx()) {
-                pbt_peer(&g_x, F[b].c[k].lport, F[b].c[k].ps, F[b].c[k].ms, TF_ACK | TF_PSH, 8192, "datadata", 8);
-                rx_end();
-                F[b].c[k].ps += 8;
-            }
+            if (F[b].s[k]) (void)rx_tcp(b, k);
             break;
         }
+        case 11:                                           /* round 4: quit from inside a completion routine
+                                                            * fired INSIDE the gate (a read served inline): the
+                                                            * dead frames hold the gate */
+            if (F[a].s[j] && !g_g.depth && rn(2)) {
+                TCPiopb *pb;
+                if (g_g.depth || !rx()) break;             /* data first, delivered now */
+                pbt_peer(&g_x, F[a].c[j].lport, F[a].c[j].ps, F[a].c[j].ms, TF_ACK | TF_PSH, 8192, "datadata", 8);
+                rx_end();
+                F[a].c[j].ps += 8;
+                if (!F[a].live) break;                     /* (cannot happen: a is live) */
+                pb = (TCPiopb *)apb(TCPRcv, F[a].s[j]);
+                pb->csParam.receive.rcvBuff = pbf_a(pbf_mf_alloc(F[a].part, 4));
+                pb->csParam.receive.rcvBuffLen = 4;
+                pb->ioCompletion = pbf_mf_compl(F[a].part, quit_in_routine);
+                g_quitpart = F[a].part;
+                g_quit_pb = pb;
+                if (!setjmp(g_quitjmp)) {
+                    ecall(pb, 1);
+                    g_quit_pb = NULL;                      /* the read did not complete inline (queued, the
+                                                            * nesting limit, data already read): release the
+                                                            * stream, its completion is then an ordinary one */
+                    T_EQ(ecall(apb(TCPRelease, F[a].s[j]), 0), 0);
+                    F[a].s[j] = 0;
+                    break;
+                }
+                g_quit_pb = NULL;
+                pbf_irq = 0;                               /* the fake's nesting counters of the dead frames */
+                pbf_in_int = 0;
+                F[a].live = 0;
+                F[a].swept = 1;
+                F[a].qstep = step;
+                g_inroutine++;
+                if (g_g.depth) g_ingate++;
+            }
+            break;
+        case 12:                                           /* round 4: a read whose completion re-issues a call,
+                                                            * answered from the next task-time caller's drain */
+            if (F[a].s[j]) {
+                TCPiopb *pb = (TCPiopb *)apb(TCPRcv, F[a].s[j]);
+                pb->csParam.receive.rcvBuff = pbf_a(pbf_mf_alloc(F[a].part, 16));
+                pb->csParam.receive.rcvBuffLen = 16;
+                pb->ioCompletion = pbf_mf_compl(F[a].part, compl_reissue);
+                ecall(pb, 1);
+                fring_push(a, j);
+            }
+            break;
         case 5:
             if (!F[a].u) ucreate(&F[a].u, &F[a].uport);
             else if (rn(2)) (void)uread(F[a].u);
@@ -1046,7 +1534,17 @@ static void fuzz_one(uint32_t seed) {
                 TCPiopb *pb = (TCPiopb *)apb(TCPStatus, F[a].s[j]);
                 g_quitpart = F[a].part;
                 pb->ioCompletion = pbf_mf_compl(F[a].part, quit_in_routine);
-                if (!setjmp(g_quitjmp)) { ecall(pb, 1); fbad(seed, step, "routine did not run"); return; }
+                g_quit_pb = pb;
+                if (!setjmp(g_quitjmp)) {
+                    ecall(pb, 1);                          /* nested MT_PB_INLINE_MAX deep under stuck chains: the
+                                                            * completion is deferred (ordinary later), no quit */
+                    g_quit_pb = NULL;
+                    if (pb->ioResult == inProgress) { fbad(seed, step, "status call left pending"); return; }
+                    break;
+                }
+                g_quit_pb = NULL;
+                pbf_irq = 0;                               /* the fake's nesting counters of the dead frames */
+                pbf_in_int = 0;
                 F[a].live = 0;
                 F[a].swept = 1;                            /* quit_in_routine armed the canary */
                 F[a].qstep = step;
@@ -1067,9 +1565,18 @@ static void fuzz_one(uint32_t seed) {
         }
         if (pbf_dead_calls) { fbad(seed, step, "a quit application's routine or PB was run"); return; }
         if (pbf_bad) { fbad(seed, step, "misuse seen by the fake OS"); return; }
+        /* At top level the only glue frames are ones a quit process left: at most a few, each chain with
+         * its context recorded (a wrapped depth or a lost context would stall the driver for good). */
+        if (g_x.d->depth > 6) { fbad(seed, step, "glue depth wrapped / grew without bound"); return; }
+        if (g_x.d->depth && !g_x.d->co_n) { fbad(seed, step, "stuck frames without a recorded context"); return; }
+        if (!g_x.d->depth && g_x.d->co_gate) { fbad(seed, step, "co_gate left set at depth 0"); return; }
         if (rn(3) == 0) {                                  /* a sweep tick, then the strict checks */
             tick(MT_PB_SWEEP_MS);
-            for (i = 0; i < g_nf; i++) {
+            ticked = !g_g.depth && !g_x.d->depth;          /* the sweep could run: nothing stuck (a dead chain
+                                                            * still looking alive, i.e. its block reused by an
+                                                            * app that has not called yet, is the documented
+                                                            * limit until that app calls or quits) */
+            for (i = 0; ticked && i < g_nf; i++) {
                 if (F[i].live || F[i].part < 0) continue;
                 if (refers(&pbf_parts[F[i].part])) { fbad(seed, step, "object of a quit partition kept"); return; }
             }
@@ -1101,11 +1608,14 @@ static void fuzz_apps(void) {
         g_gone += g_x.d->n_own_gone;
         g_deadc += g_x.d->n_dead_calls;
         g_unstuck += g_x.d->n_unstuck;
+        g_wait += g_x.d->n_unstick_wait;
         g_apps += (unsigned long)g_nf;
     }
+    pbf_leave_hook = NULL;
     printf("fuzz_apps: %lu steps, %lu applications, %lu swept, %lu routines of quit applications skipped, "
-           "%lu quits inside a routine, %lu abandoned routine frames\n", g_steps, g_apps, g_gone, g_deadc,
-           g_inroutine, g_unstuck);
+           "%lu quits inside a routine (%lu of them inside the gate), %lu abandoned routine chains, %lu postponed, "
+           "%lu frames drained by another app's call, %lu calls re-issued from a routine\n", g_steps, g_apps, g_gone,
+           g_deadc, g_inroutine, g_ingate, g_unstuck, g_wait, g_drained, g_reissued);
     g_lax = 0;
     T_EQ(g_fail, 0);
 }
@@ -1118,5 +1628,7 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        timer_sweep_bailing_does_not_spin, frame_dropped_when_dead_owner_cannot_be_swept,
        readers_survive_concurrent_owner_drop, rewritten_pending_pb_is_never_filled,
        quit_inside_own_routine_keeps_network_alive, queued_pbs_of_gone_owner_not_drained,
-       different_app_calling_unsticks_abandoned_routine,
+       reused_block_unsticks_abandoned_routine, xapp_routine_during_other_apps_drain,
+       routine_resuming_after_unstick_keeps_accounting, gate_held_while_abandoned_routines_process_quits,
+       interrupt_time_routine_is_never_abandoned, tenant_of_unswept_block_keeps_its_objects,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)
