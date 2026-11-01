@@ -269,7 +269,7 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
 
 int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, int ndisabled,
                      const InstManifest *man, InstOp *ops, int cap, InstMsg *msg, char *blocker) {
-    int mi, mx = -1, mt = -1, tm, tm_bad, bad = -1, dbad = -1, mani_any, folder_exists, i, j, k, n = 0, nr = 0, need, rest, rc;
+    int mi, mx = -1, mt = -1, tm, tm_bad, bad = -1, dbad = -1, mani_any, folder_exists, i, j, k, n = 0, nr = 0, need, rest, rc, pass;
     int rs[INST_MAN_MAX];
     if (!msg || !ops || nsys < 0 || (nsys && !sys) || (ndisabled > 0 && !disabled)) return INST_E_ARG;
     if (blocker) blocker[0] = 0;
@@ -332,11 +332,15 @@ int inst_plan_remove(const InstEntry *sys, int nsys, const InstEntry *disabled, 
         rc = emit(ops, &n, INST_DELETE_TEMP, INST_SYSFOLDER, sys[tm].name, NULL, NULL, NULL, NULL);
         if (rc < 0) return rc;
     }
-    for (i = 0; i < nr; i++) {
-        rc = emit(ops, &n, INST_MOVE, INST_SYSFOLDER, INST_DISABLED, disabled[rs[i]].name,
-                  INST_SYSFOLDER, disabled[rs[i]].name, NULL);
-        if (rc < 0) return rc;
-    }
+    /* the control panel "MacTCP" goes back LAST: booted alone, the real MacTCP creates a fresh "MacTCP DNR"
+     * (observed in Snow, Task 10), which would then block the restore of the parked one */
+    for (pass = 0; pass < 2; pass++)
+        for (i = 0; i < nr; i++) {
+            if ((trio_idx(&disabled[rs[i]]) == 0) != (pass == 1)) continue;
+            rc = emit(ops, &n, INST_MOVE, INST_SYSFOLDER, INST_DISABLED, disabled[rs[i]].name,
+                      INST_SYSFOLDER, disabled[rs[i]].name, NULL);
+            if (rc < 0) return rc;
+        }
     if (mt >= 0) {
         rc = emit(ops, &n, INST_DELETE_TEMP, INST_SYSFOLDER, INST_DISABLED, disabled[mt].name, NULL, NULL, NULL);
         if (rc < 0) return rc;

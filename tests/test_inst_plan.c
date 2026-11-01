@@ -429,8 +429,9 @@ static void remove_with_manifest(void) {
     T_EQ(ops[0].kind, INST_DELETE_MOOF);          /* MoofTCP goes first */
     T_CHECK(!strcmp(ops[0].from, ":System Folder:MoofTCP"));
     T_EQ(ops[1].kind, INST_MOVE);
-    T_CHECK(!strcmp(ops[1].from, ":System Folder:MacTCP (Disabled):MacTCP"));
-    T_CHECK(!strcmp(ops[1].to, ":System Folder:MacTCP"));
+    T_EQ(ops[3].kind, INST_MOVE);                 /* the control panel MacTCP goes back last (Task 10) */
+    T_CHECK(!strcmp(ops[3].from, ":System Folder:MacTCP (Disabled):MacTCP"));
+    T_CHECK(!strcmp(ops[3].to, ":System Folder:MacTCP"));
     T_EQ(ops[4].kind, INST_DELETE_MANIFEST);
     T_CHECK(!strcmp(ops[4].from, ":System Folder:MacTCP (Disabled):MoofTCP Manifest"));
     T_EQ(ops[5].kind, INST_RMDIR);
@@ -999,6 +1000,13 @@ static void prop_remove_prefixes(void) {
                 Sim p = s; InstOp r2[INST_OPS_MAX]; InstMsg m2; int n2;
                 T_EQ(apply(&p, r, k, NULL), 0);
                 if (fm >= 0 && k > fm) T_CHECK(providers(&p) <= 1);   /* never two providers once MacTCP is back */
+                /* Task 10, observed in Snow: the real MacTCP booted without "MacTCP DNR" makes a fresh one, which
+                 * then blocks the restore. So no prefix has MacTCP back while a set file we parked is still parked. */
+                if (sfind(&p, SF, "MacTCP") >= 0 && sfind(&s, INST_DISABLED, "MacTCP") >= 0) {
+                    T_CHECK(sfind(&p, INST_DISABLED, "MacTCP DNR") < 0 || sfind(&s, INST_DISABLED, "MacTCP DNR") < 0 ||
+                            sfind(&orig, INST_DISABLED, "MacTCP DNR") >= 0);
+                    T_CHECK(sfind(&p, INST_DISABLED, "MacTCP Prep") < 0 || sfind(&orig, INST_DISABLED, "MacTCP Prep") >= 0);
+                }
                 n2 = do_remove(&p, r2, &m2);
                 T_CHECK(n2 >= 0);
                 if (m2 == INST_BLOCKED_LOCKED) continue;

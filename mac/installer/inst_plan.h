@@ -35,7 +35,9 @@
  * OP LIST ORDER. Install: MKDIR (if the folder is missing), WRITE_MANIFEST, the MOVEs, WRITE_MOOF
  * last (so MacTCP and MoofTCP are never live together because of us). Remove: DELETE_MOOF first
  * (MoofTCP gone before MacTCP returns: never two .IPP providers after a power loss), DELETE_TEMP of
- * a leftover System Folder MoofTCP.tmp (also before), the restoring MOVEs, DELETE_TEMP of the
+ * a leftover System Folder MoofTCP.tmp (also before), the restoring MOVEs with the control panel
+ * "MacTCP" LAST (Task 10, observed in Snow: the real MacTCP booted without "MacTCP DNR" creates a
+ * fresh one, which would block the restore of the parked file after a crash), DELETE_TEMP of the
  * manifest temp, DELETE_MANIFEST, and RMDIR last. The manifest exists
  * from before the first move until after the last restore, so after a crash at ANY point (a
  * crash is a prefix of the op list, plus a half-done last op as described below) a fresh
