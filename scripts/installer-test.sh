@@ -30,6 +30,8 @@ OUT="$ROOT/build-mac/installer-test"
 APP="$ROOT/build-mac/installer/MoofTCP Installer.bin"
 DBG="$ROOT/build-mac/installer/Installer Dbg.bin"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
+# same guard as snow.sh: only our private Xvfb displays :140-:149 (never the owner's desktop :0/:1)
+case "$DISPLAY_NUM" in :14[0-9]) ;; *) echo "installer-test.sh: refusing display $DISPLAY_NUM (only :140-:149)" >&2; exit 1;; esac
 TRIO=("MacTCP" "MacTCP DNR" "MacTCP Prep")
 die() { echo "installer-test.sh: $*" >&2; exit 1; }
 mkdir -p "$OUT"

@@ -62,52 +62,73 @@ static uint32_t rd32(const uint8_t *p) {
 }
 static unsigned rd16(const uint8_t *p) { return ((unsigned)p[0] << 8) | (unsigned)p[1]; }
 
-/* Offset (inside the data area) of resource (type, id) in a resource map, or -1. Bounds-checked. */
-static long map_find(const uint8_t *m, long mlen, uint32_t type, int id) {
-    long tl, nt, i, k, nr, rl, e;
-    if (mlen < 30) return -1;
-    tl = (long)rd16(m + 24);
-    if (tl + 2 > mlen) return -1;
-    nt = (long)((rd16(m + tl) + 1) & 0xFFFF);
+/* Reads n bytes at offset off of a resource fork: 0 = all n bytes read. */
+typedef int (*RdFn)(void *c, long off, uint8_t *p, long n);
+
+/* Offset (inside the data area) of resource (type, id) in the map at moff..moff+mlen, or -1. Reads the
+ * entries one at a time (no buffer for the whole map: any map size, 12 bytes of stack). Bounds-checked. */
+static long map_find(RdFn rd, void *c, long moff, long mlen, uint32_t type, int id) {
+    uint8_t b[12];
+    long tl, nt, i, k, nr, rl, e, r;
+    if (mlen < 30 || rd(c, moff + 24, b, 2)) return -1;
+    tl = (long)rd16(b);
+    if (tl + 2 > mlen || rd(c, moff + tl, b, 2)) return -1;
+    nt = (long)((rd16(b) + 1) & 0xFFFF);
     for (i = 0; i < nt; i++) {
         e = tl + 2 + 8 * i;
-        if (e + 8 > mlen) return -1;
-        if (rd32(m + e) != type) continue;
-        nr = (long)rd16(m + e + 4) + 1;
-        rl = tl + (long)rd16(m + e + 6);
+        if (e + 8 > mlen || rd(c, moff + e, b, 8)) return -1;
+        if (rd32(b) != type) continue;
+        nr = (long)rd16(b + 4) + 1;
+        rl = tl + (long)rd16(b + 6);
         for (k = 0; k < nr; k++) {
-            long r = rl + 12 * k;
-            if (r + 12 > mlen) return -1;
-            if ((int)(int16_t)rd16(m + r) == id)
-                return ((long)m[r + 5] << 16) | ((long)m[r + 6] << 8) | (long)m[r + 7];
+            r = rl + 12 * k;
+            if (r + 12 > mlen || rd(c, moff + r, b, 12)) return -1;
+            if ((int)(int16_t)rd16(b) == id) return ((long)b[5] << 16) | ((long)b[6] << 8) | (long)b[7];
         }
     }
     return -1;
 }
 
-uint32_t inst_fork_vers(const uint8_t *f, long len) {
+/* the packed 'vers' 1 through a reader; 0 = none or damaged */
+static uint32_t vers_of(RdFn rd, void *c) {
+    uint8_t h[16], v[8];
     long doff, moff, mlen, r;
+    if (rd(c, 0, h, 16)) return 0;
+    doff = (long)rd32(h); moff = (long)rd32(h + 4); mlen = (long)rd32(h + 12);
+    if (doff < 0 || moff < 0 || mlen < 30) return 0;
+    r = map_find(rd, c, moff, mlen, T_VERS, 1);
+    if (r < 0 || rd(c, doff + r, v, 8) || rd32(v) < 4) return 0;
+    return rd32(v + 4);
+}
+
+typedef struct { const uint8_t *f; long len; } MemFork;
+static int mem_rd(void *c, long off, uint8_t *p, long n) {
+    const MemFork *m = (const MemFork *)c;
+    if (off < 0 || n < 0 || off > m->len || n > m->len - off) return -1;
+    memcpy(p, m->f + off, (size_t)n);
+    return 0;
+}
+
+uint32_t inst_fork_vers(const uint8_t *f, long len) {
+    MemFork m;
     if (!f || len < 16) return 0;
-    doff = (long)rd32(f); moff = (long)rd32(f + 4); mlen = (long)rd32(f + 12);
-    if (doff < 0 || moff < 0 || mlen < 0 || moff > len || mlen > len - moff) return 0;
-    r = map_find(f + moff, mlen, T_VERS, 1);
-    if (r < 0 || doff > len - 8 || r > len - doff - 8) return 0;
-    if (rd32(f + doff + r) < 4) return 0;
-    return rd32(f + doff + r + 4);
+    m.f = f; m.len = len;
+    return vers_of(mem_rd, &m);
 }
 
 /* the same, read through the table (only ever called for the MoofTCP file) */
+typedef struct { const InstFs *fs; long dir; const char *name; } FsFork;
+static int fs_rd(void *c, long off, uint8_t *p, long n) {
+    const FsFork *f = (const FsFork *)c;
+    long got = 0;
+    if (off < 0 || n < 0) return -1;
+    if (f->fs->read(f->fs->ctx, f->dir, f->name, 1, off, p, n, &got) || got != n) return -1;
+    return 0;
+}
 static uint32_t file_vers(const InstFs *fs, long dir, const char *name) {
-    uint8_t h[16], m[4096], v[8];
-    long got, doff, moff, mlen, r;
-    if (fs->read(fs->ctx, dir, name, 1, 0, h, 16, &got) || got != 16) return 0;
-    doff = (long)rd32(h); moff = (long)rd32(h + 4); mlen = (long)rd32(h + 12);
-    if (doff < 0 || moff < 0 || mlen < 30 || mlen > (long)sizeof m) return 0;
-    if (fs->read(fs->ctx, dir, name, 1, moff, m, mlen, &got) || got != mlen) return 0;
-    r = map_find(m, mlen, T_VERS, 1);
-    if (r < 0) return 0;
-    if (fs->read(fs->ctx, dir, name, 1, doff + r, v, 8, &got) || got != 8 || rd32(v) < 4) return 0;
-    return rd32(v + 4);
+    FsFork f;
+    f.fs = fs; f.dir = dir; f.name = name;
+    return vers_of(fs_rd, &f);
 }
 
 /* ---- the snapshot ---- */
@@ -250,16 +271,10 @@ static int resolve(InstCtx *x, const char *path, long *dir, char *name) {
     return 0;
 }
 
-typedef struct {
-    const uint8_t *data, *rsrc;
-    long dlen, rlen;
-    uint32_t type, creator;
-    uint16_t flags;
-    int manifest;
-} WSpec;
-
-/* 0, STOP, an OSErr, or -1000 - INST_X_CHANGED (the target is not what it should be) */
+/* 0, STOP, an OSErr, CHANGED (the target exists or not, or has a type, other than the snapshot said) or
+ * REFUSED (the op names an object this installer may never change) */
 #define CHANGED (-1000 - INST_X_CHANGED)
+#define REFUSED (-1000 - INST_X_REFUSED)
 
 static int exists(const InstFs *fs, long dir, const char *name, InstInfo *i) {
     int rc = fs->info(fs->ctx, dir, name, i);
@@ -268,45 +283,127 @@ static int exists(const InstFs *fs, long dir, const char *name, InstInfo *i) {
     return 1;
 }
 
-/* The 5 steps of inst_plan.h. x->res->step tracks the step. */
+/* ---- the safe-target check: EVERY change goes through it, right before its file system call ----
+ * A role names what the object must be. Folder and name are checked first (REFUSED: never touched,
+ * whatever a planner bug or a hostile op list says), then existence and type against the role
+ * (CHANGED: a stale snapshot). So the executor can change only these objects:
+ *   R_MOOF      ":System Folder:MoofTCP"                   cdev/ztcp, or our incomplete MTMP/mtin
+ *   R_MOOF_TMP  ":System Folder:MoofTCP.tmp"               our temp types (MTMP/mtin or zero-info)
+ *   R_MAN       ":System Folder:MacTCP (Disabled):MoofTCP Manifest"   a file
+ *   R_MAN_TMP   ":System Folder:MacTCP (Disabled):MoofTCP Manifest.tmp"   our temp types
+ *   R_TRIO      a MacTCP set file (name AND its type/creator) in the System Folder or the Disabled folder:
+ *               only ever catalog-moved (g_move), never deleted, renamed, retyped or opened
+ *   R_DIS       ":System Folder:MacTCP (Disabled)"         a folder (mkdir / rmdir only) */
+enum { R_MOOF, R_MOOF_TMP, R_MAN, R_MAN_TMP, R_TRIO, R_DIS };
+enum { M_ANY, M_EXISTS, M_ABSENT };
+
+static int is_trio_name(const char *n) {
+    int k;
+    for (k = 0; k < 3; k++) if (ieq(n, trio[k].name)) return 1;
+    return 0;
+}
+
+static int guard(InstCtx *x, int role, long dir, const char *name, int must) {
+    const InstFs *fs = x->fs;
+    InstInfo i, d;
+    long disdir = -1;
+    int ex, ok;
+    if (fs->info(fs->ctx, fs->sysdir, INST_DISABLED, &d) == 0 && d.is_dir) disdir = d.dirid;
+    switch (role) {
+    case R_MOOF:     ok = dir == fs->sysdir && ieq(name, INST_MOOF_NAME); break;
+    case R_MOOF_TMP: ok = dir == fs->sysdir && ieq(name, INST_MOOF_TMP); break;
+    case R_MAN:      ok = disdir >= 0 && dir == disdir && ieq(name, INST_MANIFEST_NAME); break;
+    case R_MAN_TMP:  ok = disdir >= 0 && dir == disdir && ieq(name, INST_MANIFEST_TMP); break;
+    case R_TRIO:     ok = is_trio_name(name) && (dir == fs->sysdir || (disdir >= 0 && dir == disdir)); break;
+    case R_DIS:      ok = dir == fs->sysdir && ieq(name, INST_DISABLED); break;
+    default:         ok = 0; break;
+    }
+    if (!ok) return REFUSED;
+    ex = exists(fs, dir, name, &i);
+    if (ex < 0) return ex;
+    if ((must == M_EXISTS && !ex) || (must == M_ABSENT && ex)) return CHANGED;
+    if (!ex) return 0;
+    switch (role) {
+    case R_MOOF:     ok = moof_ours(&i); break;
+    case R_MOOF_TMP:
+    case R_MAN_TMP:  ok = tmp_ours(&i); break;
+    case R_MAN:      ok = !i.is_dir; break;
+    case R_TRIO:     ok = is_trio_file(&i, name); break;
+    default:         ok = i.is_dir; break;          /* R_DIS */
+    }
+    return ok ? 0 : CHANGED;
+}
+
+/* the guarded changes: check, then (debug hook) the call */
+static int g_del(InstCtx *x, int role, long dir, const char *name) {
+    int rc = guard(x, role, dir, name, M_EXISTS);
+    return rc ? rc : MUT(x->fs->del(x->fs->ctx, dir, name));
+}
+static int g_create(InstCtx *x, int role, long dir, const char *name) {
+    int rc = guard(x, role, dir, name, M_ABSENT);
+    return rc ? rc : MUT(x->fs->create(x->fs->ctx, dir, name));
+}
+static int g_setinfo(InstCtx *x, int role, long dir, const char *name, uint32_t t, uint32_t c, uint16_t fl) {
+    int rc = guard(x, role, dir, name, M_EXISTS);
+    return rc ? rc : MUT(x->fs->setinfo(x->fs->ctx, dir, name, t, c, fl));
+}
+static int g_write(InstCtx *x, int role, long dir, const char *name, int rsrc, const uint8_t *p, long n) {
+    int rc = guard(x, role, dir, name, M_EXISTS);
+    return rc ? rc : MUT(x->fs->write(x->fs->ctx, dir, name, rsrc, p, n));
+}
+static int g_rename(InstCtx *x, int rfrom, int rto, long dir, const char *from, const char *to) {
+    int rc = guard(x, rfrom, dir, from, M_EXISTS);
+    if (!rc) rc = guard(x, rto, dir, to, M_ABSENT);
+    return rc ? rc : MUT(x->fs->rename(x->fs->ctx, dir, from, to));
+}
+static int g_move(InstCtx *x, long fromdir, const char *name, long todir, const char *toname) {
+    int rc;
+    if (strcmp(name, toname) || fromdir == todir) return REFUSED;
+    rc = guard(x, R_TRIO, fromdir, name, M_EXISTS);
+    if (!rc) rc = guard(x, R_TRIO, todir, toname, M_ABSENT);
+    return rc ? rc : MUT(x->fs->move(x->fs->ctx, fromdir, name, todir));
+}
+
+typedef struct {
+    const uint8_t *data, *rsrc;
+    long dlen, rlen;
+    uint32_t type, creator;
+    uint16_t flags;
+    int manifest;
+} WSpec;
+
+/* The 5 steps of inst_plan.h. x->res->step tracks the step. rx/rt: the roles of X and of its temp. */
 static int write_file(InstCtx *x, long dir, const char *X, const char *T, const WSpec *w) {
     const InstFs *fs = x->fs;
     InstInfo i;
     InstManifest tm;
-    int rc, ex;
+    int rc, ex, rx = w->manifest ? R_MAN : R_MOOF, rt = w->manifest ? R_MAN_TMP : R_MOOF_TMP;
     x->res->step = INST_W_PROMOTE;
     if (w->manifest) {                              /* 1. promote a decodable X.tmp when X is absent */
         ex = exists(fs, dir, X, &i);
         if (ex < 0) return ex;
-        if (!ex && read_manifest(fs, dir, T, &tm)) {
-            if ((rc = MUT(fs->rename(fs->ctx, dir, T, X))) != 0) return rc;
-        }
+        if (!ex && read_manifest(fs, dir, T, &tm))
+            if ((rc = g_rename(x, rt, rx, dir, T, X)) != 0) return rc;
     }
     x->res->step = INST_W_TEMP;                     /* 2. a fresh, non-loadable temp */
     ex = exists(fs, dir, T, &i);
     if (ex < 0) return ex;
-    if (ex) {
-        if (!tmp_ours(&i)) return CHANGED;
-        if ((rc = MUT(fs->del(fs->ctx, dir, T))) != 0) return rc;
-    }
-    if ((rc = MUT(fs->create(fs->ctx, dir, T))) != 0) return rc;
-    if ((rc = MUT(fs->setinfo(fs->ctx, dir, T, INST_TMP_TYPE, INST_TMP_CREATOR, w->flags))) != 0) return rc;
+    if (ex && (rc = g_del(x, rt, dir, T)) != 0) return rc;
+    if ((rc = g_create(x, rt, dir, T)) != 0) return rc;
+    if ((rc = g_setinfo(x, rt, dir, T, INST_TMP_TYPE, INST_TMP_CREATOR, w->flags)) != 0) return rc;
     if (w->dlen > 0 || w->manifest)
-        if ((rc = MUT(fs->write(fs->ctx, dir, T, 0, w->data, w->dlen))) != 0) return rc;
+        if ((rc = g_write(x, rt, dir, T, 0, w->data, w->dlen)) != 0) return rc;
     if (w->rlen > 0)
-        if ((rc = MUT(fs->write(fs->ctx, dir, T, 1, w->rsrc, w->rlen))) != 0) return rc;
+        if ((rc = g_write(x, rt, dir, T, 1, w->rsrc, w->rlen)) != 0) return rc;
     if ((rc = fs->flush(fs->ctx)) != 0) return rc;
     x->res->step = INST_W_DELETE;                   /* 3. the old X goes */
     ex = exists(fs, dir, X, &i);
     if (ex < 0) return ex;
-    if (ex) {
-        if (i.is_dir || (!w->manifest && !moof_ours(&i))) return CHANGED;
-        if ((rc = MUT(fs->del(fs->ctx, dir, X))) != 0) return rc;
-    }
+    if (ex && (rc = g_del(x, rx, dir, X)) != 0) return rc;
     x->res->step = INST_W_RENAME;                   /* 4. */
-    if ((rc = MUT(fs->rename(fs->ctx, dir, T, X))) != 0) return rc;
+    if ((rc = g_rename(x, rt, rx, dir, T, X)) != 0) return rc;
     x->res->step = INST_W_RETYPE;                   /* 5. only now loadable / final */
-    if ((rc = MUT(fs->setinfo(fs->ctx, dir, X, w->type, w->creator, w->flags))) != 0) return rc;
+    if ((rc = g_setinfo(x, rx, dir, X, w->type, w->creator, w->flags)) != 0) return rc;
     return fs->flush(fs->ctx);
 }
 
@@ -314,9 +411,8 @@ static int run1(InstCtx *x, const InstOp *o, const InstManifest *man, const Inst
     const InstFs *fs = x->fs;
     char name[32], name2[32];
     long dir, dir2;
-    InstInfo i;
     WSpec w;
-    int rc, ex;
+    int rc;
     static char mbuf[MAN_CAP];
     const char *path = (o->kind == INST_MKDIR || o->kind == INST_WRITE_MANIFEST || o->kind == INST_WRITE_MOOF) ? o->to : o->from;
 
@@ -325,41 +421,33 @@ static int run1(InstCtx *x, const InstOp *o, const InstManifest *man, const Inst
     copyname(x->res->op_name, name);
     switch (o->kind) {
     case INST_MKDIR:
-        return MUT(fs->mkdir(fs->ctx, dir, name));
+        rc = guard(x, R_DIS, dir, name, M_ABSENT);
+        return rc ? rc : MUT(fs->mkdir(fs->ctx, dir, name));
     case INST_RMDIR:
-        ex = exists(fs, dir, name, &i);
-        if (ex <= 0) return ex < 0 ? ex : CHANGED;
-        if (!i.is_dir) return CHANGED;
-        return MUT(fs->del(fs->ctx, dir, name));        /* PBHDelete: refuses a folder that is not empty */
+        return g_del(x, R_DIS, dir, name);              /* PBHDelete: refuses a folder that is not empty */
     case INST_MOVE:
         rc = resolve(x, o->to, &dir2, name2);
         if (rc) return -1000 - rc;
-        if (strcmp(name, name2)) return -1000 - INST_X_PATH;
-        ex = exists(fs, dir, name, &i);
-        if (ex <= 0) return ex < 0 ? ex : CHANGED;
-        if (!is_trio_file(&i, name)) return CHANGED;    /* the planner only ever moves the MacTCP set */
-        ex = exists(fs, dir2, name2, &i);
-        if (ex < 0) return ex;
-        if (ex) return CHANGED;
-        return MUT(fs->move(fs->ctx, dir, name, dir2));
+        return g_move(x, dir, name, dir2, name2);       /* the planner only ever moves the MacTCP set */
     case INST_DELETE_MOOF:
+        return g_del(x, R_MOOF, dir, name);
     case INST_DELETE_MANIFEST:
+        return g_del(x, R_MAN, dir, name);
     case INST_DELETE_TEMP:
-        ex = exists(fs, dir, name, &i);
-        if (ex <= 0) return ex < 0 ? ex : CHANGED;
-        if (i.is_dir) return CHANGED;
-        if (o->kind == INST_DELETE_MOOF && !moof_ours(&i)) return CHANGED;
-        if (o->kind == INST_DELETE_TEMP && !tmp_ours(&i)) return CHANGED;
-        return MUT(fs->del(fs->ctx, dir, name));
+        return g_del(x, ieq(name, INST_MOOF_TMP) ? R_MOOF_TMP : R_MAN_TMP, dir, name);
     case INST_WRITE_MANIFEST:
-        if (!man || strcmp(name, INST_MANIFEST_NAME)) return -1000 - INST_X_PATH;
+        if (!man) return -1000 - INST_X_PATH;
+        rc = guard(x, R_MAN, dir, name, M_ANY);       /* the name and folder before anything else */
+        if (rc) return rc;
         rc = inst_manifest_encode(man, mbuf, sizeof mbuf);
         if (rc <= 0) return -1000 - INST_X_PLAN;
         memset(&w, 0, sizeof w);
         w.data = (const uint8_t *)mbuf; w.dlen = rc; w.type = T_TEXT; w.creator = T_ZTCP; w.manifest = 1;
         return write_file(x, dir, name, INST_MANIFEST_TMP, &w);
     case INST_WRITE_MOOF:
-        if (!pl || dir != fs->sysdir || !ieq(name, INST_MOOF_NAME)) return -1000 - INST_X_PATH;
+        if (!pl) return -1000 - INST_X_PATH;
+        rc = guard(x, R_MOOF, dir, name, M_ANY);
+        if (rc) return rc;
         memset(&w, 0, sizeof w);
         w.data = pl->data; w.dlen = pl->dlen; w.rsrc = pl->rsrc; w.rlen = pl->rlen;
         w.type = pl->type; w.creator = pl->creator; w.flags = pl->flags;
@@ -483,12 +571,6 @@ static void putn(Txt *t, long v) {
 
 static void putq(Txt *t, const char *name) { put(t, "\""); put(t, name); put(t, "\""); }
 
-static int is_trio_name(const char *n) {
-    int k;
-    for (k = 0; k < 3; k++) if (ieq(n, trio[k].name)) return 1;
-    return 0;
-}
-
 static const char *what(InstOpKind k) {
     switch (k) {
     case INST_MKDIR: return "creating the folder";
@@ -529,6 +611,8 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
             put(&t, "debug stop after "); putn(&t, r->mutations); put(&t, " changes.");
         } else if (r->status == INST_X_CHANGED) {
             put(&t, "it changed while the installer was working.");
+        } else if (r->status == INST_X_REFUSED) {
+            put(&t, "refused: it is not a file this installer may change (internal error).");
         } else if (r->status == INST_X_PATH) {
             put(&t, "internal error (path).");
         } else if (r->oserr == INST_OS_FBSY && r->op_kind == INST_RMDIR) {
@@ -576,7 +660,8 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
     case INST_INSTALLED_NO_MACTCP:
     case INST_UPGRADED:
         if (r->msg == INST_UPGRADED) {
-            put(&t, "MoofTCP was updated to "); put(&t, vers); put(&t, "; your settings were kept.");
+            put(&t, "MoofTCP was updated to "); put(&t, vers);
+            put(&t, r->prefs ? "; your settings were kept." : ".");
         } else {
             put(&t, "MoofTCP "); put(&t, vers); put(&t, " is installed.");
         }
@@ -584,7 +669,7 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
             put(&t, " MacTCP was found and moved into the folder \"MacTCP (Disabled)\" in the System Folder; Remove puts it back.");
         else if (r->msg == INST_INSTALLED_NO_MACTCP)
             put(&t, " No MacTCP was found, so nothing was moved.");
-        put(&t, r->prefs || r->msg == INST_UPGRADED ? " Restart to use MoofTCP."
+        put(&t, r->prefs ? " Restart to use MoofTCP."
                                                     : " After restarting, set the address in Control Panel > MoofTCP.");
         return 1;
     case INST_REMOVED_RESTORED:

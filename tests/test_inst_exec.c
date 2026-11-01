@@ -19,7 +19,7 @@
 #define MTIN INST_TMP_CREATOR
 
 /* ---- the fake volume ---- */
-enum { NN = 48, DCAP = 1100, RCAP = 2048, ROOT = 2, SYSD = 16 };
+enum { NN = 48, DCAP = 1100, RCAP = 5200, ROOT = 2, SYSD = 16 };
 
 typedef struct {
     int used, is_dir, locked, busy;
@@ -640,6 +640,10 @@ static void upgrade_and_versions(void) {
     T_EQ(mesg(), 1);
     T_CHECK(strstr(msg, "updated to 1.0rc1; your settings were kept") != NULL);
     T_CHECK(moof_complete(&F)); T_CHECK(fk_find(&F, SYSD, INST_PREFS_NAME) >= 0);
+    F = F0; F.n[fk_find(&F, SYSD, INST_PREFS_NAME)].used = 0;           /* no prefs: nothing to keep */
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_UPGRADED);
+    mesg(); T_CHECK(strstr(msg, "settings") == NULL); T_CHECK(strstr(msg, "Control Panel > MoofTCP") != NULL);
+    T_CHECK(moof_complete(&F)); T_EQ(fk_find(&F, SYSD, INST_PREFS_NAME), -1);   /* none is ever written */
     base(&F); oldmoof(&F, 0x01008000u);                /* 1.0 final: newer, no downgrade */
     T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_ALREADY_INSTALLED);
     base(&F); oldmoof(&F, VNEW);
@@ -669,9 +673,9 @@ static void stale_snapshot_changed(void) {
     T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_CHANGED);
     T_CHECK(F.n[i].used);
     memset(&op, 0, sizeof op); op.kind = INST_DELETE_MOOF; strcpy(op.from, ":System Folder:MacTCP");
-    T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_CHANGED);
+    T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_REFUSED);
     memset(&op, 0, sizeof op); op.kind = INST_RMDIR; strcpy(op.from, ":System Folder:MacTCP");
-    T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_CHANGED);
+    T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_REFUSED);
     /* paths outside the contract */
     memset(&op, 0, sizeof op); op.kind = INST_DELETE_MOOF; strcpy(op.from, ":Desktop Folder:MoofTCP");
     T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_PATH);
@@ -682,9 +686,88 @@ static void stale_snapshot_changed(void) {
     strcpy(op.from, ":System Folder::MoofTCP");
     T_EQ(inst_run(&x, &op, 1, NULL, NULL), INST_X_PATH);
     memset(&op, 0, sizeof op); op.kind = INST_WRITE_MOOF; strcpy(op.to, ":System Folder:Finder");
-    T_EQ(inst_run(&x, &op, 1, NULL, &PL), INST_X_PATH);
+    T_EQ(inst_run(&x, &op, 1, NULL, &PL), INST_X_REFUSED);
     T_EQ(F.mut, 0);
     T_EQ(F.trio_opened, 0);
+}
+
+/* Review fix 1: a hostile op list (or a planner bug) cannot make the executor change anything but
+ * MoofTCP's own objects; the MacTCP set can only be moved. Every op is refused, nothing changes. */
+static void hostile_ops_refused(void) {
+    static const struct { InstOpKind k; const char *from, *to; int want; } bad[] = {
+        { INST_DELETE_MOOF, ":System Folder:MacTCP", "", INST_X_REFUSED },                 /* the REAL cdev/ztcp */
+        { INST_DELETE_MOOF, ":System Folder:MacTCP (Disabled):MacTCP", "", INST_X_REFUSED },
+        { INST_DELETE_MOOF, ":System Folder:Finder", "", INST_X_REFUSED },
+        { INST_DELETE_MANIFEST, ":System Folder:MacTCP (Disabled):MacTCP DNR", "", INST_X_REFUSED },   /* parked */
+        { INST_DELETE_MANIFEST, ":System Folder:MacTCP Prep", "", INST_X_REFUSED },
+        { INST_DELETE_MANIFEST, ":System Folder:MoofTCP Manifest", "", INST_X_REFUSED },  /* wrong folder */
+        { INST_DELETE_TEMP, ":System Folder:MacTCP", "", INST_X_REFUSED },
+        { INST_DELETE_TEMP, ":System Folder:MacTCP (Disabled):Notes", "", INST_X_REFUSED },
+        { INST_RMDIR, ":System Folder:Other Folder", "", INST_X_REFUSED },
+        { INST_MKDIR, "", ":System Folder:Other Folder", INST_X_REFUSED },
+        { INST_MOVE, ":System Folder:Finder", ":System Folder:MacTCP (Disabled):Finder", INST_X_REFUSED },
+        { INST_MOVE, ":System Folder:MacTCP (Disabled):Notes", ":System Folder:Notes", INST_X_REFUSED },
+        { INST_MOVE, ":System Folder:MacTCP (Disabled):MacTCP DNR", ":System Folder:MacTCP (Disabled):MacTCP DNR", INST_X_REFUSED },
+        { INST_MOVE, ":System Folder:MacTCP DNR", ":System Folder:MacTCP (Disabled):MacTCP DNR", INST_X_CHANGED }, /* target exists */
+        /* writes whose rename / delete would land on a set file or elsewhere */
+        { INST_WRITE_MOOF, "", ":System Folder:MacTCP", INST_X_REFUSED },
+        { INST_WRITE_MOOF, "", ":System Folder:MacTCP (Disabled):MoofTCP", INST_X_REFUSED },
+        { INST_WRITE_MANIFEST, "", ":System Folder:MacTCP (Disabled):MacTCP", INST_X_REFUSED },
+        { INST_WRITE_MANIFEST, "", ":System Folder:MoofTCP Manifest", INST_X_REFUSED },
+        /* paths with odd ':' components */
+        { INST_DELETE_MOOF, ":System Folder::MacTCP", "", INST_X_PATH },
+        { INST_DELETE_MOOF, ":System Folder:MacTCP (Disabled):x:MacTCP", "", INST_X_PATH },
+        { INST_DELETE_MANIFEST, "::System Folder:MacTCP", "", INST_X_PATH },
+    };
+    InstManifest man; InstOp op; InstCtx x; InstFs fs; long d; size_t k;
+    payload_init(); base(&F0); trio3(&F0);
+    addn(&F0, SYSD, INST_DISABLED, 0, 0, 1);
+    d = dis_id(&F0);
+    F0.n[addn(&F0, d, "MacTCP DNR", CDEV, MTCP, 0)].rl = 3;   /* a parked copy too */
+    addn(&F0, d, "Notes", TEXT, TEXT, 0);
+    addn(&F0, SYSD, "Other Folder", 0, 0, 1);
+    memset(&man, 0, sizeof man); strcpy(man.e[0].name, "MacTCP"); strcpy(man.e[0].folder, "System Folder"); man.n = 1;
+    for (k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+        F = F0;
+        fs = mkfs(&F);
+        memset(&R, 0, sizeof R);
+        x.fs = &fs; x.stop_after = 0; x.mutations = 0; x.committed = 0; x.res = &R;
+        memset(&op, 0, sizeof op); op.kind = bad[k].k; strcpy(op.from, bad[k].from); strcpy(op.to, bad[k].to);
+        if (inst_run(&x, &op, 1, &man, &PL) != bad[k].want) {
+            fprintf(stderr, "hostile op %d: status %d, want %d\n", (int)k, R.status, bad[k].want); T_CHECK(0);
+        }
+        T_EQ(R.op_index, 0); T_EQ(R.done, 0); T_EQ(F.mut, 0); T_EQ(F.trio_opened, 0);
+        T_CHECK(same(&F0, &F, 0));
+        mesg(); T_CHECK(strstr(msg, "Nothing was changed.") != NULL);
+        if (bad[k].want == INST_X_REFUSED) T_CHECK(strstr(msg, "refused") != NULL);
+    }
+}
+
+/* Review fix 2: a resource map larger than 4 KB still gives the version (it once read as 0 = always upgrade) */
+static void vers_big_map(void) {
+    static uint8_t f[RCAP];
+    long n = 400, doff = 256, dlen = 12, moff = doff + dlen, mlen = 28 + 2 + 16 + 12 * (n + 1), i;
+    uint8_t *m;
+    T_CHECK(moff + mlen <= RCAP);
+    memset(f, 0, sizeof f);
+    wr32(f, (uint32_t)doff); wr32(f + 4, (uint32_t)moff); wr32(f + 8, (uint32_t)dlen); wr32(f + 12, (uint32_t)mlen);
+    wr32(f + doff, 8); wr32(f + doff + 4, 0x01020304u);
+    m = f + moff;
+    m[24] = 0; m[25] = 28; m[26] = (uint8_t)(mlen >> 8); m[27] = (uint8_t)mlen;
+    m[28] = 0; m[29] = 1;                                    /* two types */
+    memcpy(m + 30, "pad ", 4); m[34] = (uint8_t)((n - 1) >> 8); m[35] = (uint8_t)(n - 1); m[36] = 0; m[37] = 18;
+    memcpy(m + 38, "vers", 4); m[42] = 0; m[43] = 0; m[44] = (uint8_t)((18 + 12 * n) >> 8); m[45] = (uint8_t)(18 + 12 * n);
+    for (i = 0; i < n; i++) { uint8_t *r = m + 28 + 18 + 12 * i; r[0] = (uint8_t)(i >> 8); r[1] = (uint8_t)i; r[2] = r[3] = 0xFF; }
+    { uint8_t *r = m + 28 + 18 + 12 * n; r[1] = 1; r[2] = r[3] = 0xFF; }
+    T_CHECK(mlen > 4096);
+    T_EQ(inst_fork_vers(f, moff + mlen), 0x01020304u);
+    /* the installed file with that map: same version through the table, so Install says "already installed" */
+    payload_init(); base(&F);
+    i = addn(&F, SYSD, "MoofTCP", CDEV, ZTCP, 0);
+    memcpy(F.n[i].r, f, (size_t)(moff + mlen)); F.n[i].rl = moff + mlen;
+    wr32(F.n[i].r + doff + 4, 0x01008000u);                  /* 1.0 final: newer than the bundle */
+    T_EQ(run_install(&F, 0), INST_X_OK);
+    T_EQ(R.msg, INST_ALREADY_INSTALLED);
 }
 static void collision_messages(void) {
     payload_init();
@@ -786,7 +869,7 @@ static void message_lengths(void) {
     static const int errs[] = { INST_OS_FBSY, INST_OS_FLCKD, INST_OS_DSKFUL, INST_OS_VLCKD, INST_OS_FNF, -32768, 0 };
     char small[16];
     int s, m, e, k, rem;
-    for (s = INST_X_OK; s <= INST_X_STOPPED; s++)
+    for (s = INST_X_OK; s <= INST_X_REFUSED; s++)
         for (m = 0; m < 9; m++)
             for (e = 0; e < 7; e++)
                 for (k = 0; k < 8; k++)
@@ -806,4 +889,4 @@ static void message_lengths(void) {
 T_MAIN(install_remove_identical, absent_trio, twice, fail_every_install_change, fail_every_remove_change,
        stop_after_every_count, open_file_47, locked_paths, retry_with_null, upgrade_and_versions,
        stale_snapshot_changed, collision_messages, prechecks, fork_vers_parser, big_folders,
-       promote_manifest_tmp, message_lengths)
+       promote_manifest_tmp, message_lengths, hostile_ops_refused, vers_big_map)

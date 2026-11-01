@@ -18,9 +18,13 @@
  *  - the executor opens the forks of exactly two kinds of existing files: the MoofTCP file (its
  *    resource fork, read only, for its 'vers' 1) and the manifest / manifest temp (data fork, read
  *    only). It never opens a MacTCP file's forks; the MacTCP files are only ever catalog-moved.
- *  - it deletes only what an op names, and re-checks the object's kind first (a DELETE_TEMP target
- *    must still be one of our temp types, DELETE_MOOF a cdev/ztcp or MTMP/mtin file, RMDIR a folder,
- *    MOVE a file): a snapshot that went stale gives INST_X_CHANGED, nothing is touched.
+ *  - every change (delete, create, setinfo, fork write, rename, move, mkdir) passes one safe-target
+ *    check right before its call (guard() in inst_exec.c): the object must be ":System Folder:MoofTCP"
+ *    (cdev/ztcp or MTMP/mtin), ":System Folder:MoofTCP.tmp" (our temp types), the manifest or its temp
+ *    inside 'MacTCP (Disabled)', that folder itself (mkdir/rmdir), or a MacTCP set file by name AND
+ *    type/creator, which may only be catalog-moved between the two folders to an absent name. A wrong
+ *    name or folder gives INST_X_REFUSED, a wrong existence or type INST_X_CHANGED (a stale snapshot);
+ *    either way nothing is touched and the run stops.
  *  - ops run in the planner's order and the first failure stops the run (no rollback: the planner's
  *    recovery model is that Install or Remove re-run from any prefix restores order).
  *  - after every change (and every op) the volume is flushed, so a power loss leaves exactly a prefix
@@ -87,7 +91,8 @@ enum {
     INST_X_NOSPACE,     /* free space check before the first op (nothing done) */
     INST_X_VOLLOCKED,   /* the startup disk is locked (nothing done) */
     INST_X_PAYLOAD,     /* the bundled MoofTCP is missing or damaged (nothing done) */
-    INST_X_STOPPED      /* debug hook: stopped after stop_after file system changes */
+    INST_X_STOPPED,     /* debug hook: stopped after stop_after file system changes */
+    INST_X_REFUSED      /* the op names an object the safe-target check never lets the executor change */
 };
 
 /* Sub-steps of WRITE_MANIFEST / WRITE_MOOF (InstResult.step), the 5 steps of inst_plan.h. */

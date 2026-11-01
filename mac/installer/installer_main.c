@@ -111,6 +111,7 @@ static void run(int remove) {
     int rc, restart = 0;
 
     set_item_text(IT_MSG, remove ? "Removing..." : "Installing...");
+    DrawDialog(g_dlg);                      /* now: the run is synchronous, no update event comes before it ends */
     SetCursor(*GetCursor(watchCursor));
     rc = inst_mac_fs(&fs, &mc);
     if (rc) {

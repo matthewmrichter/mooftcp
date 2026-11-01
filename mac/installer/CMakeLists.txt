@@ -33,7 +33,8 @@ add_custom_command(
 add_custom_target(MoofInstaller_APPL ALL DEPENDS "MoofTCP Installer.bin")
 
 # Debug variant (never shipped): MT_INST_DEBUG=1 reads a stop-after-N-changes count from the file
-# "MoofTCP Installer Debug" beside it (the interruption test). build-mac/installer/Installer Dbg.bin.
+# ":MoofTCP Installer Debug" at the root of the startup disk (the interruption test, "[I|R]N").
+# build-mac/installer/Installer Dbg.bin.
 add_application(MoofInstallerDbgApp installer_main.c inst_exec_mac.c
                 ${CMAKE_CURRENT_BINARY_DIR}/installer.r.rsrc.bin
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
