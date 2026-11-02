@@ -15,3 +15,4 @@ dist/
 *.pcap
 *.png
 build-gate.log
+__pycache__/
