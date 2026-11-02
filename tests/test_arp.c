@@ -188,6 +188,28 @@ static void test_deadline(void) {
     T_EQ(mt_next_deadline(s, 0xFFFFFF00u), 1000);
 }
 
+/* A late tick (the host was busy past a retry slot) sends one request and skips the slots it
+ * missed: the deadline it leaves behind is in the future, never 0 again for the same instant. */
+static void test_arp_late_tick(void) {
+    fake_link fl; uint8_t mac[6];
+    mt_stack *s = tstack_new(&fl, T_ME);
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 0), 0);          /* request 1 at 0 */
+    T_EQ(fl.n, 1);
+    T_EQ(mt_next_deadline(s, 2321), 0);                    /* slots 1000 and 2000 both missed */
+    mt_tick(s, 2321);
+    T_EQ(fl.n, 2);                                         /* one request, not a burst */
+    T_EQ(mt_next_deadline(s, 2321), 679);                  /* next event: give-up at 3000 */
+    mt_tick(s, 2321); T_EQ(fl.n, 2);
+    mt_tick(s, 3000);
+    T_EQ(mt_get_stats(s)->arp_drops, 1);
+    /* the same through mt_arp_resolve (a send to a pending next hop) */
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 10000), 0);      /* request at 10000 */
+    T_EQ(fl.n, 3);
+    T_EQ(mt_arp_resolve(s, T_PEER, mac, 12500), 0);
+    T_EQ(fl.n, 4);
+    T_EQ(mt_next_deadline(s, 12500), 500);
+}
+
 static void test_arp_odd_address(void) {
     fake_link fl; uint8_t buf[80]; uint8_t f[64]; arpv v;
     mt_stack *s = tstack_new(&fl, T_ME);
@@ -216,4 +238,4 @@ T_MAIN(test_arp_reply, test_arp_ignore_other_target, test_arp_resolve_flow,
        test_arp_pending_other_hop_not_sent, test_arp_pending_expires,
        test_arp_lru_replace, test_arp_resolved_ages, test_deadline,
        test_arp_odd_address, test_arp_malformed, test_arp_oversize_not_held,
-       test_arp_expiry_wrap)
+       test_arp_expiry_wrap, test_arp_late_tick)

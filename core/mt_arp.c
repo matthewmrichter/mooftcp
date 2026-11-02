@@ -78,13 +78,18 @@ static void arp_send(mt_stack *s, uint16_t op, const uint8_t *eth_dst, const uin
     if (mt_eth_tx(s, b, ARP_FRAME_LEN) == 0) s->stats.arp_out++;
 }
 
-/* Send the next request of a pending entry if it is due (at most one per ARP_RETRY_MS). */
+/* Send the next request of a pending entry if it is due (at most one per ARP_RETRY_MS). A late
+ * call (the host missed one or more retry slots) sends one request and skips the missed slots, so
+ * the entry's deadline is in the future afterwards and no burst follows. `tries` counts slots
+ * used; the give-up time (t_stamp + ARP_PENDING_MS) is unchanged. */
 static void arp_pending_step(mt_stack *s, mt_arp_entry *e, uint32_t now) {
     static const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     static const uint8_t zero[6] = {0, 0, 0, 0, 0, 0};
     if (e->tries < ARP_MAX_TRIES &&
         !mt_time_before(now, e->t_stamp + (uint32_t)e->tries * ARP_RETRY_MS)) {
-        e->tries++;
+        do e->tries++;
+        while (e->tries < ARP_MAX_TRIES &&
+               !mt_time_before(now, e->t_stamp + (uint32_t)e->tries * ARP_RETRY_MS));
         arp_send(s, 1, bcast, zero, e->ip);
     }
 }

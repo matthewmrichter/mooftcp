@@ -49,7 +49,7 @@ typedef struct {
     uint32_t t_stamp;
     uint8_t mac[6];
     uint8_t state;
-    uint8_t tries;       /* requests sent while pending */
+    uint8_t tries;       /* retry slots used while pending (a late tick skips missed slots) */
 } mt_arp_entry;
 
 /* Single frame held while its next hop resolves (len == 0: empty). Only small
