@@ -199,7 +199,7 @@ with_volume fetch_res || die "HeapInfo.out missing on the image"
 echo "== figures"
 python3 -I - "$res" "$out_dir/MemCheck.out" "$diag" "$out_dir/ApiProbe.out" <<'PY'
 import sys, re
-STACK_BUDGET = 4352   # MACTCP-INTERFACE.md "Stack budget": (worst painted 2724 + 130 unpainted top) x 1.5 = 4281, rounded up
+STACK_BUDGET = 4352   # MACTCP-INTERFACE.md "Stack budget": (worst painted 2794 in Task 13 + 130 unpainted top = 2924; 4352 / 2924 = 1.49x, a safety factor)
 BASE_OCC, BASE_ZONE = 149248, 162100
 CAP1, CAP2, CAP3_APP, CAP3_SYS = 195046, 273672, 29150, 0
 rows = [l.split() for l in open(sys.argv[1]).read().replace("\r", "\n").split("\n") if l.strip()]

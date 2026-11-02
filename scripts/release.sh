@@ -71,6 +71,8 @@ if (name, typ, cre) != (b"MoofTCP Installer", b"APPL", b"mtin") or not flags & 0
     sys.exit("identity/flags wrong: %r %r %r %04x" % (name, typ, cre, flags))
 PY
 
+python3 -I "$ROOT/scripts/relvers.py" "$ver" "$app" || die "the version strings in the build do not match $ver"
+
 # 3. Stage: installer + "Read Me" as MacBinary.
 cp "$app" "$stage/MoofTCP Installer.bin"
 diaglog="$(sed -n 's/^DIAGLOG_TEXT=\([01]\)[[:space:]]*$/\1/p' "$ROOT/scripts/release.conf")"
