@@ -49,35 +49,36 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
  * builds that file with the same resource); the cdev carries a copy as the real MacTCP file does. */
 #include "dnrp.r"
 
-/* System-heap bytes INIT 31 adds for us: 0x30000 = 196,608 (the final re-review raised it from 0x2C000:
+/* System-heap bytes INIT 31 adds for us: 0x34000 = 212,992 (RC1 hardware, single Finder: 18,628 free at boot, 4,234 after
+ * the first open, the open costs 14,394; +0x4000 gives about 20.6K after the open, over the 15K floor. Before: 0x30000, the final re-review raised it from 0x2C000:
  * DRVR 79.8K and the resident block 59.1K left 14.5K free at the soak's worst step, under the 15K floor;
  * Task 11 had raised 0x28000 to 0x2C000 when the DNR grew the DRVR to about 78K). The DRVR code,
  * the resident block (gate, Ethernet slots, MtDrv, core arena), the DCE, plus
  * the .ENET0 driver the first open loads (about 16.5K); 0x24000 booted but left too little (-23000).
  * Derivation: docs/dev/MACTCP-INTERFACE.md "MoofTCP driver (Task 10)". */
 data 'sysz' (0) {
-    $"0003 0000"
+    $"0003 4000"
 };
 
-/* Parade icon: 128 bytes of image, then 128 bytes of mask. */
+/* Startup icon "Moof Stamp" (Moof icon concepts, round 2): 128 bytes of image, then 128 bytes of mask. */
 data 'ICN#' (128) {
-    $"00000000 3FFFFFFC 40000002 40000002"
-    $"4C0C0002 4E1C0002 4F3C0002 4DEC0002"
-    $"4CCC0002 4C0C0002 4C0C0002 4C0C0002"
-    $"40000002 400FCFC2 40030C02 40030C02"
-    $"40030C02 40030FC2 400300C2 400300C2"
-    $"40030FC2 40000002 4F3CF3C2 49249242"
-    $"4F3CF3C2 40000002 40000002 3FFFFFFC"
-    $"00200400 00FFFC00 00000000 00000000"
+    $"2AAAAAA8 7FFFFFFE C0000003 5FFFFFFA"
+    $"D000000B 5020040A D0300C0B 501FF80A"
+    $"D0E0070B 51E0078A D3EE07CB 53EA37CA"
+    $"D3CE33CB 53C003CA D1C7E38B 50C8130A"
+    $"D053CA0B 5013C80A D010880B 5009500A"
+    $"D007E00B 5000000A D22633CB 53694A0A"
+    $"D2A94B8B 52294A0A D226320B 5000000A"
+    $"DFFFFFFB 40000002 7FFFFFFE 2AAAAAA8"
     /* mask */
-    $"00000000 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"7FFFFFFE 7FFFFFFE 7FFFFFFE 7FFFFFFE"
-    $"00200400 00FFFC00 00000000 00000000"
+    $"2AAAAAA8 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE FFFFFFFF 7FFFFFFE"
+    $"FFFFFFFF 7FFFFFFE 7FFFFFFE 2AAAAAA8"
 };
 
 #include "../cdev/moofcdev.r"

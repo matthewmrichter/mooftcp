@@ -41,7 +41,7 @@
 #define MT_INST_DEBUG 0
 #endif
 
-#define VERS_STR "1.0rc1"
+#define VERS_STR "1.0rc2"
 
 enum { DLG_MAIN = 128, AL_RESTART = 129, AL_NOTE = 130 };
 enum { IT_INSTALL = 1, IT_REMOVE, IT_QUIT, IT_MSG, IT_INTRO };

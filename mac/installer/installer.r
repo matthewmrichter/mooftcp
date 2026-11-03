@@ -25,7 +25,7 @@ resource 'DITL' (128) {
         {204, 330, 224, 420}, Button { enabled, "Quit" };
         {92, 20, 196, 420}, StaticText { disabled, "" };
         {10, 20, 86, 420}, StaticText { disabled,
-            "Install puts MoofTCP 1.0rc1 into the System Folder. If MacTCP is there, its files are moved "
+            "Install puts MoofTCP 1.0rc2 into the System Folder. If MacTCP is there, its files are moved "
             "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
             "back. MoofTCP needs an Ethernet driver (.ENET)." };
     }
@@ -73,20 +73,20 @@ resource 'DITL' (130) {
 };
 
 resource 'vers' (1) {
-    0x01, 0x00, beta, 0x01, verUS,
-    "1.0rc1",
-    "MoofTCP Installer 1.0rc1 (release candidate)"
+    0x01, 0x00, beta, 0x02, verUS,
+    "1.0rc2",
+    "MoofTCP Installer 1.0rc2 (release candidate)"
 };
 
 resource 'vers' (2) {
-    0x01, 0x00, beta, 0x01, verUS,
-    "1.0rc1",
-    "MoofTCP 1.0rc1"
+    0x01, 0x00, beta, 0x02, verUS,
+    "1.0rc2",
+    "MoofTCP 1.0rc2"
 };
 
 /* The owner (signature) resource of creator 'mtin'. */
 data 'mtin' (0) {
-    $"18" "MoofTCP Installer 1.0rc1"
+    $"18" "MoofTCP Installer 1.0rc2"
 };
 
 resource 'BNDL' (128) {
@@ -99,25 +99,25 @@ resource 'BNDL' (128) {
 
 resource 'FREF' (128) { 'APPL', 0, "" };
 
-/* An open box with an arrow going in (drawn for MoofTCP). */
+/* Cable Tail A (Moof icon concepts, round 2): a dogcow whose tail ends in an RJ45 plug; the mask is the outline filled in. */
 data 'ICN#' (128) {
-    $"00000000 00000000 0003C000 0003C000"
-    $"0003C000 0003C000 0003C000 0003C000"
-    $"0003C000 0003C000 0003C000 0003C000"
-    $"0003C000 007FFE00 003FFC00 001FF800"
-    $"0F8FF1F0 0807E010 0803C010 08000010"
-    $"08000010 08000010 08FFFF10 08000010"
-    $"08000010 08FFF010 08000010 08000010"
-    $"08000010 0FFFFFF0 00000000 00000000"
+    $"00000000 FF800000 AA800000 AA800000"
+    $"FF800000 80800000 80800200 7F000300"
+    $"1C001F80 1C002040 08005C3C 08005C8E"
+    $"08005C0E 08005C06 08005C78 05FF5C80"
+    $"021EC900 041E1100 040C0100 04000100"
+    $"0400E100 0401F100 0400E100 02000300"
+    $"01FFFC00 01983300 01983300 01983300"
+    $"01983300 00000000 00155554 00088888"
     /* mask */
-    $"00000000 00000000 0003C000 0003C000"
-    $"0003C000 0003C000 0003C000 0003C000"
-    $"0003C000 0003C000 0003C000 0003C000"
-    $"0003C000 007FFE00 003FFC00 001FF800"
-    $"0FFFFFF0 0FFFFFF0 0FFFFFF0 0FFFFFF0"
-    $"0FFFFFF0 0FFFFFF0 0FFFFFF0 0FFFFFF0"
-    $"0FFFFFF0 0FFFFFF0 0FFFFFF0 0FFFFFF0"
-    $"0FFFFFF0 0FFFFFF0 00000000 00000000"
+    $"00000000 FF800000 FF800000 FF800000"
+    $"FF800000 FF800000 FF800200 7F000300"
+    $"1C001F80 1C003FC0 08007FFC 08007FFE"
+    $"08007FFE 08007FFE 08007FF8 05FF7F80"
+    $"03FFFF00 07FFFF00 07FFFF00 07FFFF00"
+    $"07FFFF00 07FFFF00 07FFFF00 03FFFF00"
+    $"01FFFC00 01983300 01983300 01983300"
+    $"01983300 00000000 00155554 00088888"
 };
 
 /* MultiFinder partition (System 6 without MultiFinder gives the application all memory). The
