@@ -13,7 +13,8 @@
  *   2. Call its boot stub (offset 44 of the DRVR, see mt_drv_stubs.s): mt_drv_boot allocates the
  *      resident block (NewPtrSys), reads "MoofTCP Prefs", seeds the stack's entropy, opens
  *      .ENET0 and installs the driver in the unit table (refnum -49).
- *   3. Draw the parade icon (ICN# 128) only if all of that worked and an address is configured.
+ *   3. Draw the parade icon (ICN# 128) only if all of that worked and an address is configured
+ *      or DHCP mode is set (MT_BOOT_DHCP, Plan 4: the address comes at the first open).
  *      An unconfigured boot stays installed (OpenDriver(".IPP") then fails with -23004, as MacTCP
  *      does) but shows no icon; a failed boot leaves nothing behind.
  *
