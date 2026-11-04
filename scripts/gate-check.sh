@@ -5,6 +5,7 @@
 #    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint,lite}/ (build-mac/ is not touched): the
 #    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, MARK=1 + -DMT_STACK_PAINT=4096, and
 #    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants").
+#    Lite is built first: the installer of the other trees embeds its MoofTCP file (MT_LITE_MOOF_BIN).
 #    Any warning or error fails the gate (exit 1). Log: build-gate.log.
 # 2. Probe: core/*.c compiled alone with -mshort (16-bit int). Hazards (warnings) are listed;
 #    this step is report-only and never changes the exit status.
@@ -18,12 +19,13 @@ log="$ROOT/build-gate.log"
 
 # Four configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
 # and MoofTCP Lite (what ships as the Lite variant).
-for cfg in "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096" "lite:"; do
+for cfg in "lite:" "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096"; do
   name="${cfg%%:*}"; extra="${cfg#*:}"
   dir="build-gate-$name"
   lite=OFF; [ "$name" != lite ] || lite=ON
   echo "== gate [$name]: all Mac targets, $FLAGS $extra (MT_NO_DHCP=$lite)"
   if ! scripts/r68 cmake -S mac -B "$dir" -DCMAKE_TOOLCHAIN_FILE="$R68_TOOLCHAIN" -DMT_NO_DHCP="$lite" \
+      -DMT_LITE_MOOF_BIN=/src/build-gate-lite/moof/MoofTCP.bin \
       "-DCMAKE_C_FLAGS=$FLAGS $extra" -DCMAKE_ASM_FLAGS=-m68000 >"$log" 2>&1; then
     tail -20 "$log"; echo "GATE FAIL [$name] (configure)"; exit 1
   fi

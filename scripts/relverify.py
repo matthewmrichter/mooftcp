@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Independent verification of the release artifacts (helper of scripts/release-verify.sh).
 
-    relverify.py [--self-test] [--lite] [--dist DIR] <version>
+    relverify.py [--self-test] [--dist DIR] <version>
 
-Reads dist/MoofTCP-<version>.{hqx,sit,dsk} with readers that did not write them (--lite: MoofTCP Lite,
-dist/MoofTCP-Lite-<version>.{hqx,sit,dsk} against build-mac-lite/, volume name "MoofTCP Lite", application
-"MoofTCP Lite Installer"):
+Reads dist/MoofTCP-<version>.{hqx,sit,dsk} with readers that did not write them:
   .hqx  macutils `hexbin` (-> MacBinary) and `unar`/`lsar` (The Unarchiver)
   .sit  `unar`/`lsar`
   .dsk  hfsutils `hmount`/`hls`/`hcopy -m`
@@ -22,12 +20,18 @@ hfsck (hfsutils' volume checker) is not installed on this host and is not used; 
 hmount (MDB) plus a successful hcopy of every file.
 The .hqx holds the installer only; the .sit and the .dsk hold both files, and the .dsk must hold
 nothing else at its root and have the volume name "MoofTCP" and 819200 bytes.
+The installer carries both MoofTCP files (docs/dev/RELEASE.md "Variants"): 'MTCP' 128 must be the resource
+fork of build-mac/moof/MoofTCP.bin (the full build: vers 1 long string "MoofTCP <version> ...") and 'MTCP'
+129 that of build-mac-lite/moof/MoofTCP.bin ("MoofTCP Lite <version> ..."), byte for byte, with 'MTCI'
+cdev/ztcp + hasBundle; the short strings must be <version>. The DRVR 22 sizes of both are printed (the
+"no DHCP symbol in the Lite DRVR" check is release.sh's, with nm on the build trees).
 
 --self-test first requires the real artifacts to PASS, then corrupts a copy of each (a resource-fork
 byte in each format, plus the type code in the .dsk) and requires the verification of every copy to
 FAIL. Exit 0 only if all of that holds. Without --self-test: exit 0 only if every format passes.
 """
 import hashlib
+import importlib.util
 import json
 import re
 import os
@@ -42,7 +46,13 @@ FLAG_MASK = 0xFEFF
 INSTALLER_BIN = os.path.join(ROOT, "build-mac", "installer", "MoofTCP Installer.bin")
 README_SRC = os.path.join(ROOT, "docs", "release", "ReadMe.txt")
 VOLNAME = "MoofTCP"
-INST_NAME = "MoofTCP Installer"       # --lite: "MoofTCP Lite Installer"
+INST_NAME = "MoofTCP Installer"
+EMBEDDED = ((128, os.path.join(ROOT, "build-mac", "moof", "MoofTCP.bin"), False),
+            (129, os.path.join(ROOT, "build-mac-lite", "moof", "MoofTCP.bin"), True))
+
+_spec = importlib.util.spec_from_file_location("resmap", os.path.join(ROOT, "scripts", "resmap.py"))
+resmap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(resmap)
 
 
 class Fail(Exception):
@@ -69,6 +79,59 @@ def parse_macbinary(path):
     return rec(d[2:2 + d[1]].decode("mac_roman"), d[65:69].decode("latin-1"), d[69:73].decode("latin-1"),
                (d[73] << 8) | d[101], d[128:128 + dl], d[roff:roff + rl])
 
+
+
+def vers1(rsrc, what):
+    for t, rid, _nm, _size, _attr, data in resmap.resources(rsrc):
+        if t == "vers" and rid == 1:
+            n = data[6]
+            m = data[7 + n]
+            return data[7:7 + n].decode("mac_roman"), data[8 + n:8 + n + m].decode("mac_roman")
+    raise Fail("no 'vers' 1 in " + what)
+
+
+def mb_rsrc(blob, what):
+    if len(blob) < 128 or blob[0] != 0 or blob[74] != 0:
+        raise Fail(what + ": not MacBinary")
+    dl, rl = struct.unpack(">II", blob[83:91])
+    roff = 128 + ((dl + 127) // 128) * 128
+    return blob[roff:roff + rl]
+
+
+def embedded_check(inst_blob, ver):
+    """Both MoofTCP files inside the installer: the build trees' files byte for byte, the variant and
+    version strings, MTCI. Returns a summary; raises Fail."""
+    res = {}
+    try:
+        for t, rid, _nm, _size, _attr, data in resmap.resources(mb_rsrc(inst_blob, "installer")):
+            res[(t, rid)] = data
+    except Fail:
+        raise
+    except Exception as e:
+        raise Fail("installer resource map unreadable: %s" % e)
+    out = []
+    for rid, ref, lite in EMBEDDED:
+        emb = res.get(("MTCP", rid))
+        if emb is None:
+            raise Fail("no 'MTCP' %d in the installer" % rid)
+        if not os.path.isfile(ref):
+            raise Fail("missing reference " + ref)
+        want = mb_rsrc(open(ref, "rb").read(), ref)
+        if sha(emb) != sha(want):
+            raise Fail("'MTCP' %d is not the resource fork of %s" % (rid, os.path.relpath(ref, ROOT)))
+        short, long_ = vers1(emb, "'MTCP' %d" % rid)
+        if short != ver:
+            raise Fail("'MTCP' %d has version %r, release is %r" % (rid, short, ver))
+        if long_.startswith("MoofTCP Lite") != lite:
+            raise Fail("'MTCP' %d has the long version %r: wrong variant" % (rid, long_))
+        mtci = res.get(("MTCI", rid))
+        if mtci is None or len(mtci) != 10 or mtci[:8] != b"cdevztcp" or not (mtci[8] << 8 | mtci[9]) & 0x2000:
+            raise Fail("'MTCI' %d is %r, want cdev/ztcp with hasBundle" % (rid, mtci))
+        drvr = [size for t, i, _n, size, _a, _d in resmap.resources(emb) if t == "DRVR" and i == 22]
+        if len(drvr) != 1:
+            raise Fail("'MTCP' %d has no DRVR 22" % rid)
+        out.append("MTCP %d = %s (%r, fork %d, DRVR 22 %d)" % (rid, os.path.relpath(ref, ROOT), long_, len(emb), drvr[0]))
+    return "; ".join(out)
 
 
 def apply_diaglog(txt, on):
@@ -463,11 +526,35 @@ def self_test(paths, inst, readme):
                 print("SELF-TEST ok: corrupted %s fails (%s): %s" % (name, label, res[0][2][:110]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # the embedded files: a Lite file that does not say Lite (one byte of 'MTCP' 129's long string) must fail
+    blob = bytearray(open(INSTALLER_BIN, "rb").read())
+    needle = ("MoofTCP Lite %s (" % VERSION).encode()
+    i = bytes(blob).find(needle)
+    if i < 0 or bytes(blob).find(needle, i + 1) >= 0:
+        print("SELF-TEST FAIL: no unique Lite long string in the installer")
+        good = False
+    else:
+        blob[i + 9] = ord("y")                  # "MoofTCP Lyte ..."
+        try:
+            embedded_check(bytes(blob), VERSION)
+            print("SELF-TEST FAIL: an installer whose 'MTCP' 129 says %r still passes the embedded check" % "Lyte")
+            good = False
+        except Fail as e:
+            print("SELF-TEST ok: altered 'MTCP' 129 fails the embedded check: %s" % str(e)[:110])
+    try:
+        embedded_check(bytes(open(INSTALLER_BIN, "rb").read()), VERSION + "x")
+        print("SELF-TEST FAIL: the embedded check accepts a wrong version")
+        good = False
+    except Fail as e:
+        print("SELF-TEST ok: wrong release version fails the embedded check: %s" % str(e)[:110])
     return good and switch_tests()
 
 
+VERSION = ""
+
+
 def main():
-    global INSTALLER_BIN, VOLNAME, INST_NAME
+    global VERSION
     args = sys.argv[1:]
     st = False
     stem = "MoofTCP-"
@@ -476,11 +563,6 @@ def main():
         a = args.pop(0)
         if a == "--self-test":
             st = True
-        elif a == "--lite":
-            INSTALLER_BIN = os.path.join(ROOT, "build-mac-lite", "installer", "MoofTCP Installer.bin")
-            VOLNAME = "MoofTCP Lite"
-            INST_NAME = "MoofTCP Lite Installer"
-            stem = "MoofTCP-Lite-"
         elif a == "--dist" and args:
             dist = args.pop(0)
         else:
@@ -488,6 +570,7 @@ def main():
     if len(args) != 1:
         sys.exit(__doc__)
     ver = args[0]
+    VERSION = ver
     paths = {k: os.path.join(dist, "%s%s.%s" % (stem, ver, k)) for k in ("hqx", "sit", "dsk")}
     for tool in ("hexbin", "unar", "lsar", "hmount", "hls", "hcopy", "hattrib", "humount"):
         if shutil.which(tool) is None:
@@ -496,10 +579,17 @@ def main():
         inst, readme = expected()
     except Fail as e:
         sys.exit("relverify.py: " + str(e))
+    try:
+        print("PASS embedded files: " + embedded_check(open(INSTALLER_BIN, "rb").read(), ver))
+        emb_ok = True
+    except Fail as e:
+        print("FAIL embedded files: " + str(e))
+        emb_ok = False
     if st:
         ok = self_test(paths, inst, readme)
     else:
         ok = report(verify_all(paths, inst, readme))
+    ok = ok and emb_ok
     print("RESULT " + ("PASS" if ok else "FAIL"))
     sys.exit(0 if ok else 1)
 
