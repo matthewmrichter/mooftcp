@@ -90,7 +90,8 @@ typedef struct {
     uint32_t udp_in;        /* datagrams queued to an endpoint */
     uint32_t udp_out;       /* datagrams handed to IPv4 output */
     uint32_t udp_drops;     /* malformed, bad checksum, or receive buffer full */
-    uint32_t udp_noport;    /* datagrams for a port nobody owns */
+    uint32_t udp_noport;    /* datagrams for a port nobody owns (port 68 belongs to the DHCP client
+                             * while it runs: its replies are counted in mt_dhcp_info instead) */
     uint32_t tcp_in;           /* well-formed segments (checksum, header, options ok) */
     uint32_t tcp_out;          /* segments handed to IPv4 output */
     uint32_t tcp_in_drops;     /* malformed / bad checksum / bad options */

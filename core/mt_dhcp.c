@@ -264,8 +264,11 @@ void mt_dhcp_input(mt_stack *s, const uint8_t *b, uint16_t n, uint32_t now) {
     dh_opts p;
     mt_ip4 yi, mask;
     uint16_t why;
-    if (n < DH_OPTS || b[0] != 2 || b[1] != 1 || b[2] != 6 || mt_rd32(b + 4) != d->xid ||
-        memcmp(b + 28, s->cfg.mac, 6) != 0 || mt_rd32(b + DH_HDR) != DH_MAGIC ||
+    if (n < DH_OPTS || b[0] != 2 || mt_rd32(b + 4) != d->xid || memcmp(b + 28, s->cfg.mac, 6) != 0) {
+        d->n_bad++;                                 /* another client's (LAN broadcast) or no BOOTP reply: */
+        return;                                     /* counted, not logged (no log flooding) */
+    }
+    if (b[1] != 1 || b[2] != 6 || mt_rd32(b + DH_HDR) != DH_MAGIC ||
         !dh_parse(b + DH_OPTS, (uint16_t)(n - DH_OPTS), &p))
         MT_DROP_GOTO(why);
     yi = mt_rd32(b + 16);
