@@ -1,15 +1,19 @@
 /* installer_main.c - the application "MoofTCP Installer" (Plan 3 Task 10, spec 6.3): the Toolbox
  * shell around inst_exec.c (logic, host-tested) and inst_exec_mac.c (the file system table).
  *
- * One window, "MoofTCP Installer" (DLOG 128): Install, Remove, Quit and a message area. Install
- * and Remove take a snapshot of the System Folder, plan, and run; the message area then says what
- * happened (inst_message). After a run that changed the disk, an alert asks "Restart now?"
+ * One window, "MoofTCP Installer" (DLOG 128): Install, Remove, Quit, a message area and the checkbox
+ * "Lite version (no DHCP)" with its note. At launch the message area says what is installed now
+ * (inst_do_query, read only). Install and Remove take a snapshot of the System Folder, plan, and run;
+ * the message area then says what happened (inst_message). After a run that changed the disk, an alert asks "Restart now?"
  * (Restart / Not now); Restart uses the Shutdown Manager (ShutDwnStart) when its trap is there,
  * else it tells the user to choose Restart from the Special menu.
  *
- * The MoofTCP file is inside this application: resource fork as 'MTCP' 128, data fork as 'MTCD' 128
- * (absent: the release file has none), type/creator/Finder flags as 'MTCI' 128 (scripts/mkembed.py).
- * It is loaded only for Install and released afterwards.
+ * Both MoofTCP files are inside this application (docs/dev/DHCP-DESIGN.md section 10): resource fork
+ * as 'MTCP', data fork as 'MTCD' (absent: the release files have none), type/creator/Finder flags as
+ * 'MTCI', id 128 = MoofTCP (full, DHCP client), id 129 = MoofTCP Lite (scripts/mkembed.py). Install
+ * loads only the one the checkbox picks (and checks that its 'vers' 1 names that variant), writes it
+ * and releases it. The checkbox starts ticked only when MoofTCP Lite is what is installed now, so a
+ * plain Install never swaps the variant by accident; otherwise it starts off (full is the default).
  *
  * Debug builds (MT_INST_DEBUG=1, target MoofInstallerDbg, never shipped) read "[I|R]N" (N decimal)
  * from the data fork of the file "MoofTCP Installer Debug" at the root of the startup disk and stop
@@ -41,20 +45,13 @@
 #define MT_INST_DEBUG 0
 #endif
 
-/* VERS_STR goes into the result messages ("MoofTCP <VERS_STR> is installed."). MoofTCP Lite (MT_NO_DHCP,
- * the build that embeds the Lite MoofTCP file) says "Lite" there and in About. */
-#ifdef MT_NO_DHCP
-#define VARIANT_STR "Lite "
-#define ABOUT_NOTE " This is MoofTCP Lite: no DHCP client, the address is set by hand."
-#else
-#define VARIANT_STR ""
-#define ABOUT_NOTE ""
-#endif
-#define VERS_NUM "1.0rc3"
-#define VERS_STR VARIANT_STR VERS_NUM
+/* VERS_STR goes into the result messages ("MoofTCP Lite <VERS_STR> is installed."; the variant's name
+ * comes from the executor). */
+#define VERS_STR "1.0rc3"
 
 enum { DLG_MAIN = 128, AL_RESTART = 129, AL_NOTE = 130 };
-enum { IT_INSTALL = 1, IT_REMOVE, IT_QUIT, IT_MSG, IT_INTRO };
+enum { IT_INSTALL = 1, IT_REMOVE, IT_QUIT, IT_MSG, IT_INTRO, IT_LITE, IT_NOTE };
+enum { RID_FULL = 128, RID_LITE = 129 };
 enum { MN_APPLE = 128, MN_FILE, MN_EDIT };
 
 QDGlobals qd;
@@ -62,6 +59,7 @@ static DialogPtr g_dlg;
 static int g_quit;
 static long g_stop;                         /* debug: stop after this many changes (0 = off) */
 static char g_stop_only;                    /* debug: 'I' = Install only, 'R' = Remove only, 0 = both */
+static int g_lite;                          /* the checkbox: 1 = install MoofTCP Lite */
 
 static void c2p(Str255 p, const char *c) {
     size_t n = strlen(c);
@@ -84,6 +82,28 @@ static void set_item_text(short it, const char *c) {
     EraseRect(&r);
     InvalRect(&r);
     SetPort(old);
+}
+
+static void set_lite(int v) {
+    short type;
+    Handle h;
+    Rect r;
+    g_lite = v ? 1 : 0;
+    GetDialogItem(g_dlg, IT_LITE, &type, &h, &r);
+    SetControlValue((ControlHandle)h, (short)g_lite);
+}
+
+/* What is installed now (read only), into the message area; returns the installed variant (-1 none). */
+static int show_installed(void) {
+    InstFs fs;
+    InstMacCtx mc;
+    InstResult r;
+    char buf[256];
+    if (inst_mac_fs(&fs, &mc)) return -1;
+    (void)inst_do_query(&fs, &r);
+    inst_query_message(&r, buf, sizeof buf);
+    set_item_text(IT_MSG, buf);
+    return r.status == INST_X_OK && r.had == 1 ? r.old_variant : -1;
 }
 
 static void note(const char *c) {
@@ -133,14 +153,18 @@ static void run(int remove) {
         restart = inst_message(&r, VERS_STR, buf, sizeof buf);
     } else {
         memset(&pl, 0, sizeof pl);
-        hr = GetResource('MTCP', 128);
-        hi = GetResource('MTCI', 128);
+        short id = g_lite ? RID_LITE : RID_FULL;
+        InstVers v;
+        hr = GetResource('MTCP', id);
+        hi = GetResource('MTCI', id);
         SetResLoad(false);
-        hd = GetResource('MTCD', 128);                          /* optional: look up without loading */
+        hd = GetResource('MTCD', id);                           /* optional: look up without loading */
         SetResLoad(true);
         if (hd) LoadResource(hd);
         if (!hr || !hi || GetHandleSize(hi) < 10 || (hd && !*hd)) {
             strcpy(buf, "There is not enough memory to install MoofTCP (or this copy of the installer is damaged). Nothing was changed.");
+        } else if (HLock(hr), inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != g_lite) {
+            strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
         } else {
             HLock(hr); HLock(hi);
             if (hd) HLock(hd);
@@ -199,8 +223,8 @@ static void do_menu(long mr) {
     Str255 name;
     if (menu == MN_APPLE) {
         if (item == 1) {
-            note("MoofTCP " VARIANT_STR "Installer " VERS_NUM ". Installs or removes MoofTCP, a TCP/IP stack for System 6 that "
-                 "takes the place of MacTCP." ABOUT_NOTE);
+            note("MoofTCP Installer " VERS_STR ". Installs or removes MoofTCP, a TCP/IP stack for System 6 that "
+                 "takes the place of MacTCP. It holds MoofTCP and MoofTCP Lite (no DHCP client); the checkbox picks one.");
         } else {
             GetMenuItemText(GetMenuHandle(MN_APPLE), item, name);
             (void)OpenDeskAcc(name);
@@ -216,11 +240,7 @@ static void do_menu(long mr) {
 static void setup_menus(void) {
     MenuHandle m;
     m = NewMenu(MN_APPLE, (ConstStringPtr)"\p\x14");
-#ifdef MT_NO_DHCP
-    AppendMenu(m, (ConstStringPtr)"\pAbout MoofTCP Lite Installer...;(-");
-#else
     AppendMenu(m, (ConstStringPtr)"\pAbout MoofTCP Installer...;(-");
-#endif
     AppendResMenu(m, 'DRVR');
     InsertMenu(m, 0);
     m = NewMenu(MN_FILE, (ConstStringPtr)"\pFile");
@@ -262,6 +282,7 @@ int main(void) {
         set_item_text(IT_INTRO, t);
     }
 #endif
+    set_lite(show_installed() == INST_VAR_LITE);    /* ticked only when Lite is what is installed now */
     ShowWindow(g_dlg);
     while (!g_quit) {
         SystemTask();
@@ -283,6 +304,7 @@ int main(void) {
             if (item == IT_INSTALL) run(0);
             else if (item == IT_REMOVE) run(1);
             else if (item == IT_QUIT) g_quit = 1;
+            else if (item == IT_LITE) set_lite(!g_lite);
         }
     }
     return 0;

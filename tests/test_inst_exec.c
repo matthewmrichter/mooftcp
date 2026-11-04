@@ -237,6 +237,31 @@ static long mkfork(uint8_t *out, uint32_t v, int pad) {
     return moff + mlen;
 }
 
+/* a MoofTCP-like fork: 'vers' 1 = v, region 0, short string vs, long string "MoofTCP[ Lite] <vs> (...)",
+ * plus `pad` filler bytes (the variant is read from the long string) */
+static long mkforkv(uint8_t *out, uint32_t v, int pad, int variant, const char *vs) {
+    char ls[64];
+    long doff = 256, dlen, moff, mlen = 28 + 2 + 8 + 12, i, sl = (long)strlen(vs), ll, rl;
+    uint8_t *m, *d;
+    sprintf(ls, "%s %s (release candidate)", variant == INST_VAR_LITE ? "MoofTCP Lite" : "MoofTCP", vs);
+    ll = (long)strlen(ls);
+    rl = 4 + 2 + 1 + sl + 1 + ll + pad;
+    dlen = 4 + rl; moff = doff + dlen;
+    memset(out, 0, (size_t)(moff + mlen));
+    wr32(out, (uint32_t)doff); wr32(out + 4, (uint32_t)moff); wr32(out + 8, (uint32_t)dlen); wr32(out + 12, (uint32_t)mlen);
+    wr32(out + doff, (uint32_t)rl);
+    d = out + doff + 4;
+    wr32(d, v); d[4] = 0; d[5] = 0;
+    d[6] = (uint8_t)sl; memcpy(d + 7, vs, (size_t)sl);
+    d[7 + sl] = (uint8_t)ll; memcpy(d + 8 + sl, ls, (size_t)ll);
+    for (i = 0; i < pad; i++) d[8 + sl + ll + i] = (uint8_t)(0x5A ^ i);
+    m = out + moff;
+    m[25] = 28; m[27] = (uint8_t)mlen; m[28] = 0; m[29] = 0;
+    memcpy(m + 30, "vers", 4); m[34] = 0; m[35] = 0; m[36] = 0; m[37] = 10;
+    m[38] = 0; m[39] = 1; m[40] = 0xFF; m[41] = 0xFF;
+    return moff + mlen;
+}
+
 static Fake F0, F, G;                 /* original, working copy, scratch */
 static uint8_t payload_fork[RCAP];
 static InstPayload PL;
@@ -282,6 +307,15 @@ static void payload_init(void) {
     memset(&PL, 0, sizeof PL);
     PL.rlen = mkfork(payload_fork, VNEW, 300);
     PL.rsrc = payload_fork; PL.type = CDEV; PL.creator = ZTCP; PL.flags = 0x2000;
+}
+/* the two bundled files of the one installer: full (vers strings "MoofTCP 1.0rc1 ...") and Lite */
+static uint8_t fork_full[RCAP], fork_lite[RCAP];
+static InstPayload PLF, PLL;
+static void payloads_init(void) {
+    payload_init();
+    PLF = PL; PLF.rsrc = fork_full; PLF.rlen = mkforkv(fork_full, VNEW, 300, INST_VAR_FULL, "1.0rc1");
+    PLL = PL; PLL.rsrc = fork_lite; PLL.rlen = mkforkv(fork_lite, VNEW, 250, INST_VAR_LITE, "1.0rc1");
+    PL = PLF;
 }
 
 /* ---- comparing states: every node by folder name and name, all attributes and both forks ---- */
@@ -638,7 +672,7 @@ static void upgrade_and_versions(void) {
     T_EQ(run_install(&F, 0), INST_X_OK);
     T_EQ(R.msg, INST_UPGRADED);
     T_EQ(mesg(), 1);
-    T_CHECK(strstr(msg, "updated to 1.0rc1; your settings were kept") != NULL);
+    T_CHECK(strstr(msg, "MoofTCP was updated to MoofTCP 1.0rc1; your settings were kept") != NULL);
     T_CHECK(moof_complete(&F)); T_CHECK(fk_find(&F, SYSD, INST_PREFS_NAME) >= 0);
     F = F0; F.n[fk_find(&F, SYSD, INST_PREFS_NAME)].used = 0;           /* no prefs: nothing to keep */
     T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_UPGRADED);
@@ -865,28 +899,151 @@ static void promote_manifest_tmp(void) {
 static void message_lengths(void) {
     static const InstMsg msgs[] = { INST_ALREADY_INSTALLED, INST_NOTHING_TO_REMOVE, INST_INSTALLED_PARKED_MACTCP,
         INST_INSTALLED_NO_MACTCP, INST_UPGRADED, INST_REMOVED_RESTORED, INST_REMOVED_NO_MACTCP, INST_BLOCKED_LOCKED,
-        INST_BLOCKED_COLLISION };
+        INST_BLOCKED_COLLISION, INST_SWITCHED };
     static const int errs[] = { INST_OS_FBSY, INST_OS_FLCKD, INST_OS_DSKFUL, INST_OS_VLCKD, INST_OS_FNF, -32768, 0 };
+    static char big[1024];
     char small[16];
-    int s, m, e, k, rem;
+    int s, m, e, k, rem, var, longest = 0;
     for (s = INST_X_OK; s <= INST_X_REFUSED; s++)
-        for (m = 0; m < 9; m++)
+        for (m = 0; m < 10; m++)
             for (e = 0; e < 7; e++)
                 for (k = 0; k < 8; k++)
-                    for (rem = 0; rem < 2; rem++) {
-                        memset(&R, 0, sizeof R);
-                        R.status = s; R.msg = msgs[m]; R.oserr = errs[e]; R.op_kind = (InstOpKind)k; R.remove = rem;
-                        R.op_index = 11; R.nops = 12; R.done = 3; R.mutations = 2147483647L; R.moves = 3; R.plan_rc = -32768;
-                        strcpy(R.blocker, "0123456789012345678901234567890");
-                        strcpy(R.op_name, "0123456789012345678901234567890");
-                        (void)inst_message(&R, "1.0rc1", msg, sizeof msg);
-                        T_CHECK(strlen(msg) > 0 && strlen(msg) <= 255);
-                        (void)inst_message(&R, "1.0rc1", small, sizeof small);
-                        T_CHECK(strlen(small) <= 15);
+                    for (rem = 0; rem < 2; rem++)
+                        for (var = 0; var < 8; var++) {
+                            memset(&R, 0, sizeof R);
+                            R.status = s; R.msg = msgs[m]; R.oserr = errs[e]; R.op_kind = (InstOpKind)k; R.remove = rem;
+                            R.op_index = 11; R.nops = 12; R.done = 3; R.mutations = 2147483647L; R.moves = 3; R.plan_rc = -32768;
+                            R.variant = var & 1; R.old_variant = (var >> 1) & 1; R.prefs = var >> 2; R.had = 1;
+                            R.vers = VNEW; R.old_vers = (var & 2) ? VNEW : 0x09999999u;
+                            strcpy(R.old_vstr, "123456789012345");
+                            strcpy(R.blocker, "0123456789012345678901234567890");
+                            strcpy(R.op_name, "0123456789012345678901234567890");
+                            (void)inst_message(&R, "1.0rc1", big, sizeof big);      /* never cut: a Str255 holds it */
+                            if (strlen(big) > 255) fprintf(stderr, "LONG %d: %s\n", (int)strlen(big), big);
+                            T_CHECK(strlen(big) > 0 && strlen(big) <= 255);
+                            if ((int)strlen(big) > longest) longest = (int)strlen(big);
+                            (void)inst_message(&R, "1.0rc1", small, sizeof small);
+                            T_CHECK(strlen(small) <= 15);
+                        }
+    for (var = 0; var < 6; var++) {
+        memset(&R, 0, sizeof R);
+        R.had = var % 3; R.old_variant = var / 3; strcpy(R.old_vstr, "123456789012345");
+        inst_query_message(&R, big, sizeof big);
+        T_CHECK(strlen(big) > 0 && strlen(big) <= 255);
+        R.status = INST_X_SNAPSHOT; R.oserr = -32768;
+        inst_query_message(&R, big, sizeof big);
+        T_CHECK(strstr(big, "-32768") != NULL);
+    }
+    T_CHECK(longest > 150 && longest <= 255);       /* the longest is a variant switch (217 when written) */
+}
+
+/* ---- one installer, two variants (docs/dev/DHCP-DESIGN.md section 10) ---- */
+static int moof_is(Fake *f, const InstPayload *p) {
+    int i = fk_find(f, SYSD, "MoofTCP");
+    return i >= 0 && f->n[i].type == CDEV && f->n[i].creator == ZTCP && f->n[i].rl == p->rlen &&
+           !memcmp(f->n[i].r, p->rsrc, (size_t)p->rlen);
+}
+static void query(Fake *f) { InstFs fs = mkfs(f); T_EQ(inst_do_query(&fs, &R), INST_X_OK); inst_query_message(&R, msg, sizeof msg); }
+
+static void variant_install_switch(void) {
+    InstVers v;
+    payloads_init();
+    T_EQ(inst_fork_vinfo(PLF.rsrc, PLF.rlen, &v), VNEW); T_EQ(v.variant, INST_VAR_FULL); T_CHECK(!strcmp(v.vstr, "1.0rc1"));
+    T_EQ(inst_fork_vinfo(PLL.rsrc, PLL.rlen, &v), VNEW); T_EQ(v.variant, INST_VAR_LITE);
+    T_EQ(inst_fork_vinfo(payload_fork, PL.rlen, &v), VNEW);          /* no strings (filler): full */
+    T_EQ(v.variant, INST_VAR_FULL);
+    base(&F0); trio3(&F0); addn(&F0, SYSD, INST_PREFS_NAME, PREF, ZTCP, 0);
+    F = F0;
+    query(&F); T_EQ(R.had, 0); T_CHECK(!strcmp(msg, "MoofTCP is not installed."));
+    PL = PLF;
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_INSTALLED_PARKED_MACTCP); T_EQ(R.variant, INST_VAR_FULL);
+    T_EQ(mesg(), 1); T_CHECK(strstr(msg, "MoofTCP 1.0rc1 is installed.") == msg);
+    query(&F); T_EQ(R.had, 1); T_EQ(R.old_variant, INST_VAR_FULL); T_CHECK(!strcmp(msg, "Installed now: MoofTCP 1.0rc1."));
+    PL = PLL;                                         /* the Lite box ticked: one WRITE_MOOF replaces it */
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_SWITCHED); T_EQ(R.nops, 1); T_EQ(R.moves, 0);
+    T_EQ(mesg(), 1);
+    T_CHECK(strstr(msg, "MoofTCP was replaced by MoofTCP Lite 1.0rc1; your settings were kept.") == msg);
+    T_CHECK(strstr(msg, "fixed address") != NULL);
+    T_CHECK(moof_is(&F, &PLL)); T_EQ(providers(&F), 1); T_EQ(fk_find(&F, SYSD, INST_MOOF_TMP), -1);
+    query(&F); T_EQ(R.old_variant, INST_VAR_LITE); T_CHECK(!strcmp(msg, "Installed now: MoofTCP Lite 1.0rc1 (no DHCP)."));
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_ALREADY_INSTALLED);
+    T_EQ(mesg(), 0); T_CHECK(strstr(msg, "MoofTCP Lite is already installed") == msg && strstr(msg, "untick the Lite box") != NULL);
+    PL = PLF;                                         /* and back */
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_SWITCHED);
+    T_EQ(mesg(), 1); T_CHECK(strstr(msg, "MoofTCP Lite was replaced by MoofTCP 1.0rc1; your settings were kept.") == msg);
+    T_CHECK(strstr(msg, "fixed address") == NULL);
+    T_CHECK(moof_is(&F, &PLF));
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_ALREADY_INSTALLED);
+    T_EQ(mesg(), 0); T_CHECK(strstr(msg, "tick the Lite box") != NULL);
+    T_EQ(run_remove(&F, 0), INST_X_OK); T_EQ(R.msg, INST_REMOVED_RESTORED);
+    T_CHECK(same(&F0, &F, 0)); T_EQ(F.trio_opened, 0);
+    /* Remove is the same for both: Lite installed, Remove restores the original */
+    F = F0; PL = PLL;
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(mesg(), 1); T_CHECK(strstr(msg, "MoofTCP Lite 1.0rc1 is installed.") == msg);
+    T_EQ(run_remove(&F, 0), INST_X_OK); T_CHECK(same(&F0, &F, 0));
+    /* a newer MoofTCP of the other variant: never replaced, the message names it and says Remove first */
+    base(&F);
+    {
+        int i = addn(&F, SYSD, "MoofTCP", CDEV, ZTCP, 0);
+        F.n[i].rl = mkforkv(F.n[i].r, 0x01008000u, 5, INST_VAR_FULL, "1.0");
+    }
+    PL = PLL;
+    T_EQ(run_install(&F, 0), INST_X_OK); T_EQ(R.msg, INST_ALREADY_INSTALLED);
+    T_EQ(mesg(), 0); T_CHECK(strstr(msg, "A newer MoofTCP (1.0) is already installed.") == msg && strstr(msg, "Remove") != NULL);
+    /* an interrupted write: the query says so */
+    base(&F); addn(&F, SYSD, "MoofTCP", MTMP, MTIN, 0);
+    query(&F); T_EQ(R.had, 2); T_CHECK(strstr(msg, "interrupted") != NULL);
+    PL = PLF;
+}
+
+/* Every change of a switch fails (4 errors, whole and half writes) and the debug hook stops after every
+ * count; from each state Remove restores the original, Install of the variant asked for completes (then
+ * Remove restores), and so does Install of the variant that was there. Both directions, all setups. */
+static void switch_fail_every_change(void) {
+    static const int errs[4] = { INST_OS_IO, INST_OS_DSKFUL, INST_OS_FBSY, INST_OS_FLCKD };
+    static Fake inst;
+    InstPayload from, to;
+    int v, a, e, part, runs = 0;
+    long k, total;
+    for (v = 0; v < 16; v++)
+        for (a = 0; a < 2; a++) {
+            setup(v); payloads_init();
+            from = a ? PLL : PLF; to = a ? PLF : PLL;
+            F = F0; PL = from;
+            T_EQ(run_install(&F, 0), INST_X_OK);
+            inst = F; inst.mut = 0;
+            PL = to;
+            F = inst;
+            T_EQ(run_install(&F, 0), INST_X_OK);
+            T_EQ(R.msg, INST_SWITCHED); T_CHECK(moof_is(&F, &to)); T_EQ(R.nops, 1);
+            total = F.mut;
+            T_CHECK(total > 0);
+            for (k = 1; k <= total; k++) {
+                for (e = 0; e < 4; e++)
+                    for (part = 0; part < 2; part++) {
+                        F = inst; F.fail_at = k; F.fail_err = errs[e]; F.fail_partial = part; PL = to;
+                        T_EQ(run_install(&F, 0), INST_X_OSERR);
+                        T_CHECK(providers(&F) <= 1);
+                        PL = to; recover(&F0, &F, "switch-fail", k * 10 + e);
+                        PL = from; recover(&F0, &F, "switch-fail-back", k * 10 + e);
+                        runs++;
                     }
+                if (k < total) {
+                    F = inst; PL = to;
+                    T_EQ(run_install(&F, k), INST_X_STOPPED);
+                    T_CHECK(providers(&F) <= 1);
+                    PL = to; recover(&F0, &F, "switch-stop", k);
+                    PL = from; recover(&F0, &F, "switch-stop-back", k);
+                    runs++;
+                }
+            }
+        }
+    PL = PLF;
+    T_CHECK(runs > 500);
 }
 
 T_MAIN(install_remove_identical, absent_trio, twice, fail_every_install_change, fail_every_remove_change,
        stop_after_every_count, open_file_47, locked_paths, retry_with_null, upgrade_and_versions,
        stale_snapshot_changed, collision_messages, prechecks, fork_vers_parser, big_folders,
-       promote_manifest_tmp, message_lengths, hostile_ops_refused, vers_big_map)
+       promote_manifest_tmp, message_lengths, hostile_ops_refused, vers_big_map, variant_install_switch,
+       switch_fail_every_change)

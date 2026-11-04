@@ -89,16 +89,36 @@ static long map_find(RdFn rd, void *c, long moff, long mlen, uint32_t type, int 
     return -1;
 }
 
-/* the packed 'vers' 1 through a reader; 0 = none or damaged */
-static uint32_t vers_of(RdFn rd, void *c) {
-    uint8_t h[16], v[8];
-    long doff, moff, mlen, r;
+/* The 'vers' 1 through a reader: packed version, variant, short string; returns the packed version
+ * (0 = none or damaged). Layout of a 'vers': packed (4), region (2), short Pascal string, long Pascal
+ * string. Every read is checked against the resource's length (a reader failure is a short fork). */
+static uint32_t vinfo_of(RdFn rd, void *c, InstVers *out) {
+    static const char lite[] = "MoofTCP Lite";
+    uint8_t h[16], v[8], b[16];
+    long doff, moff, mlen, r, rlen, p;
+    unsigned sl, ll;
+    memset(out, 0, sizeof *out);
+    out->variant = INST_VAR_FULL;
     if (rd(c, 0, h, 16)) return 0;
     doff = (long)rd32(h); moff = (long)rd32(h + 4); mlen = (long)rd32(h + 12);
     if (doff < 0 || moff < 0 || mlen < 30) return 0;
     r = map_find(rd, c, moff, mlen, T_VERS, 1);
     if (r < 0 || rd(c, doff + r, v, 8) || rd32(v) < 4) return 0;
-    return rd32(v + 4);
+    out->packed = rd32(v + 4);
+    rlen = (long)rd32(v);
+    p = doff + r + 4;                               /* the resource data */
+    if (rlen < 7 || rd(c, p + 6, b, 1)) return out->packed;
+    sl = b[0];
+    if (7 + (long)sl > rlen) return out->packed;
+    if (sl > 0 && rd(c, p + 7, b, (long)(sl > 15 ? 15 : sl))) return out->packed;
+    memcpy(out->vstr, b, sl > 15 ? 15 : sl);
+    out->vstr[sl > 15 ? 15 : sl] = 0;
+    if (8 + (long)sl > rlen || rd(c, p + 7 + (long)sl, b, 1)) return out->packed;
+    ll = b[0];
+    if (ll >= sizeof lite - 1 && 8 + (long)sl + (long)(sizeof lite - 1) <= rlen &&
+        !rd(c, p + 8 + (long)sl, b, (long)(sizeof lite - 1)) && !memcmp(b, lite, sizeof lite - 1))
+        out->variant = INST_VAR_LITE;
+    return out->packed;
 }
 
 typedef struct { const uint8_t *f; long len; } MemFork;
@@ -109,11 +129,18 @@ static int mem_rd(void *c, long off, uint8_t *p, long n) {
     return 0;
 }
 
-uint32_t inst_fork_vers(const uint8_t *f, long len) {
+uint32_t inst_fork_vinfo(const uint8_t *f, long len, InstVers *v) {
     MemFork m;
+    InstVers t;
+    if (!v) v = &t;
+    memset(v, 0, sizeof *v);
     if (!f || len < 16) return 0;
     m.f = f; m.len = len;
-    return vers_of(mem_rd, &m);
+    return vinfo_of(mem_rd, &m, v);
+}
+
+uint32_t inst_fork_vers(const uint8_t *f, long len) {
+    return inst_fork_vinfo(f, len, NULL);
 }
 
 /* the same, read through the table (only ever called for the MoofTCP file) */
@@ -125,10 +152,10 @@ static int fs_rd(void *c, long off, uint8_t *p, long n) {
     if (f->fs->read(f->fs->ctx, f->dir, f->name, 1, off, p, n, &got) || got != n) return -1;
     return 0;
 }
-static uint32_t file_vers(const InstFs *fs, long dir, const char *name) {
+static uint32_t file_vinfo(const InstFs *fs, long dir, const char *name, InstVers *v) {
     FsFork f;
     f.fs = fs; f.dir = dir; f.name = name;
-    return vers_of(fs_rd, &f);
+    return vinfo_of(fs_rd, &f, v);
 }
 
 /* ---- the snapshot ---- */
@@ -198,8 +225,16 @@ static int take_snapshot(const InstFs *fs, Snap *s, InstResult *res) {
     for (i = 0; i < s->nsys; i++) {
         InstEntry *e = &s->sys[i];
         if (ieq(e->name, INST_PREFS_NAME) && !e->is_dir) res->prefs = 1;
-        if (ieq(e->name, INST_MOOF_NAME) && !e->is_dir && e->type == T_CDEV && e->creator == T_ZTCP)
-            e->vers = file_vers(fs, fs->sysdir, e->name);
+        if (ieq(e->name, INST_MOOF_NAME) && !e->is_dir && e->type == T_CDEV && e->creator == T_ZTCP) {
+            InstVers v;
+            e->vers = file_vinfo(fs, fs->sysdir, e->name, &v);
+            e->variant = (uint8_t)v.variant;
+            res->had = 1; res->old_vers = v.packed; res->old_variant = v.variant;
+            memcpy(res->old_vstr, v.vstr, sizeof res->old_vstr);
+        } else if (!e->is_dir && ((ieq(e->name, INST_MOOF_NAME) && e->type == INST_TMP_TYPE && e->creator == INST_TMP_CREATOR) ||
+                                  ieq(e->name, INST_MOOF_TMP)) && !res->had) {
+            res->had = 2;                           /* an interrupted write */
+        }
         if (ieq(e->name, INST_DISABLED) && e->is_dir) {
             rc = fs->info(fs->ctx, fs->sysdir, e->name, &di);
             if (rc) { res->oserr = rc; return -1; }
@@ -211,6 +246,9 @@ static int take_snapshot(const InstFs *fs, Snap *s, InstResult *res) {
         }
     }
     if (s->ndis >= 0) {
+        for (i = 0; i < s->ndis; i++)               /* a manifest without MoofTCP: an interrupted install or remove */
+            if (!res->had && (ieq(s->dis[i].name, INST_MANIFEST_NAME) || ieq(s->dis[i].name, INST_MANIFEST_TMP)))
+                res->had = 2;
         s->man_ok = read_manifest(fs, s->disdir, INST_MANIFEST_NAME, &s->man);
         if (!s->man_ok) s->man_ok = read_manifest(fs, s->disdir, INST_MANIFEST_TMP, &s->man);
         if (!s->man_ok) memset(&s->man, 0, sizeof s->man);
@@ -509,14 +547,17 @@ int inst_do_install(const InstFs *fs, const InstPayload *pl, long stop_after, In
     static InstOp ops[INST_OPS_MAX];
     InstManifest man;
     InstCtx x;
+    InstVers pv;
     uint32_t v;
     int n;
     res_init(res, 0);
-    v = pl ? inst_fork_vers(pl->rsrc, pl->rlen) : 0;
+    v = pl ? inst_fork_vinfo(pl->rsrc, pl->rlen, &pv) : 0;
     if (!pl || !pl->rsrc || pl->rlen <= 0 || v == 0 || pl->dlen < 0 || (pl->dlen > 0 && !pl->data))
         return res->status = INST_X_PAYLOAD;
+    res->variant = pv.variant;
+    res->vers = v;
     if (take_snapshot(fs, &s, res) < 0) return res->status = INST_X_SNAPSHOT;
-    n = inst_plan_install(s.sys, s.nsys, s.dis, s.ndis, v, s.man_ok ? &s.man : NULL, ops, INST_OPS_MAX,
+    n = inst_plan_install(s.sys, s.nsys, s.dis, s.ndis, v, pv.variant, s.man_ok ? &s.man : NULL, ops, INST_OPS_MAX,
                           &res->msg, res->blocker, &man);
     res->plan_rc = n;
     if (n < 0) return res->status = INST_X_PLAN;
@@ -526,6 +567,13 @@ int inst_do_install(const InstFs *fs, const InstPayload *pl, long stop_after, In
     if ((res->status = pre_checks(fs, ops, n, pl, res)) != INST_X_OK) return res->status;
     x.fs = fs; x.stop_after = stop_after; x.mutations = 0; x.committed = 0; x.res = res;
     return inst_run(&x, ops, n, &man, pl);
+}
+
+int inst_do_query(const InstFs *fs, InstResult *res) {
+    static Snap s;
+    res_init(res, 0);
+    if (take_snapshot(fs, &s, res) < 0) return res->status = INST_X_SNAPSHOT;
+    return res->status = INST_X_OK;
 }
 
 int inst_do_remove(const InstFs *fs, long stop_after, InstResult *res) {
@@ -570,6 +618,26 @@ static void putn(Txt *t, long v) {
 }
 
 static void putq(Txt *t, const char *name) { put(t, "\""); put(t, name); put(t, "\""); }
+
+static const char *vname(int variant) { return variant == INST_VAR_LITE ? "MoofTCP Lite" : "MoofTCP"; }
+
+void inst_query_message(const InstResult *r, char *buf, int cap) {
+    Txt t;
+    t.b = buf; t.cap = cap; t.len = 0;
+    if (cap <= 0) return;
+    buf[0] = 0;
+    if (r->status != INST_X_OK) {
+        put(&t, "The System Folder could not be read (error "); putn(&t, r->oserr); put(&t, ").");
+    } else if (r->had == 1) {
+        put(&t, "Installed now: "); put(&t, vname(r->old_variant));
+        if (r->old_vstr[0]) { put(&t, " "); put(&t, r->old_vstr); }
+        put(&t, r->old_variant == INST_VAR_LITE ? " (no DHCP)." : ".");
+    } else if (r->had == 2) {
+        put(&t, "An interrupted Install or Remove was found. Click Install or Remove to finish it.");
+    } else {
+        put(&t, "MoofTCP is not installed.");
+    }
+}
 
 static const char *what(InstOpKind k) {
     switch (k) {
@@ -635,10 +703,17 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
     }
     switch (r->msg) {
     case INST_ALREADY_INSTALLED:
-        /* the version compare does not see the variant (full / Lite): the text names no variant and
-         * says how to switch (docs/dev/RELEASE.md "Variants") */
-        put(&t, "MoofTCP is already installed (this version or a newer one). Nothing was changed. To switch "
-                "between MoofTCP and MoofTCP Lite, choose Remove first, then Install.");
+        if (r->had == 1 && r->old_variant == r->variant) {
+            put(&t, vname(r->variant)); put(&t, " is already installed (this version or a newer one). Nothing was changed.");
+            if (r->old_vers == r->vers)
+                put(&t, r->variant == INST_VAR_LITE ? " To install MoofTCP with DHCP instead, untick the Lite box and click Install."
+                                                    : " To install MoofTCP Lite instead, tick the Lite box and click Install.");
+        } else {                                     /* a newer version of the other variant: no downgrade */
+            put(&t, "A newer "); put(&t, vname(r->had == 1 ? r->old_variant : r->variant));
+            if (r->old_vstr[0]) { put(&t, " ("); put(&t, r->old_vstr); put(&t, ")"); }
+            put(&t, " is already installed. Nothing was changed. To install this version instead, choose Remove, "
+                    "restart, then Install.");
+        }
         return 0;
     case INST_NOTHING_TO_REMOVE:
         put(&t, "MoofTCP is not installed, nothing to remove.");
@@ -662,19 +737,28 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
     case INST_INSTALLED_PARKED_MACTCP:
     case INST_INSTALLED_NO_MACTCP:
     case INST_UPGRADED:
-        if (r->msg == INST_UPGRADED) {
-            put(&t, "MoofTCP was updated to "); put(&t, vers);
+    case INST_SWITCHED: {
+        int hint = 0;
+        if (r->msg == INST_UPGRADED || r->msg == INST_SWITCHED) {
+            put(&t, r->msg == INST_SWITCHED ? vname(r->old_variant) : "MoofTCP");
+            put(&t, r->msg == INST_SWITCHED ? " was replaced by " : " was updated to ");
+            put(&t, vname(r->variant)); put(&t, " "); put(&t, vers);
             put(&t, r->prefs ? "; your settings were kept." : ".");
+            hint = r->variant == INST_VAR_LITE && r->prefs;       /* the old settings may say DHCP */
+            if (hint) put(&t, " Lite has no DHCP: if you used it, set a fixed address in the control panel.");
         } else {
-            put(&t, "MoofTCP "); put(&t, vers); put(&t, " is installed.");
+            put(&t, vname(r->variant)); put(&t, " "); put(&t, vers); put(&t, " is installed.");
         }
-        if (r->moves)
+        if (r->moves && hint)                                    /* shorter, so the text fits a Str255 */
+            put(&t, " MacTCP was moved into \"MacTCP (Disabled)\".");
+        else if (r->moves)
             put(&t, " MacTCP was found and moved into the folder \"MacTCP (Disabled)\" in the System Folder; Remove puts it back.");
-        else if (r->msg == INST_INSTALLED_NO_MACTCP)
+        else if (r->msg == INST_INSTALLED_NO_MACTCP && r->had != 1)    /* had 1: a repair of an interrupted write */
             put(&t, " No MacTCP was found, so nothing was moved.");
         put(&t, r->prefs ? " Restart to use MoofTCP."
                                                     : " After restarting, set the address in Control Panel > MoofTCP.");
         return 1;
+    }
     case INST_REMOVED_RESTORED:
         put(&t, "MoofTCP was removed and MacTCP was put back in the System Folder.");
         if (r->prefs) put(&t, " The file \"MoofTCP Prefs\" (your settings) was kept.");
