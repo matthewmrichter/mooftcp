@@ -199,7 +199,7 @@ int main(void)
             }
             P("sizes: MtRes %lu MtGate %lu MtEnet %lu MtTimer %lu\r", (unsigned long)sizeof(MtRes),
               (unsigned long)sizeof(MtGate), (unsigned long)sizeof(MtEnet), (unsigned long)sizeof(MtTimer));
-            pass = ref == -49;
+            pass = ref < 0;   /* any real driver refnum: the unit is the first free one (-49 in Snow, -50 on a Mac whose .DSP holds unit 48) */
         }
     }
     P("RESULT %s\r", pass ? "PASS" : unconf ? "UNCONFIGURED" : "FAIL");
