@@ -502,11 +502,16 @@ from PIL import Image
 # screen have under 10%
 best = None
 for f in sorted(glob.glob(sys.argv[1] + "/" + sys.argv[2] + "-boot-*.png")):
-    im = Image.open(f).convert("L").crop((32, 668, 75, 700))
-    px = list(im.getdata())
+    full = Image.open(f).convert("L")
+    above = list(full.crop((32, 600, 75, 640)).getdata())
+    if sum(1 for p in above if p > 200) / len(above) > 0.8:
+        continue                                 # the installer window still covers the corner (it reaches Mac y 338)
+    px = list(full.crop((32, 668, 75, 700)).getdata())
     w = sum(1 for p in px if p > 200) / len(px)
     if best is None or w > best[0]:
         best = (w, f)
+if best is None:
+    print("parade: no frame without the installer window"); sys.exit(1)
 print("parade frame: %s (%.2f white in the icon box)" % (best[1], best[0]))
 sys.exit(0 if best[0] > 0.5 else 1)
 PY
@@ -626,7 +631,7 @@ scenario8() {
   stop; cmd_snap s8-after >/dev/null
   where s8-after ':System Folder:' || rc=1
   cmd_compare before s8-after attrs || rc=1
-  grep -q '^sys MoofTCP ' "$OUT/s8-after.txt" && rc=1
+  grep -q '^sys MoofTCP type=' "$OUT/s8-after.txt" && rc=1        # ("MoofTCP Prefs" stays)
   grep -q '^disabled-folder absent' "$OUT/s8-after.txt" || rc=1
   result $rc 8
 }
