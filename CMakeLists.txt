@@ -63,3 +63,9 @@ foreach(src ${MT_TEST_SRC})
   target_compile_definitions(${name} PRIVATE MT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME ${name} COMMAND ${name})
 endforeach()
+
+# KeyLat host-side logic (scripts/keylatsrv.py): parsing, baseline, report
+find_program(MT_PYTHON3 python3)
+if(MT_PYTHON3)
+  add_test(NAME test_keylat_py COMMAND ${MT_PYTHON3} ${CMAKE_SOURCE_DIR}/tests/test_keylat.py)
+endif()
