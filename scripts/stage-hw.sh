@@ -8,7 +8,7 @@
 # half-made session directory. The staged session is verified automatically.
 # --release <version> (Plan 3 Task 11) adds dist/MoofTCP-<version>.{dsk,hqx,sit} (scripts/release.sh; copied
 # as they are, the .hqx is only decode-checked with hexbin) and the diagnostic apps from build-mac/ (HeapInfo,
-# HeapInfoOpen, HeapInfoDNR, MoofDiag, ApiProbe as .bin + .hqx). Further <file.bin> arguments are optional then.
+# HeapInfoOpen, HeapInfoDNR, MoofDiag, ApiProbe, and KeyLat when built, as .bin + .hqx). Further <file.bin> arguments are optional then.
 # Spec file (markdown) supplies the owner-facing steps as "## Install", "## Try" and
 # "## Undo" sections. Without --spec those sections say no steps were given.
 # Verify: round-trips every .hqx with hexbin and checks it equals the .bin (name,
@@ -95,6 +95,8 @@ if [ -n "$release" ]; then
   for f in "$ROOT/build-mac/heapinfo/HeapInfo.bin" "$ROOT/build-mac/heapinfo/HeapInfoOpen.bin" \
            "$ROOT/build-mac/heapinfo/HeapInfoDNR.bin" "$ROOT/build-mac/moofdiag/MoofDiag.bin" \
            "$ROOT/build-mac/apiprobe/ApiProbe.bin"; do set -- "$@" "$f"; done
+  # KeyLat (mac/keylat, keypress-to-wire latency, docs/dev/HARDWARE.md "KeyLat") rides along when it has been built
+  [ ! -f "$ROOT/build-mac/keylat/KeyLat.bin" ] || set -- "$@" "$ROOT/build-mac/keylat/KeyLat.bin"
   for f in "${rel_files[@]}"; do [ -f "$f" ] || die "missing $f (run scripts/release.sh $release)"; done
 fi
 case "$session" in
