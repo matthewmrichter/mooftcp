@@ -13,21 +13,27 @@
 #                                         with --debug, "Installer Dbg" and ":MoofTCP Installer Debug" = SPEC,
 #                                         e.g. I4 / R2) into ":MoofTCP Test:"; --prefs: a "MoofTCP Prefs" for
 #                                         Snow's NAT into the System Folder; snapshot "before"
-#   installer-test.sh scenario <1|2|3|4|5a|5b|7>   run a scenario end to end (Install/Remove through the GUI
-#                                         with xdotool, docs/dev/EMULATOR.md); screenshots and snapshots
-#                                         go to build-mac/installer-test/
+#   installer-test.sh scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|look>   run a scenario end to end (Install/
+#                                         Remove through the GUI with xdotool, docs/dev/EMULATOR.md); screenshots
+#                                         and snapshots go to build-mac/installer-test/
 # Scenarios: 1 golden Install then Remove, byte-identical trio; 2 MacTCP absent; 3 Install twice, Remove
 # twice; 4 interruption (debug build stops after N changes, Snow is killed, Remove / Install again after
 # the reboot); 5a Install + restart with MoofTCP configured: parade icon, MoofDiag (moofdiag-run.sh
 # --installed), Flynn echo; 5b factory MacTCP: Install, restart, Remove, then ApiProbe unconfigured must
 # equal docs/dev/probe/mactcp-unconfigured.out; 7 a locked MacTCP file (Install refuses, nothing changes).
-# MT_LITE=1 runs any of them with the MoofTCP Lite installer (build-mac-lite/, output build-mac-lite/installer-test/).
+# One installer for both variants (docs/dev/DHCP-DESIGN.md section 10): every scenario checks that the checkbox
+# "Lite version (no DHCP)" starts off and leaves it off (the full MoofTCP), except: 5a-lite / 5b-lite tick it
+# (MoofTCP Lite; 5a-lite ends with the Lite MoofDiag, 5b-lite checks the installed file before Remove);
+# 8 switches through the GUI by Install alone (no Remove): full -> Lite -> full -> Lite, checking the file after
+# each and running the matching MoofDiag after the last two (RESULT PASS; the wrong variant prints VARIANT
+# MISMATCH); look: screenshots of the window (box off, then on).
 #   installer-test.sh interrupt <name> <I|R><N> <remove|install>   one interruption case of scenario 4
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
-. "$ROOT/scripts/variant.sh"      # MT_LITE=1: the MoofTCP Lite installer (build-mac-lite/), output there
+[ "${MT_LITE:-0}" = 0 ] || { echo "installer-test.sh: MT_LITE is gone here: the one installer has a Lite checkbox (scenarios 5a-lite, 5b-lite, 8)" >&2; exit 2; }
+BM=build-mac
 OUT="$ROOT/$BM/installer-test"
 APP="$ROOT/$BM/installer/MoofTCP Installer.bin"
 DBG="$ROOT/$BM/installer/Installer Dbg.bin"
@@ -151,18 +157,20 @@ where() {
   fi
   echo "WHERE $1: trio in $2"
 }
-# The MoofTCP file on the image must be the build's: type, creator, Finder flags, and the resource fork
-# (data and map) byte for byte. Header bytes 16..255 of a resource fork are reserved for the system, and
+# The MoofTCP file on the image must be the build's (check_installed <label> [full|lite]: build-mac/ or
+# build-mac-lite/moof/MoofTCP.bin, the file the installer embeds as 'MTCP' 128 / 129): type, creator, Finder
+# flags, and the resource fork (data and map) byte for byte. Header bytes 16..255 of a resource fork are reserved for the system, and
 # System 6 fills them when the fork is first written (observed: the name, Finder info, creation date and
 # fork length of MoofTCP.tmp at that moment); the Resource Manager never reads them, so they are masked.
 check_installed() {
-  local want got
+  local want got ref="$ROOT/build-mac/moof/MoofTCP.bin"
+  [ "${2:-full}" = full ] || ref="$ROOT/build-mac-lite/moof/MoofTCP.bin"
   want="$(python3 -I -c '
 import hashlib, struct, sys
 d = open(sys.argv[1], "rb").read(); dl, rl = struct.unpack(">II", d[83:91]); ro = 128 + ((dl + 127) // 128) * 128
 r = bytearray(d[ro:ro + rl]); r[16:256] = bytes(len(r[16:256]))
 print("type=cdev creator=ztcp flags=0x2000 data=0 rsrc=%d rsrcx=%s" % (rl, hashlib.sha256(bytes(r)).hexdigest()[:16]))
-' "$ROOT/$BM/moof/MoofTCP.bin")"
+' "$ref")"
   got="$(grep '^sys MoofTCP ' "$OUT/$1.txt" | python3 -I -c '
 import re, sys
 l = sys.stdin.read()
@@ -170,8 +178,8 @@ g = lambda k: (re.search(" " + k + "=([^ ]*)", l) or [None, "?"])[1]
 print("type=%s creator=%s flags=%s data=%s rsrc=%s rsrcx=%s" % (g("type"), g("creator"), g("flags"),
       g("data").split("/")[0], g("rsrc").split("/")[0], g("rsrcx")))
 ')"
-  if [ "$got" = "$want" ]; then echo "CHECK $1: MoofTCP installed as built ($got)"
-  else echo "CHECK $1: MoofTCP WRONG: got '$got' want '$want'"; return 1; fi
+  if [ "$got" = "$want" ]; then echo "CHECK $1: MoofTCP (${2:-full}) installed as built ($got)"
+  else echo "CHECK $1: MoofTCP WRONG (want ${2:-full}): got '$got' want '$want'"; return 1; fi
 }
 
 mk_debug_file() {  # MacBinary TEXT file holding SPEC (the debug count)
@@ -203,7 +211,7 @@ set_debug() {  # set_debug <SPEC|none>
 }
 put_app_body() {  # one app in the test folder (the Finder puts it at 238,322)
   local f
-  for f in "MoofTCP Installer" "MoofTCP Lite Installer" "Installer Dbg" "MoofDiag" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
+  for f in "MoofTCP Installer" "MoofTCP Lite Installer" "Installer Dbg" "MoofDiag" "MoofDiag Lite" "MoofDiag.out" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
   hcopy -m "$1" ":MoofTCP Test:"
 }
 put_app() { with_volume put_app_body "$1"; }
@@ -302,11 +310,42 @@ launch() {  # the app in ":MoofTCP Test:" at 238,322; launch any = another app (
   done
   return 1
 }
+# Screen = 1.92 x Mac + (8, 80) (Snow on Xvfb :142). The window (DLOG 128) is {50,16,338,496}: Install / Remove / Quit at Mac y 320,
+# the checkbox "Lite version (no DHCP)" at Mac {128,30,146,316} (its box at the left end).
+# box_state: on | off, read from the box's inside in a screenshot (the X of a ticked box)
+box_state() {
+  local f="$OUT/.box.png"
+  scrot -o "$f" >/dev/null 2>&1 || { echo none; return; }
+  python3 -W ignore - "$f" "$BOX" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("L")
+x0, y0, x1, y1 = (int(v) for v in sys.argv[2].split(","))
+px = list(im.crop((x0, y0, x1, y1)).getdata())
+print("on" if sum(1 for p in px if p < 100) / len(px) > 0.03 else "off")   # the X: about 7 % of the inside
+PY
+}
+# the inside of the box on the screen (without its frame): x0,y0,x1,y1 (calibrated on a screenshot, scenario look)
+BOX="${MT_BOX:-73,335,89,351}"
+BOX_CLICK_X=120; BOX_CLICK_Y=333     # on the box's title: toggles it
+# choose <full|lite>: set the checkbox (click it only when it shows the other state), then check it
+choose() {
+  local want=off st
+  [ "$1" = lite ] && want=on
+  st="$(box_state)"
+  if [ "$st" != "$want" ]; then click "$BOX_CLICK_X" "$BOX_CLICK_Y"; sleep 1; st="$(box_state)"; fi
+  [ "$st" = "$want" ] || { echo "choose $1: the box is '$st'"; return 1; }
+  echo "box: $1 ($st)"
+}
+expect_box() {  # expect_box <on|off>: the box as the app set it at launch
+  local st; st="$(box_state)"
+  if [ "$st" = "$1" ]; then echo "box at launch: $st (as expected)"; else echo "box at launch: '$st', expected $1"; return 1; fi
+}
 # press <install|remove> <shot-name> <restart|notnow|none>: click the button, wait, screenshot; answer the alert
 press() {
   local x
-  case "$1" in install) x=202;; remove) x=413;; *) die "press $1";; esac
-  click "$x" 587
+  case "$1" in install) x=154;; remove) x=374;; *) die "press $1";; esac
+  click "$x" 699
   sleep 8
   local st; st="$(screen_state)"
   shot "$2"
@@ -321,7 +360,7 @@ press() {
   esac
   echo "pressed $1 -> $2.png"
 }
-quit_app() { click 797 587; sleep 6; wait_state finder 20; }
+quit_app() { click 870 699; sleep 6; wait_state finder 20; }
 
 result() { if [ "$1" -eq 0 ]; then echo "SCENARIO $2: PASS"; else echo "SCENARIO $2: FAIL"; fi; return "$1"; }
 
@@ -329,6 +368,8 @@ scenario1() {  # golden: Install then Remove; byte-identical trio
   local rc=0
   cmd_prep golden
   boot; launch || die "launch failed"
+  expect_box off || rc=1                                    # nothing installed: full is the default
+  shot s1-window
   press install s1-install notnow || rc=1
   quit_app || rc=1
   stop; cmd_snap s1-installed
@@ -441,36 +482,45 @@ scenario4() {
   interrupt1 s4-r4 R4 remove || rc=1        # all three restored (MacTCP last), manifest not yet deleted
   result $rc 4
 }
-scenario5a() {  # boot test with MoofTCP configured (the prefs the user kept)
-  local rc=0 i
+scenario5a() {  # boot test with MoofTCP configured (the prefs the user kept); $1 = full | lite
+  local rc=0 i v="${1:-full}" t=s5a
+  [ "$v" = full ] || t=s5al
   cmd_prep golden --prefs
   boot; launch || die "launch failed"
-  press install s5a-install restart || rc=1
+  expect_box off || rc=1
+  choose "$v" || rc=1
+  press install $t-install restart || rc=1
   # the restart: catch the parade icon (bottom left) while the INITs run
-  for i in $(seq 1 120); do scrot -o "$OUT/s5a-boot-$(printf %03d "$i").png" >/dev/null 2>&1; sleep 0.25; done
-  stop; cmd_snap s5a-installed >/dev/null
-  check_installed s5a-installed || rc=1
-  python3 -W ignore - "$OUT" <<'PY' || rc=1
+  for i in $(seq 1 120); do scrot -o "$OUT/$t-boot-$(printf %03d "$i").png" >/dev/null 2>&1; sleep 0.25; done
+  stop; cmd_snap $t-installed >/dev/null
+  check_installed $t-installed "$v" || rc=1
+  python3 -W ignore - "$OUT" "$t" <<'PY' || rc=1
 import glob, sys
 from PIL import Image
 # the parade: a 32x32 icon at Mac (8, 342-40) = screen about (23..85, 657..719) on the grey desktop
 # the icon's white face: about 70% white pixels in its box; the grey desktop dither and Snow's reset
 # screen have under 10%
 best = None
-for f in sorted(glob.glob(sys.argv[1] + "/s5a-boot-*.png")):
-    im = Image.open(f).convert("L").crop((32, 668, 75, 700))
-    px = list(im.getdata())
+for f in sorted(glob.glob(sys.argv[1] + "/" + sys.argv[2] + "-boot-*.png")):
+    full = Image.open(f).convert("L")
+    above = list(full.crop((32, 600, 75, 640)).getdata())
+    if sum(1 for p in above if p > 200) / len(above) > 0.8:
+        continue                                 # the installer window still covers the corner (it reaches Mac y 338)
+    px = list(full.crop((32, 668, 75, 700)).getdata())
     w = sum(1 for p in px if p > 200) / len(px)
     if best is None or w > best[0]:
         best = (w, f)
+if best is None:
+    print("parade: no frame without the installer window"); sys.exit(1)
 print("parade frame: %s (%.2f white in the icon box)" % (best[1], best[0]))
 sys.exit(0 if best[0] > 0.5 else 1)
 PY
-  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; hdel ":MoofTCP Test:MoofTCP Lite Installer" 2>/dev/null || true; }
+  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; }
   with_volume put_app_none
-  scripts/moofdiag-run.sh --installed || rc=1
-  flynn_echo s5a || rc=1
-  result $rc 5a
+  if [ "$v" = lite ]; then MT_LITE=1 scripts/moofdiag-run.sh --installed || rc=1   # Lite's MoofDiag: VARIANT MISMATCH on a full driver
+  else MT_LITE=0 scripts/moofdiag-run.sh --installed || rc=1; fi
+  flynn_echo $t || rc=1
+  result $rc "5a${1:+ ($v)}"
 }
 # Flynn to scripts/testnet.py's banner + echo port 17023 (ours, or another project's: shared, never killed)
 flynn_echo() {
@@ -501,30 +551,104 @@ flynn_echo() {
   fi
   return $rc
 }
-scenario5b() {  # factory MacTCP: Install, restart (MoofTCP unconfigured), Remove, then real MacTCP's probe
-  local rc=0
+scenario5b() {  # factory MacTCP: Install, restart (MoofTCP unconfigured), Remove, then real MacTCP's probe; $1 = full | lite
+  local rc=0 v="${1:-full}" t=s5b
+  [ "$v" = full ] || t=s5bl
   cmd_prep factory
   boot; launch || die "launch failed"
-  press install s5b-install restart || rc=1
+  expect_box off || rc=1
+  choose "$v" || rc=1
+  press install $t-install restart || rc=1
   sleep 40
-  shot s5b-moof-booted
+  shot $t-moof-booted
+  if [ "$v" = lite ]; then                 # the file written is the Lite one (Snow stopped to read the image)
+    stop; cmd_snap $t-installed >/dev/null
+    check_installed $t-installed lite || rc=1
+    boot
+  fi
   launch || die "launch failed"
-  press remove s5b-remove notnow || rc=1
+  expect_box "$([ "$v" = lite ] && echo on || echo off)" || rc=1   # the box follows what is installed now
+  shot $t-relaunch
+  press remove $t-remove notnow || rc=1
   quit_app || rc=1
-  stop; cmd_snap s5b-after >/dev/null
-  where s5b-after ':System Folder:' || rc=1
+  stop; cmd_snap $t-after >/dev/null
+  where $t-after ':System Folder:' || rc=1
   # the factory image has no "MacTCP DNR"/"MacTCP Prep": MacTCP makes them at boot 1, before Install parks them
-  cmd_compare before s5b-after attrs "MacTCP" || rc=1
-  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; hdel ":MoofTCP Test:MoofTCP Lite Installer" 2>/dev/null || true; }
+  cmd_compare before $t-after attrs "MacTCP" || rc=1
+  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; }
   with_volume put_app_none
-  scripts/probe-run.sh --unconfigured --keep-disk installer-5b || rc=1
-  if diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-5b.out" >/dev/null; then
+  MT_LITE=0 scripts/probe-run.sh --unconfigured --keep-disk installer-$t || rc=1
+  if diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-$t.out" >/dev/null; then
     echo "probe: identical to docs/dev/probe/mactcp-unconfigured.out"
   else
-    diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-5b.out" | head -20
+    diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-$t.out" | head -20
     rc=1
   fi
-  result $rc 5b
+  result $rc "5b${1:+ ($v)}"
+}
+
+# Variant switching through the GUI by Install alone (docs/dev/DHCP-DESIGN.md section 10): full, then Lite over
+# it (no Remove), restart, Lite -> full, restart, full -> Lite; the installed file is checked after every switch
+# and the matching MoofDiag must PASS after the last two (each runs on the switched driver).
+scenario8() {
+  local rc=0
+  cmd_prep golden --prefs
+  boot; launch || die "launch failed"
+  expect_box off || rc=1
+  press install s8-install-full notnow || rc=1
+  choose lite || rc=1
+  shot s8-box-on
+  press install s8-switch-lite notnow || rc=1               # same boot, MoofTCP (full) not loaded yet
+  quit_app || rc=1
+  stop; cmd_snap s8-lite1 >/dev/null
+  check_installed s8-lite1 lite || rc=1
+  where s8-lite1 ':System Folder:MacTCP \(Disabled\):' || rc=1
+  grep -q '^manifest ' "$OUT/s8-lite1.txt" || rc=1
+  boot; launch || die "launch failed"                       # MoofTCP Lite running
+  expect_box on || rc=1                                     # Lite is installed: the box starts ticked
+  choose full || rc=1
+  press install s8-switch-full notnow || rc=1
+  quit_app || rc=1
+  stop; cmd_snap s8-full >/dev/null
+  check_installed s8-full full || rc=1
+  with_volume put_app_none8
+  MT_LITE=0 scripts/moofdiag-run.sh --installed || rc=1     # the full driver after Lite -> full
+  put_app "$APP"
+  boot; launch || die "launch failed"
+  expect_box off || rc=1
+  choose lite || rc=1
+  press install s8-switch-lite2 notnow || rc=1
+  quit_app || rc=1
+  stop; cmd_snap s8-lite2 >/dev/null
+  check_installed s8-lite2 lite || rc=1
+  with_volume put_app_none8
+  MT_LITE=1 scripts/moofdiag-run.sh --installed || rc=1     # the Lite driver after full -> Lite
+  put_app "$APP"
+  boot; launch || die "launch failed"
+  expect_box on || rc=1
+  press remove s8-remove notnow || rc=1                     # Remove is the same for both
+  quit_app || rc=1
+  stop; cmd_snap s8-after >/dev/null
+  where s8-after ':System Folder:' || rc=1
+  cmd_compare before s8-after attrs || rc=1
+  grep -q '^sys MoofTCP type=' "$OUT/s8-after.txt" && rc=1        # ("MoofTCP Prefs" stays)
+  grep -q '^disabled-folder absent' "$OUT/s8-after.txt" || rc=1
+  result $rc 8
+}
+put_app_none8() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; }
+
+# screenshots of the window for the eye (layout, clipping): the box off, then on
+scenario_look() {
+  cmd_prep golden
+  boot; launch || die "launch failed"
+  shot look-off
+  click "$BOX_CLICK_X" "$BOX_CLICK_Y"; sleep 1
+  shot look-on
+  echo "box after one click: $(box_state)"
+  click "$BOX_CLICK_X" "$BOX_CLICK_Y"; sleep 1
+  echo "box after two clicks: $(box_state)"
+  quit_app || true
+  echo "look: $OUT/look-off.png $OUT/look-on.png"
 }
 
 scenario7() {  # a locked MacTCP file: Install refuses with the planner's message and changes nothing
@@ -549,10 +673,11 @@ case "${1:-}" in
   compare) [ $# -ge 3 ] && [ $# -le 5 ] || die "compare <a> <b> [full|nofolder|attrs] [name]"; shift; cmd_compare "$@";;
   prep) shift; cmd_prep "$@";;
   scenario)
-    [ $# -eq 2 ] || die "scenario <1|2|3|4|5a|5b>"
+    [ $# -eq 2 ] || die "scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|look>"
     trap stop EXIT
     case "$2" in 1) scenario1;; 2) scenario2;; 3) scenario3;; 4) scenario4;; 5a) scenario5a;; 5b) scenario5b;; 7) scenario7;;
+      5a-lite) scenario5a lite;; 5b-lite) scenario5b lite;; 8) scenario8;; look) scenario_look;;
       *) die "unknown scenario $2";; esac;;
   interrupt) [ $# -eq 4 ] || die "interrupt <name> <I|R><N> <remove|install>"; trap stop EXIT; interrupt1 "$2" "$3" "$4";;
-  *) sed -n '2,24p' "$0"; exit 2;;
+  *) sed -n '2,30p' "$0"; exit 2;;
 esac

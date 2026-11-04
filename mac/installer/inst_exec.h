@@ -115,7 +115,22 @@ typedef struct {
     int man_retried;         /* Remove: the manifest was refused and the plan was made with man = NULL */
     long mutations;          /* file system changes attempted (create, setinfo, write, delete, rename, move, mkdir) */
     long committed;          /* ... of which the call succeeded (0 = the disk is unchanged) */
+    /* variants (Install and inst_do_query): the bundle's, and what the snapshot found installed */
+    int variant;             /* INST_VAR_* of the bundled file (Install) */
+    uint32_t vers;           /* packed 'vers' 1 of the bundled file (Install) */
+    int had;                 /* the System Folder held: 0 no MoofTCP, 1 a complete one, 2 an incomplete
+                              * one (MTMP/mtin, an interrupted write) or only a leftover temp / manifest */
+    uint32_t old_vers;       /* had == 1: its packed 'vers' 1 (0 = unreadable) */
+    int old_variant;         /* had == 1: its INST_VAR_* */
+    char old_vstr[16];       /* had == 1: its short version string ("" = unreadable) */
 } InstResult;
+
+/* What the 'vers' 1 of a MoofTCP file says. */
+typedef struct {
+    uint32_t packed;         /* first 4 bytes, big-endian; 0 = no 'vers' 1 or damaged */
+    int variant;             /* INST_VAR_LITE when the long string starts with "MoofTCP Lite", else FULL */
+    char vstr[16];           /* the short string, NUL-terminated (cut at 15 characters) */
+} InstVers;
 
 typedef struct {
     const InstFs *fs;
@@ -134,9 +149,18 @@ int inst_do_remove(const InstFs *fs, long stop_after, InstResult *res);
 
 /* The packed 'vers' 1 (first 4 bytes, big-endian) of a resource fork in memory; 0 = none/damaged. */
 uint32_t inst_fork_vers(const uint8_t *fork, long len);
+/* The same with the variant and the short string; returns v->packed. A 'vers' 1 too short to hold the
+ * strings still gives its packed version, variant FULL and an empty string. */
+uint32_t inst_fork_vinfo(const uint8_t *fork, long len, InstVers *v);
+
+/* Snapshot only (no change, no plan): fills res->had / old_* / prefs. 0, or INST_X_SNAPSHOT. */
+int inst_do_query(const InstFs *fs, InstResult *res);
+/* The line for the window after inst_do_query ("Installed now: MoofTCP Lite 1.0rc3." ...), <= cap-1. */
+void inst_query_message(const InstResult *r, char *buf, int cap);
 
 /* The user-visible text for a result (C string, at most cap-1 bytes, cap <= 256 for a Str255).
- * `vers` is the version string of the bundled MoofTCP (e.g. "1.0rc1"). Returns 1 when the run
+ * `vers` is the version string of the bundled MoofTCP (e.g. "1.0rc1"); the variant's name comes from
+ * r->variant ("MoofTCP" / "MoofTCP Lite"). Returns 1 when the run
  * changed the disk and the user should restart (the Restart dialog follows), else 0. */
 int inst_message(const InstResult *r, const char *vers, char *buf, int cap);
 

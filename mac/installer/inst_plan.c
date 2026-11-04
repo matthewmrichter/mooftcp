@@ -170,11 +170,12 @@ bad:
 }
 
 int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled, int ndisabled,
-                      uint32_t moof_vers, const InstManifest *prev, InstOp *ops, int cap, InstMsg *msg,
-                      char *blocker, InstManifest *man_out) {
-    int mv[3], nmv = 0, t, i, j, mi, mani_any, write = 0, upgrade = 0, n = 0, have_t[3] = { 0, 0, 0 };
+                      uint32_t moof_vers, int moof_variant, const InstManifest *prev, InstOp *ops, int cap,
+                      InstMsg *msg, char *blocker, InstManifest *man_out) {
+    int mv[3], nmv = 0, t, i, j, mi, mani_any, write = 0, upgrade = 0, sw = 0, n = 0, have_t[3] = { 0, 0, 0 };
     int need, folder_exists, rc;
-    if (!msg || !ops || !man_out || nsys < 0 || (nsys && !sys) || (ndisabled > 0 && !disabled))
+    if (!msg || !ops || !man_out || nsys < 0 || (nsys && !sys) || (ndisabled > 0 && !disabled) ||
+        (moof_variant != INST_VAR_FULL && moof_variant != INST_VAR_LITE))
         return INST_E_ARG;
     if (blocker) blocker[0] = 0;
     memset(man_out, 0, sizeof *man_out);
@@ -191,6 +192,7 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
         if (moof_incomplete(&sys[mi])) write = 1;          /* a crash between rename and retype: redo */
         else if (!moof_ok(&sys[mi])) { setblock(blocker, sys[mi].name); *msg = INST_BLOCKED_COLLISION; return 0; }
         else if (sys[mi].vers < moof_vers) { write = 1; upgrade = 1; }
+        else if (sys[mi].vers == moof_vers && sys[mi].variant != moof_variant) { write = 1; sw = 1; }
     } else {
         write = 1;
     }
@@ -204,6 +206,9 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
     }
     j = find(sys, nsys, INST_MOOF_TMP);         /* always: a loadable or foreign MoofTCP.tmp must not hide behind "up to date" */
     if (j >= 0 && !tmp_ours(&sys[j])) { setblock(blocker, sys[j].name); *msg = INST_BLOCKED_COLLISION; return 0; }
+    /* a temp of ours beside a current MoofTCP: an interrupted write (e.g. a variant switch, then Install of the
+     * variant still there). Rewrite MoofTCP so step 2 deletes the temp: a completed Install never leaves one. */
+    if (j >= 0 && mi >= 0 && !sys[j].locked) write = 1;   /* (a locked one is left alone, as before) */
     if (write && j >= 0 && sys[j].locked) {     /* step 2 of the write protocol must be able to run (before parking) */
         setblock(blocker, sys[j].name); *msg = INST_BLOCKED_LOCKED; return 0;
     }
@@ -263,7 +268,7 @@ int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled,
                   mi >= 0 ? sys[mi].name : INST_MOOF_NAME, NULL);
         if (rc < 0) return rc;
     }
-    *msg = upgrade ? INST_UPGRADED : nmv > 0 ? INST_INSTALLED_PARKED_MACTCP : INST_INSTALLED_NO_MACTCP;
+    *msg = upgrade ? INST_UPGRADED : sw ? INST_SWITCHED : nmv > 0 ? INST_INSTALLED_PARKED_MACTCP : INST_INSTALLED_NO_MACTCP;
     return n;
 }
 

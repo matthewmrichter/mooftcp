@@ -75,6 +75,8 @@ static void put_manifest(SimF *f, const InstManifest *man, const char *name) {
     strcpy(f->e.name, name); f->e.type = TEXT; f->e.creator = ZTCP;
     f->clen = inst_manifest_encode(man, f->content, sizeof f->content);
 }
+/* the variant of the bundle being installed (INST_VAR_*): do_install passes it, WRITE_MOOF writes it */
+static int g_var;
 /* applies one op; returns 0 on success, nonzero when the op is not applicable (a planner bug) */
 static int apply1(Sim *s, const InstOp *o, const InstManifest *man) {
     char a[3][64], b[3][64];
@@ -111,7 +113,7 @@ static int apply1(Sim *s, const InstOp *o, const InstManifest *man) {
         i = sfind(s, b[0], b[1]);
         if (i >= 0 && (s->f[i].e.locked || s->f[i].e.is_dir)) return 1;
         if (i < 0) { add(s, b[0], b[1], 0, 0, 0); i = s->n - 1; }
-        s->f[i].e.type = CDEV; s->f[i].e.creator = ZTCP; s->f[i].e.vers = 2;
+        s->f[i].e.type = CDEV; s->f[i].e.creator = ZTCP; s->f[i].e.vers = 2; s->f[i].e.variant = (uint8_t)g_var;
         return 0;
     case INST_DELETE_MOOF:
     case INST_DELETE_MANIFEST:
@@ -195,7 +197,7 @@ static int do_install(const Sim *s, uint32_t vers, InstOp *ops, InstMsg *msg, In
     InstManifest prev;
     int ns, nd, st = read_man(s, &prev);
     snap(s, sys, &ns, dis, &nd);
-    return inst_plan_install(sys, ns, dis, nd, vers, st == 1 ? &prev : NULL, ops, INST_OPS_MAX, msg, blk, man);
+    return inst_plan_install(sys, ns, dis, nd, vers, g_var, st == 1 ? &prev : NULL, ops, INST_OPS_MAX, msg, blk, man);
 }
 /* remove: reads the manifest like the executor; an untrusted manifest is retried as unreadable */
 static int do_remove(const Sim *s, InstOp *ops, InstMsg *msg) {
@@ -615,7 +617,7 @@ static void manifest_dedupe_and_full(void) {
     {
         InstEntry sys[48], dis[48]; int ns, nd;
         snap(&s, sys, &ns, dis, &nd);
-        n = inst_plan_install(sys, ns, dis, nd, 2, &prev, ops, INST_OPS_MAX, &m, blk, &man);
+        n = inst_plan_install(sys, ns, dis, nd, 2, INST_VAR_FULL, &prev, ops, INST_OPS_MAX, &m, blk, &man);
     }
     T_CHECK(n > 0);
     T_EQ(man.n, 2);                                  /* MacTCP DNR once + the new MacTCP */
@@ -676,13 +678,13 @@ static void manifest_decode_strict(void) {
 static void arg_and_cap_errors(void) {
     InstEntry e[2]; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man;
     memset(e, 0, sizeof e);
-    T_EQ(inst_plan_install(NULL, 1, NULL, -1, 2, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
-    T_EQ(inst_plan_install(e, -1, NULL, -1, 2, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
-    T_EQ(inst_plan_install(NULL, 0, NULL, 3, 2, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
+    T_EQ(inst_plan_install(NULL, 1, NULL, -1, 2, INST_VAR_FULL, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
+    T_EQ(inst_plan_install(e, -1, NULL, -1, 2, INST_VAR_FULL, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
+    T_EQ(inst_plan_install(NULL, 0, NULL, 3, 2, INST_VAR_FULL, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
     T_EQ(inst_plan_remove(NULL, 1, NULL, -1, NULL, ops, INST_OPS_MAX, &m, NULL), INST_E_ARG);
-    T_EQ(inst_plan_install(NULL, 0, NULL, -1, 2, NULL, ops, 0, &m, NULL, &man), INST_E_CAP);   /* needs 1 op */
+    T_EQ(inst_plan_install(NULL, 0, NULL, -1, 2, INST_VAR_FULL, NULL, ops, 0, &m, NULL, &man), INST_E_CAP);   /* needs 1 op */
     memset(e[0].name, 'x', sizeof e[0].name);        /* no NUL: refused, never read past the array */
-    T_EQ(inst_plan_install(e, 1, NULL, -1, 2, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
+    T_EQ(inst_plan_install(e, 1, NULL, -1, 2, INST_VAR_FULL, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
     T_EQ(inst_plan_remove(e, 1, NULL, -1, NULL, ops, INST_OPS_MAX, &m, NULL), INST_E_ARG);
     T_EQ(inst_plan_remove(NULL, 0, e, 1, NULL, ops, INST_OPS_MAX, &m, NULL), INST_E_ARG);
     {
@@ -690,7 +692,9 @@ static void arg_and_cap_errors(void) {
         base(&s); trio3(&s);
         T_EQ(do_install(&s, 2, ops, &m, &man), 6);
         snap(&s, sys, &ns, dis, &nd);
-        T_EQ(inst_plan_install(sys, ns, dis, nd, 2, NULL, ops, 5, &m, NULL, &man), INST_E_CAP);
+        T_EQ(inst_plan_install(sys, ns, dis, nd, 2, INST_VAR_FULL, NULL, ops, 5, &m, NULL, &man), INST_E_CAP);
+        T_EQ(inst_plan_install(sys, ns, dis, nd, 2, 2, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);   /* no such variant */
+        T_EQ(inst_plan_install(sys, ns, dis, nd, 2, -1, NULL, ops, INST_OPS_MAX, &m, NULL, &man), INST_E_ARG);
         base(&s); oldmoof(&s, 2); mkdis(&s); adddis(&s, "MacTCP", CDEV, ZTCP); addman(&s, "MacTCP", 1);
         snap(&s, sys, &ns, dis, &nd);
         T_EQ(inst_plan_remove(sys, ns, dis, nd, NULL, ops, 2, &m, NULL), INST_E_CAP);
@@ -863,7 +867,10 @@ static void gen(Sim *s) {
     if (rnd(5) < 4) addsys(s, "MacTCP", rnd(8) ? CDEV : TEXT, ZTCP);
     if (rnd(2)) addsys(s, "MacTCP DNR", CDEV, MTCP);
     if (rnd(2)) addsys(s, "MacTCP Prep", MTPP, MTCP);
-    if (rnd(3) == 0) oldmoof(s, (uint32_t)rnd(3));              /* 0,1: older; 2: current */
+    if (rnd(3) == 0) {
+        oldmoof(s, (uint32_t)rnd(3));                           /* 0,1: older; 2: current */
+        s->f[s->n - 1].e.variant = (uint8_t)rnd(2);             /* full or Lite: equal vers + other variant = switch */
+    }
     if (rnd(2)) addsys(s, INST_PREFS_NAME, PREF, ZTCP);
     if (rnd(2)) {
         mkdis(s);                                               /* often empty: a user's own empty folder */
@@ -901,6 +908,7 @@ static int recover(const Sim *orig, const Sim *p, const char *tag, int it, int k
             int mf = sfind(&q, SF, INST_MOOF_NAME);
             T_CHECK(providers(&q) == 1);
             T_CHECK(mf >= 0 && q.f[mf].e.type == CDEV && q.f[mf].e.creator == ZTCP);
+            T_CHECK(mf >= 0 && q.f[mf].e.vers == 2 && q.f[mf].e.variant == g_var);   /* the variant asked for */
             T_CHECK(sfind(&q, SF, INST_MOOF_TMP) < 0 && sfind(&q, INST_DISABLED, INST_MANIFEST_TMP) < 0);
         }
         rn = do_remove(&q, r, &m2);
@@ -919,6 +927,7 @@ static void prop_install_remove(void) {
     for (it = 0; it < 3000; it++) {
         Sim s, orig; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n, k;
         gen(&s); orig = s;
+        g_var = (int)rnd(2);
         n = do_install(&s, 2, ops, &m, &man);
         T_CHECK(n >= 0);
         if (m == INST_BLOCKED_COLLISION || m == INST_BLOCKED_LOCKED) { T_EQ(n, 0); T_CHECK(same(&orig, &s, 0)); blocked++; continue; }
@@ -952,6 +961,7 @@ static void prop_install_prefixes(void) {
     for (it = 0; it < 1500; it++) {
         Sim s, orig; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n;
         gen(&s); orig = s;
+        g_var = (int)rnd(2);
         n = do_install(&s, 2, ops, &m, &man);
         if (n <= 0) continue;
         for (k = 0; k <= n; k++) {
@@ -959,6 +969,9 @@ static void prop_install_prefixes(void) {
             T_EQ(apply(&p, ops, k, &man), 0);
             T_CHECK(providers(&p) <= (providers(&orig) > 1 ? providers(&orig) : 1));   /* never MacTCP + MoofTCP because of us */
             checked += recover(&orig, &p, "prefix", it, k);
+            g_var = !g_var;                          /* the user picks the other variant after the crash */
+            checked += recover(&orig, &p, "prefix-other", it, k);
+            g_var = !g_var;
             if (k < n && (ops[k].kind == INST_WRITE_MANIFEST || ops[k].kind == INST_WRITE_MOOF)) {
                 for (v = 0; v < 5; v++) {
                     Sim h = p;
@@ -981,6 +994,7 @@ static void prop_remove_prefixes(void) {
     for (it = 0; it < 1500; it++) {
         Sim s0, orig; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n;
         gen(&s0); orig = s0;
+        g_var = (int)rnd(2);
         n = do_install(&s0, 2, ops, &m, &man);
         if (n <= 0 || m == INST_BLOCKED_COLLISION || m == INST_BLOCKED_LOCKED) continue;
         T_EQ(apply(&s0, ops, n, &man), 0);
@@ -1022,6 +1036,89 @@ static void prop_remove_prefixes(void) {
     T_CHECK(checked > 3000);
 }
 
+/* One installer, two variants (docs/dev/DHCP-DESIGN.md section 10): Install of the same version of the
+ * other variant replaces MoofTCP (INST_SWITCHED, one WRITE_MOOF) instead of saying "already installed";
+ * a newer one of either variant is never replaced; Remove is the same for both. Then the crash property
+ * for the switch: every prefix and half-done write of the switch recovers by Remove (the original comes
+ * back), by Install of the variant asked for and by Install of the one that was there. */
+static void variant_switch(void) {
+    Sim s, orig, inst; InstOp ops[INST_OPS_MAX]; InstMsg m; InstManifest man; int n, it, k, v, a, checked = 0, partials = 0, mf;
+    base(&orig); trio3(&orig); addsys(&orig, INST_PREFS_NAME, PREF, ZTCP);
+    s = orig; g_var = INST_VAR_FULL;
+    n = do_install(&s, 2, ops, &m, &man);
+    T_EQ(n, 6); T_EQ(m, INST_INSTALLED_PARKED_MACTCP);
+    T_EQ(apply(&s, ops, n, &man), 0);
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_ALREADY_INSTALLED);
+    g_var = INST_VAR_LITE;
+    n = do_install(&s, 2, ops, &m, &man);
+    T_EQ(n, 1); T_EQ(m, INST_SWITCHED); T_EQ(ops[0].kind, INST_WRITE_MOOF);
+    T_CHECK(!strcmp(ops[0].to, ":System Folder:MoofTCP")); T_EQ(man.n, 0);       /* the manifest is not rewritten */
+    T_EQ(apply(&s, ops, n, &man), 0);
+    mf = sfind(&s, SF, INST_MOOF_NAME);
+    T_CHECK(mf >= 0 && s.f[mf].e.variant == INST_VAR_LITE); T_EQ(providers(&s), 1);
+    T_CHECK(sfind(&s, INST_DISABLED, "MacTCP") >= 0 && sfind(&s, SF, INST_PREFS_NAME) >= 0);   /* MacTCP stays parked, prefs kept */
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_ALREADY_INSTALLED);
+    g_var = INST_VAR_FULL;                           /* and back */
+    n = do_install(&s, 2, ops, &m, &man);
+    T_EQ(n, 1); T_EQ(m, INST_SWITCHED);
+    T_EQ(apply(&s, ops, n, &man), 0);
+    T_EQ(s.f[sfind(&s, SF, INST_MOOF_NAME)].e.variant, INST_VAR_FULL);
+    n = do_remove(&s, ops, &m);
+    T_EQ(m, INST_REMOVED_RESTORED); T_EQ(apply(&s, ops, n, NULL), 0);
+    T_CHECK(same(&orig, &s, 0));
+    /* newer installed: never replaced, whichever variant (no downgrade) */
+    for (a = 0; a < 2; a++) {
+        base(&s); oldmoof(&s, 3); s.f[s.n - 1].e.variant = (uint8_t)a;
+        g_var = !a;
+        T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_ALREADY_INSTALLED);
+        g_var = a;
+        T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_ALREADY_INSTALLED);
+    }
+    /* older of the other variant: an upgrade (UPGRADED takes precedence) */
+    base(&s); oldmoof(&s, 1); s.f[s.n - 1].e.variant = INST_VAR_LITE; g_var = INST_VAR_FULL;
+    T_EQ(do_install(&s, 2, ops, &m, &man), 1); T_EQ(m, INST_UPGRADED);
+    /* a locked MoofTCP of the other variant: blocked, nothing done */
+    base(&s); oldmoof(&s, 2); s.f[s.n - 1].e.variant = INST_VAR_FULL; s.f[s.n - 1].e.locked = 1; g_var = INST_VAR_LITE;
+    T_EQ(do_install(&s, 2, ops, &m, &man), 0); T_EQ(m, INST_BLOCKED_LOCKED); T_CHECK(!strcmp(blk, "MoofTCP"));
+    /* the switch while MacTCP is back in the System Folder (copied in by the user): parked first, MoofTCP last */
+    base(&s); trio3(&s); oldmoof(&s, 2); s.f[s.n - 1].e.variant = INST_VAR_LITE; g_var = INST_VAR_FULL;
+    n = do_install(&s, 2, ops, &m, &man);
+    T_EQ(n, 6); T_EQ(m, INST_SWITCHED); T_EQ(ops[n - 1].kind, INST_WRITE_MOOF);
+    /* property */
+    rng_state = 9090;
+    for (it = 0; it < 1200; it++) {
+        gen(&s); orig = s;
+        a = (int)rnd(2); g_var = a;
+        n = do_install(&s, 2, ops, &m, &man);
+        if (m == INST_BLOCKED_COLLISION || m == INST_BLOCKED_LOCKED) continue;
+        T_EQ(apply(&s, ops, n, &man), 0);
+        inst = s;
+        g_var = !a;
+        n = do_install(&inst, 2, ops, &m, &man);
+        if (m == INST_BLOCKED_LOCKED) continue;      /* a locked MoofTCP the first run did not need to replace */
+        T_EQ(n, 1); T_EQ(m, INST_SWITCHED);
+        for (k = 0; k <= n; k++) {
+            Sim p = s;
+            T_EQ(apply(&p, ops, k, &man), 0);
+            T_CHECK(providers(&p) <= 1);
+            g_var = !a; checked += recover(&orig, &p, "switch", it, k);
+            g_var = a;  checked += recover(&orig, &p, "switch-back", it, k);
+            if (k < n) {
+                for (v = 0; v < 4; v++) {
+                    Sim h = p;
+                    partial(&h, &ops[k], &man, v);
+                    T_CHECK(providers(&h) <= 1);
+                    g_var = !a; checked += recover(&orig, &h, "switch-half", it, k * 10 + v);
+                    g_var = a;  checked += recover(&orig, &h, "switch-back-half", it, k * 10 + v);
+                    partials++;
+                }
+            }
+        }
+    }
+    T_CHECK(checked > 4000);
+    T_CHECK(partials > 1000);
+}
+
 T_MAIN(install_trio, install_mactcp_only, install_none_twice, upgrade_keeps_prefs,
        disabled_exists_unrelated, collisions_block_install, locks_block, not_cdev_ztcp_untouched,
        case_insensitive, remove_with_manifest, remove_fallback_unreadable, remove_nothing_and_temps,
@@ -1030,4 +1127,4 @@ T_MAIN(install_trio, install_mactcp_only, install_none_twice, upgrade_keeps_pref
        manifest_codec, manifest_decode_strict, arg_and_cap_errors, path_canary, prop_install_remove,
        incomplete_and_temp_order, foreign_objects, zero_info_temps, loadable_temp_is_foreign,
        incomplete_any_version_is_rewritten, install_prechecks_before_parking, prop_install_prefixes,
-       prop_remove_prefixes)
+       prop_remove_prefixes, variant_switch)

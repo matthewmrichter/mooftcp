@@ -133,13 +133,21 @@
 #define INST_FCC(a, b, c, d) (((uint32_t)(uint8_t)(a) << 24) | ((uint32_t)(uint8_t)(b) << 16) | \
                               ((uint32_t)(uint8_t)(c) << 8) | (uint32_t)(uint8_t)(d))
 
+/* Variants of the MoofTCP file (docs/dev/RELEASE.md "Variants"): the full build (DHCP client) and
+ * MoofTCP Lite (compile option MT_NO_DHCP). One installer carries both and installs the one chosen.
+ * The variant of a file is read from the long version string of its 'vers' 1: "MoofTCP Lite ..." =
+ * Lite, anything else (every MoofTCP before Lite included) = full. */
+#define INST_VAR_FULL 0
+#define INST_VAR_LITE 1
+
 /* One directory entry of a snapshot. `vers` is the packed version of the file's 'vers' 1 resource
- * (0 = unknown or none); it is only read for the MoofTCP file. */
+ * (0 = unknown or none) and `variant` its INST_VAR_*; both are only read for the MoofTCP file. */
 typedef struct {
     char name[32];                /* NUL-terminated, <= 31 characters */
     uint32_t type, creator;
     uint8_t locked, is_dir;
     uint32_t vers;
+    uint8_t variant;
 } InstEntry;
 
 typedef enum {
@@ -158,7 +166,9 @@ typedef enum {
     INST_REMOVED_RESTORED,        /* remove: MoofTCP gone, at least one parked file restored */
     INST_REMOVED_NO_MACTCP,       /* remove: MoofTCP gone, nothing to restore */
     INST_BLOCKED_LOCKED,          /* a file that must move, be replaced or deleted is locked: 0 ops */
-    INST_BLOCKED_COLLISION        /* a same-named file is in the way (see below): 0 ops */
+    INST_BLOCKED_COLLISION,       /* a same-named file is in the way (see below): 0 ops */
+    INST_SWITCHED                 /* install: the same version of the OTHER variant was replaced (after UPGRADED,
+                                   * before PARKED in precedence) */
 } InstMsg;
 /* COLLISION, install: a trio name already exists inside 'MacTCP (Disabled)' (it could be anything;
  * with the file also in the System Folder it is not ours), 'MacTCP (Disabled)' needed but a plain
@@ -191,6 +201,11 @@ int inst_manifest_decode(const char *text, size_t len, InstManifest *m);
  *   moof_vers            packed 'vers' of the MoofTCP file being installed; an installed MoofTCP
  *                        with a smaller vers (including 0 = unknown) is replaced, an equal or
  *                        newer one is left alone (no downgrade)
+ *   moof_variant         INST_VAR_* of the file being installed: an installed MoofTCP of the SAME
+ *                        vers but the other variant is replaced too (INST_SWITCHED; variant switch
+ *                        without Remove). A newer one of either variant is never replaced. The write
+ *                        is the ordinary WRITE_MOOF (the 5 steps), so a switch has exactly the crash
+ *                        and recovery properties of an upgrade.
  *   prev                 the decoded manifest of an earlier (interrupted) install, or NULL when
  *                        there is none or it is unreadable. If the snapshot shows a manifest file
  *                        (or temp) but prev is NULL, the MacTCP-set files found in the Disabled
@@ -205,7 +220,7 @@ int inst_manifest_decode(const char *text, size_t len, InstManifest *m);
  * added; the planner cannot decide "up to date", build the manifest file or name the culprit
  * without them. */
 int inst_plan_install(const InstEntry *sys, int nsys, const InstEntry *disabled, int ndisabled,
-                      uint32_t moof_vers, const InstManifest *prev, InstOp *ops, int cap, InstMsg *msg,
+                      uint32_t moof_vers, int moof_variant, const InstManifest *prev, InstOp *ops, int cap, InstMsg *msg,
                       char *blocker, InstManifest *man_out);
 
 /* Plan a Remove. Same snapshot arguments. `man` is the decoded manifest, or NULL when the manifest

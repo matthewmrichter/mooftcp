@@ -16,22 +16,24 @@ connect and work). Eudora starts; its mail was not tried.
 
 TWO VERSIONS: MOOFTCP AND MOOFTCP LITE
 
-MoofTCP comes in two versions. Pick the one that fits your
-network; each has its own download and its own Installer.
+The Installer holds two versions of MoofTCP and installs the
+one you pick with its box "Lite version (no DHCP)":
 
-  - MoofTCP (MoofTCP-<version>): can get its address from a
-    DHCP server (your router). Choose it if you want the address
-    set automatically.
-  - MoofTCP Lite (MoofTCP-Lite-<version>): no DHCP; you enter
-    the address by hand. It leaves about 5 KB more system memory
-    free, which helps when memory is tight. Choose it if you use
-    a fixed address anyway.
+  - Box off (the normal choice): MoofTCP. It can get its
+    address from a DHCP server (your router).
+  - Box ticked: MoofTCP Lite (no DHCP). It saves about 5 KB of
+    system memory. Choose it if you set a fixed IP address in
+    the MoofTCP control panel. Leave it off if your network
+    hands out addresses automatically (DHCP).
 
 Both work the same way otherwise and keep the same settings
-file. To switch from one to the other, click Remove in either
-Installer, restart, then install the other one.
+file. To switch from one to the other, open the Installer, set
+the box the other way, click Install and restart; no Remove is
+needed. (When MoofTCP Lite is installed, the box starts ticked.)
 MoofTCP Lite uses the address saved in the settings even if
-"Get the address by DHCP" was ticked in the other version.
+"Get the address by DHCP" was ticked in the other version. Its
+control panel says "MoofTCP Lite does not support DHCP."; to
+switch back, reinstall without the Lite option.
 
 
 WHAT YOU NEED
@@ -46,8 +48,8 @@ WHAT YOU NEED
 
 INSTALL
 
-  1. Open "MoofTCP Installer" ("MoofTCP Lite Installer" for
-     MoofTCP Lite) and click Install.
+  1. Open "MoofTCP Installer", leave the box "Lite version (no
+     DHCP)" off (or tick it for MoofTCP Lite), and click Install.
   2. Restart the Mac.
   3. Open the Control Panel (Apple menu), then "MoofTCP". Fill in
      your IP address, subnet mask, router, DNS server and
@@ -67,8 +69,8 @@ file in the System Folder.
 
 REMOVE
 
-  1. Open "MoofTCP Installer" (or "MoofTCP Lite Installer") and
-     click Remove.
+  1. Open "MoofTCP Installer" and click Remove (the same for
+     both versions).
   2. Restart the Mac.
 
 Remove deletes MoofTCP and puts your MacTCP files back where

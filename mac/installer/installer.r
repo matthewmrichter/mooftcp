@@ -1,47 +1,43 @@
 /* installer.r - resources of the application "MoofTCP Installer" (Plan 3 Task 10; clean-room).
- * The embedded MoofTCP file ('MTCP'/'MTCD'/'MTCI' 128) is a separate resource file, embed.rsrc.bin,
- * generated at build time (scripts/mkembed.py, mac/installer/CMakeLists.txt) from
- * build-mac/moof/MoofTCP.bin and merged by add_application. */
+ * The embedded MoofTCP files ('MTCP'/'MTCD'/'MTCI' 128 = MoofTCP, 129 = MoofTCP Lite) are a separate
+ * resource file, embed.rsrc.bin, generated at build time (scripts/mkembed.py, mac/installer/CMakeLists.txt)
+ * from build-mac/moof/MoofTCP.bin and build-mac-lite/moof/MoofTCP.bin and merged by add_application.
+ * One installer for both variants (docs/dev/DHCP-DESIGN.md section 10): the checkbox picks the file
+ * Install writes. */
 #include "Types.r"
 #include "Dialogs.r"
 #include "Processes.r"
 
-/* MoofTCP Lite (Rez -DMT_NO_DHCP, mac/installer/CMakeLists.txt): the same application, embedding the
- * Lite MoofTCP file, says "Lite" in its window, its intro and its 'vers' resources, and is called
- * "MoofTCP Lite Installer" (docs/dev/RELEASE.md "Variants"). */
-/* The intro must stay within 255 characters (a StaticText item) and four lines of the item. */
-#ifdef MT_NO_DHCP
-#define MT_NAME "MoofTCP Lite"
-#define MT_INTRO "Install puts MoofTCP Lite 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
-    "into the folder \"MacTCP (Disabled)\"; Remove puts them back. Lite has no DHCP: it needs a " \
-    "fixed address and an Ethernet driver (.ENET)."
-#else
-#define MT_NAME "MoofTCP"
-#define MT_INTRO "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
-    "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP " \
-    "back. MoofTCP needs an Ethernet driver (.ENET)."
-#endif
-
-/* The window. Mac coordinates {top, left, bottom, right}; centred on a 512 x 342 screen. */
+/* The window. Mac coordinates {top, left, bottom, right}; on a 512 x 342 screen. The top stays at 50
+ * (scripts/installer-test.sh tells the window from a crash by its title bar there). Static texts hold
+ * at most 255 characters; each box fits its text at Chicago 12 (16 px a line): intro 4 lines, note 4
+ * lines, message 5 lines (inst_message: at most 217 characters, test_inst_exec message_lengths). */
 resource 'DLOG' (128, "MoofTCP Installer") {
-    {50, 36, 290, 476},
+    {50, 16, 338, 496},
     noGrowDocProc,
     invisible,
     goAway,
     0,
     128,
-    MT_NAME " Installer",
+    "MoofTCP Installer",
     noAutoCenter
 };
 
+/* Item order is installer_main.c's IT_* enum (the checkbox and its note appended). */
 resource 'DITL' (128) {
     {
-        {204, 20, 224, 110}, Button { enabled, "Install" };
-        {204, 130, 224, 220}, Button { enabled, "Remove" };
-        {204, 330, 224, 420}, Button { enabled, "Quit" };
-        {92, 20, 196, 420}, StaticText { disabled, "" };
-        {10, 20, 86, 420}, StaticText { disabled,
-            MT_INTRO };
+        {260, 16, 280, 106}, Button { enabled, "Install" };
+        {260, 126, 280, 216}, Button { enabled, "Remove" };
+        {260, 374, 280, 464}, Button { enabled, "Quit" };
+        {168, 16, 252, 464}, StaticText { disabled, "" };
+        {8, 16, 72, 464}, StaticText { disabled,
+            "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved "
+            "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
+            "back. MoofTCP needs an Ethernet driver (.ENET)." };
+        {78, 14, 96, 300}, CheckBox { enabled, "Lite version (no DHCP)" };
+        {98, 32, 162, 464}, StaticText { disabled,
+            "Saves about 5 KB of system memory. Choose it if you set a fixed IP address in the MoofTCP "
+            "control panel. Leave it off if your network hands out addresses automatically (DHCP)." };
     }
 };
 
@@ -86,30 +82,24 @@ resource 'DITL' (130) {
     }
 };
 
-/* The short version string is the release version in both variants (scripts/relvers.py); the long
- * strings name the variant ("MoofTCP Lite ..."). */
+/* The short version string is the release version (scripts/relvers.py checks it, and the two embedded
+ * MoofTCP files' long strings: "MoofTCP 1.0rc3 ..." in 128, "MoofTCP Lite 1.0rc3 ..." in 129). */
 resource 'vers' (1) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    MT_NAME " Installer 1.0rc3 (release candidate)"
+    "MoofTCP Installer 1.0rc3 (release candidate)"
 };
 
 resource 'vers' (2) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    MT_NAME " 1.0rc3"
+    "MoofTCP 1.0rc3"
 };
 
 /* The owner (signature) resource of creator 'mtin'. */
-#ifdef MT_NO_DHCP
-data 'mtin' (0) {
-    $"1D" "MoofTCP Lite Installer 1.0rc3"
-};
-#else
 data 'mtin' (0) {
     $"18" "MoofTCP Installer 1.0rc3"
 };
-#endif
 
 resource 'BNDL' (128) {
     'mtin', 0,
@@ -143,7 +133,8 @@ data 'ICN#' (128) {
 };
 
 /* MultiFinder partition (System 6 without MultiFinder gives the application all memory). The
- * bundled MoofTCP file is about 120 KB and is loaded once for Install: 384K preferred, 256K minimum. */
+ * application carries two MoofTCP files (about 130 KB each, not preloaded); only the chosen one is
+ * loaded, for Install, and released afterwards: 384K preferred, 256K minimum, as with one file. */
 resource 'SIZE' (-1) {
     reserved,
     ignoreSuspendResumeEvents,

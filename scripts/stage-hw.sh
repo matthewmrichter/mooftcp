@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage files for a real-hardware session (BlueSCSI shared folder).
-#   stage-hw.sh [--spec <file.md>] [--release <version> [--variant full|lite|both]] <session-name> <file.bin>...
+#   stage-hw.sh [--spec <file.md>] [--release <version>] <session-name> <file.bin>...
 #   stage-hw.sh --verify <session-name>
 # Stage: writes dist/hw/<session-name>/ with each file as MacBinary (.bin) and BinHex
 # (.hqx, via macutils binhex), a README.txt (ASCII, CR line endings, for TeachText) and
@@ -9,10 +9,9 @@
 # --release <version> (Plan 3 Task 11) adds dist/MoofTCP-<version>.{dsk,hqx,sit} (scripts/release.sh; copied
 # as they are, the .hqx is only decode-checked with hexbin) and the diagnostic apps from build-mac/ (HeapInfo,
 # HeapInfoOpen, HeapInfoDNR, MoofDiag, ApiProbe, and KeyLat when built, as .bin + .hqx). Further <file.bin> arguments are optional then.
-# --variant (with --release; default full, docs/dev/RELEASE.md "Variants"): lite stages MoofTCP Lite instead
-# (dist/MoofTCP-Lite-<version>.*, the apps from build-mac-lite/), both stages the two side by side. MoofDiag reads
-# the driver's core state and must match the variant: the Lite one is staged as MoofDiag-Lite.bin (Mac name
-# "MoofDiag Lite"); the other apps are the same in both variants.
+# The one release set carries both variants (docs/dev/RELEASE.md "Variants"). MoofDiag reads the driver's core
+# state and must match the installed variant: the Lite one (build-mac-lite/) is staged too, as MoofDiag-Lite.bin
+# (Mac name "MoofDiag Lite"); the other apps are the same for both variants.
 # Spec file (markdown) supplies the owner-facing steps as "## Install", "## Try" and
 # "## Undo" sections. Without --spec those sections say no steps were given.
 # Verify: round-trips every .hqx with hexbin and checks it equals the .bin (name,
@@ -73,7 +72,7 @@ if [ "${1:-}" = "--verify" ]; then
   exit 0
 fi
 
-spec=""; release=""; variant=full
+spec=""; release=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --spec)
@@ -84,9 +83,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die "--release needs a version"
       release="$2"; shift 2;;
     --variant)
-      [ $# -ge 2 ] || die "--variant needs full, lite or both"
-      variant="$2"; shift 2
-      case "$variant" in full|lite|both) ;; *) die "--variant must be full, lite or both";; esac;;
+      die "--variant is gone: the one release set carries both variants (docs/dev/RELEASE.md \"Variants\")";;
     *) break;;
   esac
 done
@@ -96,32 +93,24 @@ else
   [ $# -ge 2 ] || die "usage: stage-hw.sh [--spec file.md] [--release ver] <session-name> <file.bin>..."
 fi
 session="$1"; shift
-[ "$variant" = full ] || [ -n "$release" ] || die "--variant needs --release"
 rel_files=(); tmpbin=""
 if [ -n "$release" ]; then
   case "$release" in ""|.*|*[!A-Za-z0-9._-]*) die "bad release version";; esac
   apps="build-mac"
-  if [ "$variant" != lite ]; then
-    for e in dsk hqx sit; do rel_files+=("$ROOT/dist/MoofTCP-$release.$e"); done
-    set -- "$@" "$ROOT/build-mac/moofdiag/MoofDiag.bin"
-  else
-    apps="build-mac-lite"
-  fi
-  if [ "$variant" != full ]; then
-    for e in dsk hqx sit; do rel_files+=("$ROOT/dist/MoofTCP-Lite-$release.$e"); done
-    lt="$ROOT/build-mac-lite/moofdiag/MoofDiag.bin"
-    [ -f "$lt" ] || die "missing $lt (MT_LITE=1 scripts/build-mac.sh MoofDiag)"
-    tmpbin="$(mktemp -d)"
-    trap 'rm -rf "$tmpbin"' EXIT          # replaced by cleanup() below, which removes it too
-    cp "$lt" "$tmpbin/MoofDiag-Lite.bin"
-    python3 -I "$ROOT/scripts/mbflags.py" "$tmpbin/MoofDiag-Lite.bin" 0x0000 "MoofDiag Lite" >/dev/null
-    set -- "$@" "$tmpbin/MoofDiag-Lite.bin"
-  fi
+  for e in dsk hqx sit; do rel_files+=("$ROOT/dist/MoofTCP-$release.$e"); done
+  set -- "$@" "$ROOT/build-mac/moofdiag/MoofDiag.bin"
+  lt="$ROOT/build-mac-lite/moofdiag/MoofDiag.bin"
+  [ -f "$lt" ] || die "missing $lt (MT_LITE=1 scripts/build-mac.sh MoofDiag)"
+  tmpbin="$(mktemp -d)"
+  trap 'rm -rf "$tmpbin"' EXIT          # replaced by cleanup() below, which removes it too
+  cp "$lt" "$tmpbin/MoofDiag-Lite.bin"
+  python3 -I "$ROOT/scripts/mbflags.py" "$tmpbin/MoofDiag-Lite.bin" 0x0000 "MoofDiag Lite" >/dev/null
+  set -- "$@" "$tmpbin/MoofDiag-Lite.bin"
   for f in "$ROOT/$apps/heapinfo/HeapInfo.bin" "$ROOT/$apps/heapinfo/HeapInfoOpen.bin" \
            "$ROOT/$apps/heapinfo/HeapInfoDNR.bin" "$ROOT/$apps/apiprobe/ApiProbe.bin"; do set -- "$@" "$f"; done
   # KeyLat (mac/keylat, keypress-to-wire latency, docs/dev/HARDWARE.md "KeyLat") rides along when it has been built
   [ ! -f "$ROOT/$apps/keylat/KeyLat.bin" ] || set -- "$@" "$ROOT/$apps/keylat/KeyLat.bin"
-  for f in "${rel_files[@]}"; do [ -f "$f" ] || die "missing $f (run scripts/release.sh $([ "${f#*MoofTCP-Lite-}" != "$f" ] && echo "--lite ")$release)"; done
+  for f in "${rel_files[@]}"; do [ -f "$f" ] || die "missing $f (run scripts/release.sh $release)"; done
 fi
 case "$session" in
   ""|.*|*[!A-Za-z0-9._-]*) die "session name must match [A-Za-z0-9._-] and not start with '.'";;
