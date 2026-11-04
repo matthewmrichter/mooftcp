@@ -9,12 +9,17 @@
 /* MoofTCP Lite (Rez -DMT_NO_DHCP, mac/installer/CMakeLists.txt): the same application, embedding the
  * Lite MoofTCP file, says "Lite" in its window, its intro and its 'vers' resources, and is called
  * "MoofTCP Lite Installer" (docs/dev/RELEASE.md "Variants"). */
+/* The intro must stay within 255 characters (a StaticText item) and four lines of the item. */
 #ifdef MT_NO_DHCP
 #define MT_NAME "MoofTCP Lite"
-#define MT_INTRO_NOTE " MoofTCP Lite has no DHCP client: it needs a fixed IP address."
+#define MT_INTRO "Install puts MoofTCP Lite 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
+    "into the folder \"MacTCP (Disabled)\"; Remove puts them back. Lite has no DHCP: it needs a " \
+    "fixed address and an Ethernet driver (.ENET)."
 #else
 #define MT_NAME "MoofTCP"
-#define MT_INTRO_NOTE ""
+#define MT_INTRO "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
+    "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP " \
+    "back. MoofTCP needs an Ethernet driver (.ENET)."
 #endif
 
 /* The window. Mac coordinates {top, left, bottom, right}; centred on a 512 x 342 screen. */
@@ -36,9 +41,7 @@ resource 'DITL' (128) {
         {204, 330, 224, 420}, Button { enabled, "Quit" };
         {92, 20, 196, 420}, StaticText { disabled, "" };
         {10, 20, 86, 420}, StaticText { disabled,
-            "Install puts " MT_NAME " 1.0rc3 into the System Folder. If MacTCP is there, its files are moved "
-            "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
-            "back. MoofTCP needs an Ethernet driver (.ENET)." MT_INTRO_NOTE };
+            MT_INTRO };
     }
 };
 
