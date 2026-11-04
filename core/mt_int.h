@@ -178,7 +178,7 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TCP_QUICKACK  4u    /* the first data segments of a connection are ACKed at once */
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
-#define MT_TCP_RTO_MIN  200u
+#define MT_TCP_RTO_MIN  1000u  /* RFC 6298 2.4; RC2 hardware: the DaynaPORT link holds frames up to ~500 ms, 200 fired spuriously */
 /* FIN_WAIT_2 backstop: 600 s of silence from the peer (any acceptable segment refreshes it).
  * At expiry it acts like the ULP timeout: ULP_TIMEOUT event, abort only if the abort flag is set. */
 #define MT_TCP_FW2_MS   600000u

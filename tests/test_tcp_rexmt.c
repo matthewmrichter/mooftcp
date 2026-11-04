@@ -108,12 +108,12 @@ static void test_rtt_estimate(void) {
         ack_to(&c, c.ms + 100, 150);
         mt_tcp_get_info(c.t, &in);
         T_EQ(in.srtt_ms, 50);
-        T_EQ(in.rto_ms, 200);                                    /* srtt + 4*rttvar = 150, clamped */
+        T_EQ(in.rto_ms, MT_TCP_RTO_MIN);                        /* srtt + 4*rttvar = 150, clamped to the floor */
         tsend(c.t, d, 100, 1, 0, 1000);                    /* second sample: 150 ms */
         ack_to(&c, c.ms + 200, 1150);
         mt_tcp_get_info(c.t, &in);
         T_EQ(in.srtt_ms, 62);                                    /* 50 + (150 - 50)/8 = 62.5 */
-        T_EQ(in.rto_ms, 62 + 175);                               /* rttvar = 3/4*25 + 100/4 = 43.75 */
+        T_EQ(in.rto_ms, MT_TCP_RTO_MIN);                         /* 62 + 175 (rttvar = 3/4*25 + 100/4 = 43.75), still under the floor */
     }
 }
 
@@ -125,12 +125,12 @@ static void test_karn(void) {
         tsend(c.t, d, 100, 1, 0, 100);
         ack_to(&c, c.ms + 100, 150);                             /* srtt 50 */
         tsend(c.t, d, 100, 1, 0, 1000);
-        mt_tick(c.s, 1200);                                      /* RTO 200: retransmitted */
+        mt_tick(c.s, 1000 + MT_TCP_RTO_MIN);                     /* RTO at the floor: retransmitted */
         T_EQ(fl.n, 3);
-        ack_to(&c, c.ms + 200, 1210);                            /* ambiguous: no sample */
+        ack_to(&c, c.ms + 200, 1010 + MT_TCP_RTO_MIN);           /* ambiguous: no sample */
         mt_tcp_get_info(c.t, &in);
         T_EQ(in.srtt_ms, 50);
-        T_EQ(in.rto_ms, 200);                                    /* back from the backoff */
+        T_EQ(in.rto_ms, MT_TCP_RTO_MIN);                         /* back from the backoff */
     }
 }
 
