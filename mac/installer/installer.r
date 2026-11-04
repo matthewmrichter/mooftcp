@@ -6,6 +6,22 @@
 #include "Dialogs.r"
 #include "Processes.r"
 
+/* MoofTCP Lite (Rez -DMT_NO_DHCP, mac/installer/CMakeLists.txt): the same application, embedding the
+ * Lite MoofTCP file, says "Lite" in its window, its intro and its 'vers' resources, and is called
+ * "MoofTCP Lite Installer" (docs/dev/RELEASE.md "Variants"). */
+/* The intro must stay within 255 characters (a StaticText item) and four lines of the item. */
+#ifdef MT_NO_DHCP
+#define MT_NAME "MoofTCP Lite"
+#define MT_INTRO "Install puts MoofTCP Lite 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
+    "into the folder \"MacTCP (Disabled)\"; Remove puts them back. Lite has no DHCP: it needs a " \
+    "fixed address and an Ethernet driver (.ENET)."
+#else
+#define MT_NAME "MoofTCP"
+#define MT_INTRO "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved " \
+    "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP " \
+    "back. MoofTCP needs an Ethernet driver (.ENET)."
+#endif
+
 /* The window. Mac coordinates {top, left, bottom, right}; centred on a 512 x 342 screen. */
 resource 'DLOG' (128, "MoofTCP Installer") {
     {50, 36, 290, 476},
@@ -14,7 +30,7 @@ resource 'DLOG' (128, "MoofTCP Installer") {
     goAway,
     0,
     128,
-    "MoofTCP Installer",
+    MT_NAME " Installer",
     noAutoCenter
 };
 
@@ -25,9 +41,7 @@ resource 'DITL' (128) {
         {204, 330, 224, 420}, Button { enabled, "Quit" };
         {92, 20, 196, 420}, StaticText { disabled, "" };
         {10, 20, 86, 420}, StaticText { disabled,
-            "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved "
-            "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
-            "back. MoofTCP needs an Ethernet driver (.ENET)." };
+            MT_INTRO };
     }
 };
 
@@ -72,22 +86,30 @@ resource 'DITL' (130) {
     }
 };
 
+/* The short version string is the release version in both variants (scripts/relvers.py); the long
+ * strings name the variant ("MoofTCP Lite ..."). */
 resource 'vers' (1) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    "MoofTCP Installer 1.0rc3 (release candidate)"
+    MT_NAME " Installer 1.0rc3 (release candidate)"
 };
 
 resource 'vers' (2) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    "MoofTCP 1.0rc3"
+    MT_NAME " 1.0rc3"
 };
 
 /* The owner (signature) resource of creator 'mtin'. */
+#ifdef MT_NO_DHCP
+data 'mtin' (0) {
+    $"1D" "MoofTCP Lite Installer 1.0rc3"
+};
+#else
 data 'mtin' (0) {
     $"18" "MoofTCP Installer 1.0rc3"
 };
+#endif
 
 resource 'BNDL' (128) {
     'mtin', 0,

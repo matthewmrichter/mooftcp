@@ -33,17 +33,29 @@ typedef struct MtRes {
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
     uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */
-    uint8_t        pad2;
-    /* Plan 4 (DHCP), appended: version stays 1 */
+    uint8_t        variant;      /* build variant, MT_RES_VARIANT (was a zero pad byte: 0 = full) */
+    /* Plan 4 (DHCP), appended: version stays 1. MoofTCP Lite keeps the same layout (dhcp_hint stays 0,
+     * view.mode stays 0), so readers of the view need no variant check. */
     mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
     MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
 } MtRes;
 
-/* mt_drv_boot results (the INIT draws its icon only for MT_BOOT_OK) */
+/* MtRes.variant: which build made the driver. The core's mt_stack differs between the two (Lite has
+ * no DHCP section pointer), so a reader that walks the stack (MoofDiag) must be the same variant. */
+#define MT_RES_VARIANT_FULL 0
+#define MT_RES_VARIANT_LITE 1      /* MT_NO_DHCP: MoofTCP Lite */
+#ifdef MT_NO_DHCP
+#define MT_RES_VARIANT MT_RES_VARIANT_LITE
+#else
+#define MT_RES_VARIANT MT_RES_VARIANT_FULL
+#endif
+
+/* mt_drv_boot results (the INIT draws its icon for MT_BOOT_OK and MT_BOOT_DHCP) */
 #define MT_BOOT_OK            0
 #define MT_BOOT_UNCONFIGURED  1   /* installed, no address: OpenDriver(".IPP") gives -23004 */
 #define MT_BOOT_AGAIN         2   /* already booted (a second call) */
-#define MT_BOOT_DHCP          3   /* installed in DHCP mode: the address comes at the first open (icon drawn) */
+#define MT_BOOT_DHCP          3   /* installed in DHCP mode: the address comes at the first open (icon drawn;
+                                   * never in Lite, which treats a DHCP-mode prefs file as manual) */
 #define MT_BOOT_TAKEN       (-1)  /* a driver named .ipp is already installed (MacTCP) */
 #define MT_BOOT_NOMEM       (-2)
 #define MT_BOOT_NOUNIT      (-3)  /* the unit table install failed */
@@ -65,8 +77,10 @@ MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
 #define MT_DRV_STATUS_RES 0x4D54
 #define MT_STATUS_VERSION 1
 
+#ifndef MT_NO_DHCP
 /* DHCP mode: the first open waits this long for the lease (DHCP-DESIGN.md section 4). */
 #define MT_DRV_DHCP_WAIT_TICKS 600u    /* 10 s */
+#endif
 
 int16_t mt_drv_open(void *pb, void *dce);
 int16_t mt_drv_prime(void *pb, void *dce);

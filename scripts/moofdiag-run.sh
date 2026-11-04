@@ -14,6 +14,8 @@
 #                     count and DHCP log records. Over TAP with a host server (EMULATOR.md "DHCP over TAP") it binds.
 #     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
 #                     is then not fetched
+# MT_LITE=1 runs the MoofTCP Lite build (build-mac-lite/; --dhcp then shows Lite running the DHCP-mode prefs
+# as a manual configuration: no address in them, so RESULT UNCONFIGURED at once, no 10 s wait).
 # Same launch and screen checks as scripts/enetspike-run.sh. Exit status 0 when MoofDiag.out was fetched
 # and ends with RESULT PASS (or RESULT UNCONFIGURED with --no-prefs).
 set -euo pipefail
@@ -23,6 +25,7 @@ IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${MOOFDIAG_TIMEOUT:-300}"
 die() { echo "moofdiag-run.sh: $*" >&2; exit 1; }
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite and its MoofDiag, output in build-mac-lite/moofdiag/
 
 keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""; dhcp=""
 while [ $# -gt 0 ]; do
@@ -39,7 +42,7 @@ while [ $# -gt 0 ]; do
 done
 
 cd "$ROOT"
-out_dir="$ROOT/build-mac/moofdiag"
+out_dir="$ROOT/$BM/moofdiag"
 echo "== build"
 scripts/build-mac.sh MoofDiag >/dev/null
 [ -z "$install" ] || scripts/build-mac.sh MoofTCP >/dev/null

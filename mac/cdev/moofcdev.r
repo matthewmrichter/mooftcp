@@ -36,7 +36,8 @@ data 'nrct' (-4064) {
 /* Item order is cdev_main.c's IT_* enum (Save added in the Task 8 fix round, the diagnostic-log
  * checkbox in Task 11b, the DHCP checkbox in Plan 4, all appended so earlier item numbers stay).
  * Rows: the DHCP box on top, then label at x 95, field at x 186, 22 px apart; Revert, Save and the
- * version along the bottom. */
+ * version along the bottom. MoofTCP Lite replaces the DHCP box (item 18) with a static text in the
+ * same row; every other item is the same in both variants. */
 resource 'DITL' (-4064) {
     {
         {224, 95, 244, 160}, Button { enabled, "Revert" };
@@ -56,7 +57,12 @@ resource 'DITL' (-4064) {
         {228, 250, 244, 320}, StaticText { disabled, "v1.0rc3" };
         {224, 170, 244, 235}, Button { enabled, "Save" };
         {133, 93, 151, 316}, CheckBox { enabled, "Keep a diagnostic log" };
+#ifdef MT_NO_DHCP
+        /* MoofTCP Lite (Rez -DMT_NO_DHCP): no DHCP box; the same item number says so instead */
+        {3, 95, 19, 320}, StaticText { disabled, "MoofTCP Lite does not support DHCP." };
+#else
         {2, 93, 20, 316}, CheckBox { enabled, "Get the address by DHCP" };
+#endif
     }
 };
 
@@ -112,20 +118,33 @@ resource 'BNDL' (-4064) {
 };
 
 /* The owner (signature) resource of creator 'ztcp': a version string, as is customary. */
+#ifdef MT_NO_DHCP
+data 'ztcp' (0) {
+    $"13" "MoofTCP Lite 1.0rc3"
+};
+#else
 data 'ztcp' (0) {
     $"0E" "MoofTCP 1.0rc3"
 };
+#endif
 
 #include "icons.r"
 
+/* Short string = the release version in both variants (scripts/relvers.py); the long strings name
+ * the variant: "MoofTCP Lite 1.0rc3 ..." in Lite (Get Info shows them). */
+#ifdef MT_NO_DHCP
+#define MT_NAME "MoofTCP Lite"
+#else
+#define MT_NAME "MoofTCP"
+#endif
 resource 'vers' (1) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    "MoofTCP 1.0rc3 (release candidate)"
+    MT_NAME " 1.0rc3 (release candidate)"
 };
 
 resource 'vers' (2) {
     0x01, 0x00, beta, 0x03, verUS,
     "1.0rc3",
-    "MoofTCP 1.0rc3"
+    MT_NAME " 1.0rc3"
 };

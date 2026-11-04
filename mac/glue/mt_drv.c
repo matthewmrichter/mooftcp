@@ -146,6 +146,9 @@ static long boot(void *drvr) {
     r->mode = mode;
     r->version = MT_STATUS_VERSION;
     r->cfg_flags = cflags;
+#ifdef MT_NO_DHCP
+    r->variant = MT_RES_VARIANT_LITE;            /* full: stays 0 (NewPtrSysClear) */
+#endif
 
     link.ctx = &r->enet;
     link.tx = mt_enet_write;
@@ -169,12 +172,17 @@ static long boot(void *drvr) {
 
     r->view.magic = MT_VIEW_MAGIC;
     r->view.version = MT_VIEW_VERSION;
-    if (cr == MT_CFG_OK && mode == MT_CFG_MODE_DHCP) {   /* Plan 4: the fields are fallbacks, the address a hint */
+    /* mt_drv_cfg_kind (mt_drv_logic.h): MoofTCP Lite (MT_NO_DHCP) ignores the mode word, a DHCP-mode
+     * prefs file runs as a manual configuration with its fields (unconfigured without an address) */
+#ifndef MT_NO_DHCP
+    if (mt_drv_cfg_kind(cr == MT_CFG_OK, mode, cfg.addr) == MT_DRV_CFG_DHCP) {               /* Plan 4: the fields are fallbacks, the address a hint */
         r->cfg = cfg;
         r->dhcp_hint = cfg.addr;
         r->cfg.addr = 0;
         r->view.mode = 1;
-    } else if (cr == MT_CFG_OK && cfg.addr) {
+    } else
+#endif
+    if (mt_drv_cfg_kind(cr == MT_CFG_OK, mode, cfg.addr) == MT_DRV_CFG_MANUAL) {
         r->cfg = cfg;                            /* applied at the first open (MAC known) */
         r->view.addr = cfg.addr;
     }
@@ -191,7 +199,9 @@ static long boot(void *drvr) {
     }
     r->refnum = ref;
     mt_mac_dce_storage(ref, &r->view);           /* the panel finds the view from the unit table */
+#ifndef MT_NO_DHCP
     if (r->view.mode) return MT_BOOT_DHCP;
+#endif
     return r->cfg.addr ? MT_BOOT_OK : MT_BOOT_UNCONFIGURED;
 }
 
@@ -208,9 +218,11 @@ static int16_t link_up(MtRes *r) {
     r->enet_err = (int16_t)e;
     if (e) return ipBadLapErr;
     memcpy(r->cfg.mac, r->enet.mac, 6);
+#ifndef MT_NO_DHCP
     if (r->view.mode)                            /* DHCP: the client starts; its DISCOVER leaves at the first tick */
         (void)mt_pb_dhcp_start(r->d, &r->cfg, r->dhcp_hint, &r->view);
     else
+#endif
         mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: arms the timer too */
     r->view.linked = 1;
     mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d));
@@ -235,6 +247,7 @@ static void enet_service(MtRes *r, const MtAnyPb *pb) {
 
 /* ---- Device Manager entries (from mt_drv_stubs.s: A0 = PB, A1 = DCE) ---- */
 
+#ifndef MT_NO_DHCP
 /* DHCP mode: wait for the lease, at most MT_DRV_DHCP_WAIT_TICKS (task time, interrupts on: the
  * Time Manager task and the protocol handler run the client meanwhile; DHCP-DESIGN.md section 4).
  * Never at interrupt time or with interrupts masked: answer at once there. */
@@ -245,16 +258,18 @@ static int16_t dhcp_wait(MtRes *r) {
         while (!*conf && (uint32_t)(LM_TICKS - t0) < MT_DRV_DHCP_WAIT_TICKS) {}
     return *conf ? 0 : ipBadAddr;
 }
+#endif
 
 int16_t mt_drv_open(void *pb, void *dce) {
-    int16_t e;
     (void)pb; (void)dce;
     if (!g_res) return ipBadAddr;
+#ifndef MT_NO_DHCP
     if (g_res->view.mode) {                      /* DHCP: link up, client running, wait for the lease;
                                                   * not bound in time: -23004 as unconfigured (ruling) */
-        e = link_up(g_res);
+        int16_t e = link_up(g_res);
         return e ? e : dhcp_wait(g_res);
     }
+#endif
     /* matrix "Unconfigured run": with no address the open fails with ipBadAddr and the driver
      * stays closed (every call then gets the Device Manager's -28) */
     if (!g_res->cfg.addr) return ipBadAddr;

@@ -187,6 +187,37 @@ static void cfg_optional_fields(void) {
     T_EQ(c.mask, 0xFF000000u);
 }
 
+/* Boot decision (mt_drv_cfg_kind): the full build runs mode word 1 as DHCP (address = hint, also 0);
+ * MoofTCP Lite (MT_NO_DHCP) ignores the mode word and runs the record's address as a manual setting. */
+static void cfg_kind_mode_word(void) {
+    static const uint8_t dhcp_hint[] = { 0, 1, 0, 1, 192, 168, 1, 7, 255, 255, 255, 0, 192, 168, 1, 1 };
+    static const uint8_t dhcp_none[] = { 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 192, 168, 1, 1 };
+    static const uint8_t manual[] = { 0, 1, 0, 0, 192, 168, 1, 7 };
+    mt_ifconfig c;
+    uint8_t mode;
+    T_EQ(mt_cfg_parse(dhcp_hint, sizeof dhcp_hint, &c, &mode), 0);
+    T_EQ(mode, MT_CFG_MODE_DHCP);                         /* the parser reports it in both variants */
+#ifdef MT_NO_DHCP
+    T_EQ(mt_drv_cfg_kind(1, mode, c.addr), MT_DRV_CFG_MANUAL);   /* Lite: the address runs statically */
+    T_EQ(c.addr, 0xC0A80107u);
+    T_EQ(c.gateway, 0xC0A80101u);
+#else
+    T_EQ(mt_drv_cfg_kind(1, mode, c.addr), MT_DRV_CFG_DHCP);
+#endif
+    T_EQ(mt_cfg_parse(dhcp_none, sizeof dhcp_none, &c, &mode), 0);
+    T_EQ(c.addr, 0);
+#ifdef MT_NO_DHCP
+    T_EQ(mt_drv_cfg_kind(1, mode, c.addr), MT_DRV_CFG_NONE);     /* Lite: unconfigured, no lease wait */
+#else
+    T_EQ(mt_drv_cfg_kind(1, mode, c.addr), MT_DRV_CFG_DHCP);
+#endif
+    T_EQ(mt_cfg_parse(manual, sizeof manual, &c, &mode), 0);
+    T_EQ(mt_drv_cfg_kind(1, mode, c.addr), MT_DRV_CFG_MANUAL);
+    T_EQ(mt_drv_cfg_kind(1, mode, 0), MT_DRV_CFG_NONE);
+    T_EQ(mt_drv_cfg_kind(0, MT_CFG_MODE_DHCP, 0), MT_DRV_CFG_NONE);   /* no file / no record */
+    T_EQ(mt_drv_cfg_kind(0, 0, 0xC0A80107u), MT_DRV_CFG_NONE);
+}
+
 static void cfg_rejects_bad_records(void) {
     static const uint8_t v2[] = { 0, 2, 0, 0, 10, 0, 0, 2 };
     static const uint8_t shortr[] = { 0 };
@@ -791,7 +822,7 @@ static void goodbye_drops_streams_holding_app_routines_or_pbs(void) {
 
 T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, route_callout_nests,
        route_sync_pending_at_interrupt_refused, may_pend_covers_every_pending_cscode,
-       pend_ring_fifo_and_full, cfg_full_record, cfg_optional_fields, cfg_rejects_bad_records,
+       pend_ring_fifo_and_full, cfg_full_record, cfg_optional_fields, cfg_kind_mode_word, cfg_rejects_bad_records,
        asr_runs_with_creators_a5, goodbye_forgets_everything_silently,
        codes_outside_list_never_pend, entry_runs_completes_once_and_stashes_a5,
        entry_queues_while_preempted_and_drain_runs, entry_sync_refusals_complete_at_once,

@@ -2,8 +2,9 @@
 # Retro68 compile gate (Plan 3 Task 1; PLAN3-CARRYOVER 4.3 item H).
 #   gate-check.sh
 # 1. Every Mac target (mac/, which includes the core as mtcore68k) must build with
-#    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint}/ (build-mac/ is not touched): the
-#    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, and MARK=1 + -DMT_STACK_PAINT=4096.
+#    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint,lite}/ (build-mac/ is not touched): the
+#    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, MARK=1 + -DMT_STACK_PAINT=4096, and
+#    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants").
 #    Any warning or error fails the gate (exit 1). Log: build-gate.log.
 # 2. Probe: core/*.c compiled alone with -mshort (16-bit int). Hazards (warnings) are listed;
 #    this step is report-only and never changes the exit status.
@@ -15,12 +16,14 @@ R68_TOOLCHAIN=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.
 FLAGS="-m68000 -O2 -Wall -Wextra -Werror"
 log="$ROOT/build-gate.log"
 
-# Three configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds).
-for cfg in "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096"; do
+# Four configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
+# and MoofTCP Lite (what ships as the Lite variant).
+for cfg in "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096" "lite:"; do
   name="${cfg%%:*}"; extra="${cfg#*:}"
   dir="build-gate-$name"
-  echo "== gate [$name]: all Mac targets, $FLAGS $extra"
-  if ! scripts/r68 cmake -S mac -B "$dir" -DCMAKE_TOOLCHAIN_FILE="$R68_TOOLCHAIN" \
+  lite=OFF; [ "$name" != lite ] || lite=ON
+  echo "== gate [$name]: all Mac targets, $FLAGS $extra (MT_NO_DHCP=$lite)"
+  if ! scripts/r68 cmake -S mac -B "$dir" -DCMAKE_TOOLCHAIN_FILE="$R68_TOOLCHAIN" -DMT_NO_DHCP="$lite" \
       "-DCMAKE_C_FLAGS=$FLAGS $extra" -DCMAKE_ASM_FLAGS=-m68000 >"$log" 2>&1; then
     tail -20 "$log"; echo "GATE FAIL [$name] (configure)"; exit 1
   fi

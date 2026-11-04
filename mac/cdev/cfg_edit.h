@@ -37,15 +37,26 @@
  *    does not send); a typed IP (the requested-address hint) and every other typed field are
  *    validated exactly as in manual mode. cfe_encode writes mode 1 when f->dhcp is set, 0 when it
  *    is clear and the prior said 1, and keeps any other (unknown) prior mode word while the box is
- *    off. cfe_decode sets f->dhcp from the mode word. */
+ *    off. cfe_decode sets f->dhcp from the mode word.
+ *  - MoofTCP Lite (MT_NO_DHCP, CFE_HAS_DHCP 0): there is no DHCP box. f->dhcp is ignored (validated as
+ *    manual), cfe_decode always gives dhcp 0 (a DHCP-mode file shows its fields as a manual setting:
+ *    that is how the Lite driver runs it), and cfe_encode never writes mode 1: a prior mode word 1
+ *    becomes 0 (manual), other prior words, the flags byte's other bits and the tail are kept. */
 #ifndef CFG_EDIT_H
 #define CFG_EDIT_H
 
 #include <stdint.h>
 #include "mt.h"
 
+/* 1 in the full build, 0 in MoofTCP Lite (compile option MT_NO_DHCP: no DHCP client, no DHCP box). */
+#ifdef MT_NO_DHCP
+#define CFE_HAS_DHCP 0
+#else
+#define CFE_HAS_DHCP 1
+#endif
+
 /* log: the "Keep a diagnostic log" checkbox = prefs flags bit 0 (MT_CFG_FLAG_LOG), 0 or 1 (Task 11b). */
-/* dhcp: the "Get the address from a DHCP server" checkbox = MCFG mode word 1 (Plan 4). */
+/* dhcp: the "Get the address by DHCP" checkbox = MCFG mode word 1 (Plan 4); always 0 in Lite. */
 typedef struct { char ip[16], mask[16], gw[16], dns[16], domain[64]; uint8_t log, dhcp; } CfeFields;
 
 /* field ids (CfeError.field) */

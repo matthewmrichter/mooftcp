@@ -274,14 +274,6 @@ typedef enum { MT_DHCP_OFF = 0, MT_DHCP_INIT, MT_DHCP_SELECTING, MT_DHCP_REQUEST
  * Fires synchronously inside mt_input / mt_tick / mt_dhcp_start (interrupt time is possible). */
 enum { MT_DHCP_EV_BOUND = 1, MT_DHCP_EV_LOST, MT_DHCP_EV_STATE };
 typedef void (*mt_dhcp_cb)(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t lease_s);
-void mt_dhcp_set_cb(mt_stack *s, mt_dhcp_cb cb, void *user);
-/* Start the client: drops any address (the stack is unconfigured until the first ACK) and makes
- * the first DISCOVER due at once (it leaves at the next mt_tick; mt_next_deadline returns 0).
- * hint (0 = none) is sent as the requested address (option 50). Needs cfg.mac set: MT_ERR_INVAL
- * if it is all zero. Restarting a running client starts over. */
-int  mt_dhcp_start(mt_stack *s, mt_ip4 hint, uint32_t now);
-/* Stop the client (state OFF); the current configuration, leased or not, is kept as it is. */
-void mt_dhcp_stop(mt_stack *s);
 typedef struct {
     uint8_t  state;                 /* mt_dhcp_state */
     mt_ip4   addr, server;          /* leased / offered address, server identifier (0 = none) */
@@ -291,7 +283,19 @@ typedef struct {
     uint32_t offers, acks, naks;    /* accepted OFFER / ACK / NAK */
     uint32_t bad;                   /* replies ignored: malformed, foreign xid/chaddr, unusable */
 } mt_dhcp_info;
+/* MoofTCP Lite (compile option MT_NO_DHCP): the client is not built and the four functions below
+ * are not declared (a call is a compile error); the types above stay (no code, no storage). */
+#ifndef MT_NO_DHCP
+void mt_dhcp_set_cb(mt_stack *s, mt_dhcp_cb cb, void *user);
+/* Start the client: drops any address (the stack is unconfigured until the first ACK) and makes
+ * the first DISCOVER due at once (it leaves at the next mt_tick; mt_next_deadline returns 0).
+ * hint (0 = none) is sent as the requested address (option 50). Needs cfg.mac set: MT_ERR_INVAL
+ * if it is all zero. Restarting a running client starts over. */
+int  mt_dhcp_start(mt_stack *s, mt_ip4 hint, uint32_t now);
+/* Stop the client (state OFF); the current configuration, leased or not, is kept as it is. */
+void mt_dhcp_stop(mt_stack *s);
 void mt_dhcp_get_info(const mt_stack *s, mt_dhcp_info *out, uint32_t now);
+#endif /* MT_NO_DHCP */
 
 /* ---- TCP ---- */
 typedef struct mt_tcp mt_tcp;

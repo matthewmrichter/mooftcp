@@ -263,6 +263,7 @@ uint32_t mt_dns_deadline(const mt_stack *s, uint32_t now);
  * One arena section. Retransmission times are absolute ms (wrap-safe compares); lease times are
  * seconds remaining after t_base, which mt_dhcp_timers moves forward by whole seconds (every
  * wake-up is capped so now - t_base stays far below 2^31 ms). MT_DHCP_INF = infinite / never. */
+#ifndef MT_NO_DHCP
 #define MT_DHCP_INF 0xFFFFFFFFu
 typedef struct {
     mt_dhcp_cb cb;
@@ -285,6 +286,16 @@ void mt_dhcp_reseed(mt_stack *s, uint32_t a, uint32_t b);
 /* A BOOTP message (UDP payload, checksum already verified) for port 68 while the client runs:
  * called from mt_udp_input's no-endpoint branch. */
 void mt_dhcp_input(mt_stack *s, const uint8_t *b, uint16_t n, uint32_t now);
+#else /* MT_NO_DHCP: MoofTCP Lite, no client (mt_dhcp.c is not built). The hooks fold away: the
+       * client is never on, so the port-68 branches in ip_in / mt_udp_input / mt_ip_output_hdr
+       * are dead code and the tick / deadline chain gets nothing. */
+static inline void mt_dhcp_timers(mt_stack *s, uint32_t now) { (void)s; (void)now; }
+static inline uint32_t mt_dhcp_deadline(const mt_stack *s, uint32_t now) { (void)s; (void)now; return MT_NO_DEADLINE; }
+static inline void mt_dhcp_reseed(mt_stack *s, uint32_t a, uint32_t b) { (void)s; (void)a; (void)b; }
+static inline void mt_dhcp_input(mt_stack *s, const uint8_t *b, uint16_t n, uint32_t now) {
+    (void)s; (void)b; (void)n; (void)now;
+}
+#endif
 /* The side effects of a configuration change, after s->cfg was written (mt_set_config, the DHCP
  * client): ARP flush on an address / mask / gateway change, loopback flush on an address change,
  * MSS clamp when the MTU shrank. o* are the values before the change. */
@@ -307,7 +318,9 @@ struct mt_stack {
     mt_dns *dns;
     mt_dns_cent *dcache;     /* lim.dns_cache entries */
     mt_logrec *log;          /* MT_LOG_RECS records (arena section) */
-    mt_dhcp *dhcp;           /* DHCP client state (arena section) */
+#ifndef MT_NO_DHCP
+    mt_dhcp *dhcp;           /* DHCP client state (arena section; not in MoofTCP Lite) */
+#endif
     /* Free-running counters, modulo 65536 (a multiple of MT_LOG_RECS); record index = counter &
      * (MT_LOG_RECS - 1). volatile: the writer may be an interrupt handler and the reader main
      * code. Assumption: exactly one writer context (log_wr) and one reader context (log_rd). */
@@ -342,7 +355,11 @@ struct mt_stack {
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
 };
 
+#ifndef MT_NO_DHCP
 static inline int mt_dhcp_on(const mt_stack *s) { return s->dhcp->state != MT_DHCP_OFF; }
+#else
+static inline int mt_dhcp_on(const mt_stack *s) { (void)s; return 0; }    /* Lite: never */
+#endif
 
 /* ---- Diagnostic log (mt_stack.c) ----
  * mt_log() is the only call sites use: one load + branch while the log is off. */

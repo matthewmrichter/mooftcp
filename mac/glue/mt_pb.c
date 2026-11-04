@@ -37,6 +37,7 @@ void mt_pb_set_config(MtDrv *d, const mt_ifconfig *c) {
     mt_os_irq_restore(sv);
 }
 
+#ifndef MT_NO_DHCP   /* MoofTCP Lite: no DHCP mode */
 void mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t lease_s) {
     MtDrv *d = (MtDrv *)user;
     MtStatusView *v = d->view;
@@ -59,6 +60,7 @@ int mt_pb_dhcp_start(MtDrv *d, const mt_ifconfig *c, mt_ip4 hint, MtStatusView *
     mt_os_irq_restore(sv);
     return r;
 }
+#endif
 
 /* ---- calling out ----
  * Every call into application code goes through these two, so depth says whether any glue

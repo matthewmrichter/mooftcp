@@ -635,7 +635,10 @@ int inst_message(const InstResult *r, const char *vers, char *buf, int cap) {
     }
     switch (r->msg) {
     case INST_ALREADY_INSTALLED:
-        put(&t, "MoofTCP is already installed (version "); put(&t, vers); put(&t, " or newer). Nothing was changed.");
+        /* the version compare does not see the variant (full / Lite): the text names no variant and
+         * says how to switch (docs/dev/RELEASE.md "Variants") */
+        put(&t, "MoofTCP is already installed (this version or a newer one). Nothing was changed. To switch "
+                "between MoofTCP and MoofTCP Lite, choose Remove first, then Install.");
         return 0;
     case INST_NOTHING_TO_REMOVE:
         put(&t, "MoofTCP is not installed, nothing to remove.");

@@ -5,6 +5,9 @@ set(MT_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../core)
 
 # The portable core built for the 68000 with the asm override (for the driver/INIT glue).
 file(GLOB MT_CORE68K_SRC CONFIGURE_DEPENDS ${MT_CORE_DIR}/*.c)
+if(MT_NO_DHCP)   # MoofTCP Lite: no client (mac/CMakeLists.txt defines MT_NO_DHCP for every target)
+  list(FILTER MT_CORE68K_SRC EXCLUDE REGEX "/mt_dhcp\\.c$")
+endif()
 add_library(mtcore68k STATIC ${MT_CORE68K_SRC} mt_cksum68k.s)
 target_include_directories(mtcore68k PUBLIC ${MT_CORE_DIR})
 target_compile_definitions(mtcore68k PUBLIC MT_ASM_CKSUM)

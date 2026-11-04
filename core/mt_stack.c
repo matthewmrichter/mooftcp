@@ -13,7 +13,9 @@ typedef struct {
     uint32_t dns;       /* offset of the DNS state (query slots + rx buffer) */
     uint32_t dcache;    /* offset of the DNS cache */
     uint32_t log;       /* offset of the diagnostic log ring */
-    uint32_t dhcp;      /* offset of the DHCP client state */
+#ifndef MT_NO_DHCP
+    uint32_t dhcp;      /* offset of the DHCP client state (not in MoofTCP Lite) */
+#endif
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -40,8 +42,10 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off = mt_arena_up(off + (uint32_t)l->dns_cache * (uint32_t)sizeof(mt_dns_cent));
     o->log = off;
     off = mt_arena_up(off + MT_LOG_RECS * (uint32_t)sizeof(mt_logrec));
+#ifndef MT_NO_DHCP
     o->dhcp = off;
     off = mt_arena_up(off + (uint32_t)sizeof(mt_dhcp));
+#endif
     o->total = off;
 }
 
@@ -85,8 +89,10 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->lis_eph = (uint16_t)(1024u + (seed + 104729u) % 1024u);
     s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
     s->log = (mt_logrec *)(void *)(base + lay.log);
+#ifndef MT_NO_DHCP
     s->dhcp = (mt_dhcp *)(void *)(base + lay.dhcp);
     s->dhcp->rnd = (seed ^ 0x6A09E667u) | 1u;
+#endif
     return s;
 }
 

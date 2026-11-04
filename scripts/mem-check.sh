@@ -16,6 +16,7 @@
 #        and `painted`, the deepest word the painted-stack scan of the measurement build saw (the build
 #        step compiles with -DMT_STACK_PAINT=4096); the rule uses the larger of the two
 # Exit status 0 only when every rule passes. Output also in build-mac/memcheck/MemCheck.out.
+# MT_LITE=1 checks MoofTCP Lite (build-mac-lite/, output build-mac-lite/memcheck/); same rules and caps.
 # Uses snow.sh, fresh-disk.sh, install-moof.sh, deploy.sh; starts scripts/testnet.py only when nothing
 # listens on 17007 (another session's testnet is shared, never killed).
 set -euo pipefail
@@ -24,6 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 die() { echo "mem-check.sh: $*" >&2; exit 1; }
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite (build-mac-lite/); the caps are the same (MacTCP's)
 
 keepdisk=""; build=1; logp=""
 while [ $# -gt 0 ]; do
@@ -35,7 +37,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 cd "$ROOT"
-out_dir="$ROOT/build-mac/memcheck"
+out_dir="$ROOT/$BM/memcheck"
 mkdir -p "$out_dir"
 shot="$out_dir/state.png"
 res="$out_dir/HeapInfo.out"
@@ -47,8 +49,8 @@ if [ -n "$build" ]; then
   export MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS--DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096}"
   for t in HeapInfo HeapInfoOpen HeapInfoDNR ApiProbe MoofDiag MoofTCP; do scripts/build-mac.sh "$t" >/dev/null; done
 fi
-for f in build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
-         build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin build-mac/moof/MoofTCP.bin; do
+for f in $BM/heapinfo/HeapInfo.bin $BM/heapinfo/HeapInfoOpen.bin $BM/heapinfo/HeapInfoDNR.bin \
+         $BM/apiprobe/ApiProbe.bin $BM/moofdiag/MoofDiag.bin $BM/moof/MoofTCP.bin; do
   [ -f "$f" ] || die "missing $f"
 done
 
@@ -172,8 +174,8 @@ if [ -n "$logp" ]; then
 else
   scripts/install-moof.sh >/dev/null
 fi
-scripts/deploy.sh build-mac/heapinfo/HeapInfo.bin build-mac/heapinfo/HeapInfoOpen.bin build-mac/heapinfo/HeapInfoDNR.bin \
-  build-mac/apiprobe/ApiProbe.bin build-mac/moofdiag/MoofDiag.bin --to ":MoofTCP Test:" >/dev/null
+scripts/deploy.sh $BM/heapinfo/HeapInfo.bin $BM/heapinfo/HeapInfoOpen.bin $BM/heapinfo/HeapInfoDNR.bin \
+  $BM/apiprobe/ApiProbe.bin $BM/moofdiag/MoofDiag.bin --to ":MoofTCP Test:" >/dev/null
 with_volume put_cfg
 
 export DISPLAY="$DISPLAY_NUM"; unset WAYLAND_DISPLAY

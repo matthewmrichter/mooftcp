@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Independent verification of the release artifacts (helper of scripts/release-verify.sh).
 
-    relverify.py [--self-test] [--dist DIR] <version>
+    relverify.py [--self-test] [--lite] [--dist DIR] <version>
 
-Reads dist/MoofTCP-<version>.{hqx,sit,dsk} with readers that did not write them:
+Reads dist/MoofTCP-<version>.{hqx,sit,dsk} with readers that did not write them (--lite: MoofTCP Lite,
+dist/MoofTCP-Lite-<version>.{hqx,sit,dsk} against build-mac-lite/, volume name "MoofTCP Lite", application
+"MoofTCP Lite Installer"):
   .hqx  macutils `hexbin` (-> MacBinary) and `unar`/`lsar` (The Unarchiver)
   .sit  `unar`/`lsar`
   .dsk  hfsutils `hmount`/`hls`/`hcopy -m`
@@ -40,6 +42,7 @@ FLAG_MASK = 0xFEFF
 INSTALLER_BIN = os.path.join(ROOT, "build-mac", "installer", "MoofTCP Installer.bin")
 README_SRC = os.path.join(ROOT, "docs", "release", "ReadMe.txt")
 VOLNAME = "MoofTCP"
+INST_NAME = "MoofTCP Installer"       # --lite: "MoofTCP Lite Installer"
 
 
 class Fail(Exception):
@@ -88,7 +91,7 @@ def expected(switch=None):
     if not os.path.isfile(INSTALLER_BIN):
         raise Fail("missing reference " + INSTALLER_BIN)
     inst = parse_macbinary(INSTALLER_BIN)
-    if inst["name"] != "MoofTCP Installer" or inst["type"] != "APPL" or inst["creator"] != "mtin":
+    if inst["name"] != INST_NAME or inst["type"] != "APPL" or inst["creator"] != "mtin":
         raise Fail("reference installer has unexpected identity %r" % inst)
     if not inst["flags"] & 0x2000:
         raise Fail("reference installer lacks the bundle bit")
@@ -464,13 +467,20 @@ def self_test(paths, inst, readme):
 
 
 def main():
+    global INSTALLER_BIN, VOLNAME, INST_NAME
     args = sys.argv[1:]
     st = False
+    stem = "MoofTCP-"
     dist = os.path.join(ROOT, "dist")
     while args and args[0].startswith("--"):
         a = args.pop(0)
         if a == "--self-test":
             st = True
+        elif a == "--lite":
+            INSTALLER_BIN = os.path.join(ROOT, "build-mac-lite", "installer", "MoofTCP Installer.bin")
+            VOLNAME = "MoofTCP Lite"
+            INST_NAME = "MoofTCP Lite Installer"
+            stem = "MoofTCP-Lite-"
         elif a == "--dist" and args:
             dist = args.pop(0)
         else:
@@ -478,7 +488,7 @@ def main():
     if len(args) != 1:
         sys.exit(__doc__)
     ver = args[0]
-    paths = {k: os.path.join(dist, "MoofTCP-%s.%s" % (ver, k)) for k in ("hqx", "sit", "dsk")}
+    paths = {k: os.path.join(dist, "%s%s.%s" % (stem, ver, k)) for k in ("hqx", "sit", "dsk")}
     for tool in ("hexbin", "unar", "lsar", "hmount", "hls", "hcopy", "hattrib", "humount"):
         if shutil.which(tool) is None:
             sys.exit("relverify.py: %s not installed" % tool)

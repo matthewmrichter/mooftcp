@@ -21,14 +21,16 @@
 # the reboot); 5a Install + restart with MoofTCP configured: parade icon, MoofDiag (moofdiag-run.sh
 # --installed), Flynn echo; 5b factory MacTCP: Install, restart, Remove, then ApiProbe unconfigured must
 # equal docs/dev/probe/mactcp-unconfigured.out; 7 a locked MacTCP file (Install refuses, nothing changes).
+# MT_LITE=1 runs any of them with the MoofTCP Lite installer (build-mac-lite/, output build-mac-lite/installer-test/).
 #   installer-test.sh interrupt <name> <I|R><N> <remove|install>   one interruption case of scenario 4
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
-OUT="$ROOT/build-mac/installer-test"
-APP="$ROOT/build-mac/installer/MoofTCP Installer.bin"
-DBG="$ROOT/build-mac/installer/Installer Dbg.bin"
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: the MoofTCP Lite installer (build-mac-lite/), output there
+OUT="$ROOT/$BM/installer-test"
+APP="$ROOT/$BM/installer/MoofTCP Installer.bin"
+DBG="$ROOT/$BM/installer/Installer Dbg.bin"
 DISPLAY_NUM="${MT_DISPLAY:-:142}"
 # same guard as snow.sh: only our private Xvfb displays :140-:149 (never the owner's desktop :0/:1)
 case "$DISPLAY_NUM" in :14[0-9]) ;; *) echo "installer-test.sh: refusing display $DISPLAY_NUM (only :140-:149)" >&2; exit 1;; esac
@@ -160,7 +162,7 @@ import hashlib, struct, sys
 d = open(sys.argv[1], "rb").read(); dl, rl = struct.unpack(">II", d[83:91]); ro = 128 + ((dl + 127) // 128) * 128
 r = bytearray(d[ro:ro + rl]); r[16:256] = bytes(len(r[16:256]))
 print("type=cdev creator=ztcp flags=0x2000 data=0 rsrc=%d rsrcx=%s" % (rl, hashlib.sha256(bytes(r)).hexdigest()[:16]))
-' "$ROOT/build-mac/moof/MoofTCP.bin")"
+' "$ROOT/$BM/moof/MoofTCP.bin")"
   got="$(grep '^sys MoofTCP ' "$OUT/$1.txt" | python3 -I -c '
 import re, sys
 l = sys.stdin.read()
@@ -201,7 +203,7 @@ set_debug() {  # set_debug <SPEC|none>
 }
 put_app_body() {  # one app in the test folder (the Finder puts it at 238,322)
   local f
-  for f in "MoofTCP Installer" "Installer Dbg" "MoofDiag" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
+  for f in "MoofTCP Installer" "MoofTCP Lite Installer" "Installer Dbg" "MoofDiag" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
   hcopy -m "$1" ":MoofTCP Test:"
 }
 put_app() { with_volume put_app_body "$1"; }
@@ -464,7 +466,7 @@ for f in sorted(glob.glob(sys.argv[1] + "/s5a-boot-*.png")):
 print("parade frame: %s (%.2f white in the icon box)" % (best[1], best[0]))
 sys.exit(0 if best[0] > 0.5 else 1)
 PY
-  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; }
+  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; hdel ":MoofTCP Test:MoofTCP Lite Installer" 2>/dev/null || true; }
   with_volume put_app_none
   scripts/moofdiag-run.sh --installed || rc=1
   flynn_echo s5a || rc=1
@@ -513,13 +515,13 @@ scenario5b() {  # factory MacTCP: Install, restart (MoofTCP unconfigured), Remov
   where s5b-after ':System Folder:' || rc=1
   # the factory image has no "MacTCP DNR"/"MacTCP Prep": MacTCP makes them at boot 1, before Install parks them
   cmd_compare before s5b-after attrs "MacTCP" || rc=1
-  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; }
+  put_app_none() { hdel ":MoofTCP Test:MoofTCP Installer" 2>/dev/null || true; hdel ":MoofTCP Test:MoofTCP Lite Installer" 2>/dev/null || true; }
   with_volume put_app_none
   scripts/probe-run.sh --unconfigured --keep-disk installer-5b || rc=1
-  if diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/build-mac/probe/installer-5b.out" >/dev/null; then
+  if diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-5b.out" >/dev/null; then
     echo "probe: identical to docs/dev/probe/mactcp-unconfigured.out"
   else
-    diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/build-mac/probe/installer-5b.out" | head -20
+    diff "$ROOT/docs/dev/probe/mactcp-unconfigured.out" "$ROOT/$BM/probe/installer-5b.out" | head -20
     rc=1
   fi
   result $rc 5b
