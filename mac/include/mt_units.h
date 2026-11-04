@@ -18,12 +18,19 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "mt_view.h"
 
 #define MT_UNITS_MASK24 ((uintptr_t)0x00FFFFFFu)
 #define MT_UNITS_PTR(p, mask) ((const uint8_t *)((uintptr_t)(p) & (mask)))
+/* dCtlStorage: offset 20 in the real DCE (after dCtlDriver 4, flags 2, queue header 10, position
+ * 4); host fakes with 8-byte pointers put it at 24. */
+#define MT_UNITS_DCE_STORAGE ((int)(sizeof(void *) == 4 ? 20 : 24))
 
-static inline const uint8_t *mt_units_find_ipp_in(uint8_t **const *tbl, int n, uintptr_t mask) {
+/* As mt_units_find_ipp_in, also giving the unit's DCE (NULL if none). */
+static inline const uint8_t *mt_units_find_ipp_dce_in(uint8_t **const *tbl, int n, uintptr_t mask,
+                                                      const uint8_t **dce_out) {
     int i;
+    if (dce_out) *dce_out = NULL;
     if (!tbl) return NULL;
     tbl = (uint8_t **const *)MT_UNITS_PTR(tbl, mask);
     for (i = 0; i < n; i++) {
@@ -42,10 +49,28 @@ static inline const uint8_t *mt_units_find_ipp_in(uint8_t **const *tbl, int n, u
             drv = MT_UNITS_PTR(drv, mask);
         }
         if (drv[18] == 4 && drv[19] == '.' && (drv[20] | 0x20) == 'i' && (drv[21] | 0x20) == 'p' &&
-            (drv[22] | 0x20) == 'p')
+            (drv[22] | 0x20) == 'p') {
+            if (dce_out) *dce_out = dce;
             return drv;
+        }
     }
     return NULL;
+}
+
+static inline const uint8_t *mt_units_find_ipp_in(uint8_t **const *tbl, int n, uintptr_t mask) {
+    return mt_units_find_ipp_dce_in(tbl, n, mask, NULL);
+}
+
+/* MoofTCP's status view (mt_view.h) from its DCE's dCtlStorage, or NULL (none: a driver that
+ * predates it, or another layout). Call only for a unit mt_units_is_moof accepted. */
+static inline const MtStatusView *mt_units_view_in(const uint8_t *dce, uintptr_t mask) {
+    const MtStatusView *v;
+    if (!dce) return NULL;
+    v = *(const MtStatusView *const *)(dce + MT_UNITS_DCE_STORAGE);
+    if (!v) return NULL;
+    v = (const MtStatusView *)MT_UNITS_PTR(v, mask);
+    if (v->magic != MT_VIEW_MAGIC || v->version != MT_VIEW_VERSION) return NULL;
+    return v;
 }
 
 #if defined(__m68k__)
@@ -53,6 +78,10 @@ static inline const uint8_t *mt_units_find_ipp_in(uint8_t **const *tbl, int n, u
 static inline const uint8_t *mt_units_find_ipp(void) {
     return mt_units_find_ipp_in(*(uint8_t **const *volatile *)0x11C, *(volatile int16_t *)0x1D2,
                                 MT_UNITS_MASK24);
+}
+static inline const uint8_t *mt_units_find_ipp_dce(const uint8_t **dce_out) {
+    return mt_units_find_ipp_dce_in(*(uint8_t **const *volatile *)0x11C, *(volatile int16_t *)0x1D2,
+                                    MT_UNITS_MASK24, dce_out);
 }
 #endif
 

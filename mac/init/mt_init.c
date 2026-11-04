@@ -103,7 +103,7 @@ void _start(void)
         if (r < 0)
             DisposeHandle(h);
     }
-    if (r == 0)
+    if (r == 0 || r == 3)                        /* MT_BOOT_OK, MT_BOOT_DHCP (Plan 4 ruling) */
         ShowParadeIcon(kIconID);
     Retro68FreeGlobals();
 }

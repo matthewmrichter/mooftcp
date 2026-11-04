@@ -36,6 +36,7 @@
 #include "mt.h"
 #include "mt_mactcp.h"
 #include "mt_os.h"
+#include "mt_view.h"
 
 #define MT_PB_MAX_TCP     16     /* stream table size; mt_limits.max_tcp may be smaller */
 #define MT_PB_SENDQ       8      /* TCPSend PBs pending per stream (queued FIFO, like MacTCP) */
@@ -257,6 +258,7 @@ struct MtDrv {
     uint8_t   dead_n;           /* a lone byte before the buffers above made them odd (Task 12) */
     uint8_t   co_gen;           /* bumped by every abandonment: a routine that resumes after one skips its depth-- */
     uint8_t   pad_co;
+    struct MtStatusView *view;  /* DHCP mode: the status mirror the event callback updates (NULL: none) */
 };
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
@@ -273,6 +275,16 @@ MtDrv   *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link
 /* Set the interface configuration; an address of 0 makes the driver unconfigured (every
  * call returns notOpenErr -28, as an unopened .IPP does, matrix "Unconfigured run"). */
 void     mt_pb_set_config(MtDrv *d, const mt_ifconfig *c);
+/* DHCP mode (Plan 4, docs/dev/DHCP-DESIGN.md section 4): apply c with the address forced to 0 (its
+ * mask/gateway/DNS/domain are the fallbacks for options the server does not send), install the event
+ * callback (mt_pb_dhcp_event, user = d) and start the core's client with `hint` as the requested
+ * address. view (may be NULL) is the status mirror the callback keeps up to date. The driver stays
+ * unconfigured (every call -28) until the first lease; from then on it stays configured for the rest
+ * of the boot, even when the lease is lost (the core drops the address; calls on live streams keep
+ * working, ruling). Returns what mt_dhcp_start returns. */
+int      mt_pb_dhcp_start(MtDrv *d, const mt_ifconfig *c, mt_ip4 hint, struct MtStatusView *view);
+/* The core's DHCP callback (exported for the host tests). */
+void     mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t lease_s);
 
 int16_t  mt_pb_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);

@@ -10,6 +10,7 @@
 #include "mt_timer.h"
 #include "mt_drv_logic.h"
 #include "mt_stackmark.h"
+#include "mt_view.h"
 
 struct MtDrv;
 
@@ -33,12 +34,16 @@ typedef struct MtRes {
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
     uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */
     uint8_t        pad2;
+    /* Plan 4 (DHCP), appended: version stays 1 */
+    mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
+    MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
 } MtRes;
 
 /* mt_drv_boot results (the INIT draws its icon only for MT_BOOT_OK) */
 #define MT_BOOT_OK            0
 #define MT_BOOT_UNCONFIGURED  1   /* installed, no address: OpenDriver(".IPP") gives -23004 */
 #define MT_BOOT_AGAIN         2   /* already booted (a second call) */
+#define MT_BOOT_DHCP          3   /* installed in DHCP mode: the address comes at the first open (icon drawn) */
 #define MT_BOOT_TAKEN       (-1)  /* a driver named .ipp is already installed (MacTCP) */
 #define MT_BOOT_NOMEM       (-2)
 #define MT_BOOT_NOUNIT      (-3)  /* the unit table install failed */
@@ -59,6 +64,9 @@ MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
  * counter, Task 3 loopback counters and Task 5 watchdog counters are all kept). */
 #define MT_DRV_STATUS_RES 0x4D54
 #define MT_STATUS_VERSION 1
+
+/* DHCP mode: the first open waits this long for the lease (DHCP-DESIGN.md section 4). */
+#define MT_DRV_DHCP_WAIT_TICKS 600u    /* 10 s */
 
 int16_t mt_drv_open(void *pb, void *dce);
 int16_t mt_drv_prime(void *pb, void *dce);

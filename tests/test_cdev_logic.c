@@ -244,33 +244,52 @@ static void draft_round_trip(void) {
     uint32_t n;
     setf(&f, "10.0.0.2", "255.0.255.0", "10.0.0.1", "", "a-very.long_domain");
     f.log = 1;
+    f.dhcp = 1;
     n = cdl_draft_encode(&f, b, sizeof b);
-    T_EQ(n, 1 + 1 + 8 + 1 + 11 + 1 + 8 + 1 + 0 + 1 + 18 + 1);
-    T_EQ(b[0], 2);
+    T_EQ(n, 1 + 1 + 8 + 1 + 11 + 1 + 8 + 1 + 0 + 1 + 18 + 1 + 1);
+    T_EQ(b[0], 3);                                     /* Plan 4: version 3, log + dhcp bytes */
     T_EQ(cdl_draft_decode(b, n, &g, 0), 0);
     T_EQ(g.log, 1);                                    /* the flag round-trips, default ignored */
+    T_EQ(g.dhcp, 1);
     T_EQ(cdl_fields_equal(&f, &g), 1);
     f.log = 0;
+    f.dhcp = 0;
     n = cdl_draft_encode(&f, b, sizeof b);
     T_EQ(cdl_draft_decode(b, n, &g, 1), 0);
     T_EQ(g.log, 0);
+    T_EQ(g.dhcp, 0);
     T_EQ(cdl_draft_encode(&f, b, 10), 0);               /* cap too small */
-    T_EQ(cdl_draft_encode(&f, b, n - 1), 0);            /* no room for the flag byte */
-    T_EQ(cdl_draft_decode(b, n - 1, &g, 0), -1);       /* truncated (flag byte missing) */
+    T_EQ(cdl_draft_encode(&f, b, n - 1), 0);            /* no room for the dhcp byte */
+    T_EQ(cdl_draft_decode(b, n - 1, &g, 0), -1);       /* truncated (dhcp byte missing) */
     T_EQ(g.ip[0], 0);
     b[n - 1] = 2;
-    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* flag byte not 0/1 */
+    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* dhcp byte not 0/1 */
     b[n - 1] = 0;
-    b[0] = 3;
+    b[n - 2] = 2;
+    T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* log byte not 0/1 */
+    b[n - 2] = 0;
+    b[0] = 4;
     T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* foreign version */
-    b[0] = 2; b[1] = 16;                               /* field longer than its buffer */
+    b[0] = 3; b[1] = 16;                               /* field longer than its buffer */
     T_EQ(cdl_draft_decode(b, n, &g, 0), -1);
     T_EQ(cdl_draft_decode(NULL, 0, &g, 0), -1);
     setf(&f, "", "", "", "", "");
     n = cdl_draft_encode(&f, b, sizeof b);
-    T_EQ(n, 7);
+    T_EQ(n, 8);
     T_EQ(cdl_draft_decode(b, n, &g, 1), 0);
     T_EQ(cdl_fields_equal(&f, &g), 1);
+    /* a version 2 draft (Task 11b: log byte, no dhcp byte) decodes with dhcp off */
+    {
+        static const uint8_t v2[] = { 2, 0, 0, 0, 0, 3,'l','a','n', 1 };
+        T_EQ(cdl_draft_decode(v2, sizeof v2, &g, 0), 0);
+        T_EQ(g.log, 1);
+        T_EQ(g.dhcp, 0);
+        T_CHECK(strcmp(g.domain, "lan") == 0);
+    }
+    /* changing only the DHCP box counts as an edit */
+    setf(&f, "", "", "", "", "");
+    g = f; g.dhcp = 1;
+    T_EQ(cdl_fields_equal(&f, &g), 0);
 }
 
 /* Task 8 fix round 1 drafts (version 1, no flag byte) still decode; the flag is the default. */
@@ -317,6 +336,89 @@ static void pcat_caps_at_255(void) {
     T_EQ(ps[0], 255);
 }
 
+static int ptext_is(const unsigned char *ps, const char *c) {
+    return ps[0] == strlen(c) && memcmp(ps + 1, c, ps[0]) == 0;
+}
+
+/* Plan 4: the status line for every unit / mode / DHCP state. */
+static void status_text_lines(void) {
+    unsigned char ps[256];
+    MtStatusView v;
+    memset(&v, 0, sizeof v);
+    v.magic = MT_VIEW_MAGIC; v.version = MT_VIEW_VERSION;
+    cdl_status_text(CDL_UNIT_NONE, NULL, 0, ps);
+    T_CHECK(ptext_is(ps, "Not loaded: restart after saving."));
+    cdl_status_text(CDL_UNIT_MACTCP, NULL, 0, ps);
+    T_CHECK(ptext_is(ps, "MacTCP is loaded; MoofTCP is off."));
+    cdl_status_text(CDL_UNIT_MOOF, NULL, 0, ps);       /* a driver without the view (RC2) */
+    T_CHECK(ptext_is(ps, "MoofTCP is loaded."));
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);         /* manual, no address: the carry-over line */
+    T_CHECK(ptext_is(ps, "MoofTCP is loaded, not configured."));
+    v.addr = 0x0A000002u;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
+    T_CHECK(ptext_is(ps, "MoofTCP is loaded: 10.0.0.2."));
+    v.linked = 1;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
+    T_CHECK(ptext_is(ps, "MoofTCP is running at 10.0.0.2."));
+    memset(&v, 0, sizeof v);
+    v.magic = MT_VIEW_MAGIC; v.version = MT_VIEW_VERSION; v.mode = 1;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
+    T_CHECK(ptext_is(ps, "DHCP: starts with the first network app."));
+    v.linked = 1; v.state = MT_DHCP_SELECTING;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
+    T_CHECK(ptext_is(ps, "DHCP: asking for an address..."));
+    v.state = MT_DHCP_BOUND; v.addr = 0xC0A80117u; v.lease_s = 7200; v.t_bound = 1000;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000 + 60u * 61u, ps);   /* 61 s later */
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23 (lease 1h58m)"));
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000 + 60u * 7000u, ps);
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23 (lease 3m)"));
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000 + 60u * 8000u, ps);  /* past the end: not yet seen */
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23 (lease 0m)"));
+    v.lease_s = 5u * 86400u;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23 (lease 5d)"));
+    v.lease_s = 0xFFFFFFFFu;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23 (no expiry)"));
+    v.state = MT_DHCP_RENEWING;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23, renewing"));
+    v.state = MT_DHCP_REBINDING;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "DHCP: 192.168.1.23, renewing"));
+    v.state = MT_DHCP_INIT; v.addr = 0;                /* lease lost, asking again */
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "DHCP: asking for an address..."));
+}
+
+/* Plan 4: the status view through the DCE's dCtlStorage. */
+static void units_view_from_dce(void) {
+    static uint8_t ipp[64];
+    static uint8_t dce[64];
+    static MtStatusView v;
+    uint8_t *p_dce = dce;
+    uint8_t **h = &p_dce;
+    uint8_t **tbl[2];
+    const uint8_t *found = NULL, *drv;
+    void *vp = &v;
+    uintptr_t all = ~(uintptr_t)0;
+    drv_set(ipp, ".ipp");
+    memset(dce, 0, sizeof dce);
+    { const void *pp = ipp; memcpy(dce, &pp, sizeof pp); }
+    tbl[0] = NULL; tbl[1] = h;
+    drv = mt_units_find_ipp_dce_in(tbl, 2, all, &found);
+    T_CHECK(drv == ipp);
+    T_CHECK(found == dce);
+    T_CHECK(mt_units_view_in(found, all) == NULL);      /* storage 0: an older driver */
+    memcpy(dce + MT_UNITS_DCE_STORAGE, &vp, sizeof vp);
+    T_CHECK(mt_units_view_in(found, all) == NULL);      /* magic missing */
+    v.magic = MT_VIEW_MAGIC; v.version = 2;
+    T_CHECK(mt_units_view_in(found, all) == NULL);      /* another layout */
+    v.version = MT_VIEW_VERSION;
+    T_CHECK(mt_units_view_in(found, all) == &v);
+    T_CHECK(mt_units_view_in(NULL, all) == NULL);
+}
+
 T_MAIN(units_is_moof_matches_moof_r, units_find_ipp_fake_table, problem_text_messages,
        check_key_transitions, save_and_close_decisions, field_caps, draft_round_trip, pcat_caps_at_255,
-       draft_v1_decodes, load_saved_defaults)
+       draft_v1_decodes, load_saved_defaults, status_text_lines, units_view_from_dce)

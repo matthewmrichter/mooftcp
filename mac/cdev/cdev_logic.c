@@ -31,7 +31,8 @@ static int streq(const char *a, const char *b) {
 
 int cdl_fields_equal(const CfeFields *a, const CfeFields *b) {
     return streq(a->ip, b->ip) && streq(a->mask, b->mask) && streq(a->gw, b->gw) &&
-           streq(a->dns, b->dns) && streq(a->domain, b->domain) && !a->log == !b->log;
+           streq(a->dns, b->dns) && streq(a->domain, b->domain) && !a->log == !b->log &&
+           !a->dhcp == !b->dhcp;
 }
 
 void cdl_load_saved(const uint8_t *res, uint32_t n, CfeFields *f) {
@@ -120,7 +121,7 @@ uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap) {
     uint32_t n = 1;
     int i;
     if (cap < 1) return 0;
-    out[0] = 2;
+    out[0] = 3;
     for (i = 0; i < 5; i++) {
         const char *s = fld(f, i);
         uint32_t k = 0;
@@ -129,8 +130,9 @@ uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap) {
         out[n++] = (uint8_t)k;
         while (k--) out[n++] = (uint8_t)*s++;
     }
-    if (n + 1 > cap) return 0;
+    if (n + 2 > cap) return 0;
     out[n++] = f->log ? 1 : 0;                          /* version 2: the log flag */
+    out[n++] = f->dhcp ? 1 : 0;                         /* version 3: the DHCP flag */
     return n;
 }
 
@@ -141,7 +143,7 @@ int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log
     char *z = (char *)f;
     uint32_t k;
     for (k = 0; k < sizeof *f; k++) z[k] = 0;
-    if (!p || n < 1 || (p[0] != 1 && p[0] != 2)) return -1;
+    if (!p || n < 1 || p[0] < 1 || p[0] > 3) return -1;
     for (i = 0; i < 5; i++) {
         if (off >= n) goto bad;
         k = p[off++];
@@ -157,9 +159,13 @@ int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log
         }
         off += k;
     }
-    if (p[0] == 2) {                                    /* version 2: one flag byte, 0 or 1 */
+    if (p[0] >= 2) {                                    /* version 2: one flag byte, 0 or 1 */
         if (off >= n || p[off] > 1) goto bad;
-        f->log = p[off];
+        f->log = p[off++];
+        if (p[0] == 3) {                                /* version 3: the DHCP byte, 0 or 1 */
+            if (off >= n || p[off] > 1) goto bad;
+            f->dhcp = p[off];
+        }
     } else {
         f->log = (uint8_t)(default_log ? 1 : 0);        /* version 1 drafts had no flag */
     }
@@ -167,4 +173,57 @@ int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log
 bad:
     for (k = 0; k < sizeof *f; k++) z[k] = 0;
     return -1;
+}
+
+/* "a.b.c.d" into ps (no libc: the cdev is position independent). */
+static void pcat_num(unsigned char *ps, uint32_t v) {
+    char t[11];
+    int i = 10;
+    t[10] = 0;
+    do { t[--i] = (char)('0' + v % 10u); v /= 10u; } while (v && i > 0);
+    cdl_pcat(ps, t + i);
+}
+
+static void pcat_ip(unsigned char *ps, uint32_t a) {
+    int k;
+    for (k = 3; k >= 0; k--) {
+        pcat_num(ps, (a >> (8 * k)) & 0xFFu);
+        if (k) cdl_pcat(ps, ".");
+    }
+}
+
+void cdl_status_text(int unit, const MtStatusView *v, uint32_t now_ticks, unsigned char *ps) {
+    ps[0] = 0;
+    if (unit == CDL_UNIT_NONE) { cdl_pcat(ps, "Not loaded: restart after saving."); return; }
+    if (unit == CDL_UNIT_MACTCP) { cdl_pcat(ps, "MacTCP is loaded; MoofTCP is off."); return; }
+    if (!v) { cdl_pcat(ps, "MoofTCP is loaded."); return; }
+    if (!v->mode) {
+        if (!v->addr) { cdl_pcat(ps, "MoofTCP is loaded, not configured."); return; }
+        cdl_pcat(ps, v->linked ? "MoofTCP is running at " : "MoofTCP is loaded: ");
+        pcat_ip(ps, v->addr);
+        cdl_pcat(ps, ".");
+        return;
+    }
+    if (!v->linked || v->state == MT_DHCP_OFF) {
+        cdl_pcat(ps, "DHCP: starts with the first network app.");
+        return;
+    }
+    if (v->state < MT_DHCP_BOUND || !v->addr) { cdl_pcat(ps, "DHCP: asking for an address..."); return; }
+    cdl_pcat(ps, "DHCP: ");
+    pcat_ip(ps, v->addr);
+    if (v->state != MT_DHCP_BOUND) { cdl_pcat(ps, ", renewing"); return; }
+    if (v->lease_s == 0xFFFFFFFFu) { cdl_pcat(ps, " (no expiry)"); return; }
+    {
+        uint32_t el = (now_ticks - v->t_bound) / 60u, left = v->lease_s > el ? v->lease_s - el : 0u;
+        cdl_pcat(ps, " (lease ");
+        if (left >= 2u * 86400u) {
+            pcat_num(ps, left / 86400u);
+            cdl_pcat(ps, "d");
+        } else {
+            if (left >= 3600u) { pcat_num(ps, left / 3600u); cdl_pcat(ps, "h"); }
+            pcat_num(ps, left % 3600u / 60u);
+            cdl_pcat(ps, "m");
+        }
+        cdl_pcat(ps, ")");
+    }
 }

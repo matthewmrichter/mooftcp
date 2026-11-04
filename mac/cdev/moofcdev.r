@@ -34,27 +34,29 @@ data 'nrct' (-4064) {
 };
 
 /* Item order is cdev_main.c's IT_* enum (Save added in the Task 8 fix round, the diagnostic-log
- * checkbox in Task 11b, both appended so earlier item numbers stay). Rows:
- * label at x 95, field at x 186, 24 px apart; Revert, Save and the version along the bottom. */
+ * checkbox in Task 11b, the DHCP checkbox in Plan 4, all appended so earlier item numbers stay).
+ * Rows: the DHCP box on top, then label at x 95, field at x 186, 22 px apart; Revert, Save and the
+ * version along the bottom. */
 resource 'DITL' (-4064) {
     {
         {224, 95, 244, 160}, Button { enabled, "Revert" };
-        {9, 186, 25, 314}, EditText { enabled, "" };
-        {33, 186, 49, 314}, EditText { enabled, "" };
-        {57, 186, 73, 314}, EditText { enabled, "" };
-        {81, 186, 97, 314}, EditText { enabled, "" };
-        {105, 186, 121, 314}, EditText { enabled, "" };
-        {9, 95, 25, 180}, StaticText { disabled, "IP address" };
-        {33, 95, 49, 180}, StaticText { disabled, "Subnet mask" };
-        {57, 95, 73, 180}, StaticText { disabled, "Router" };
-        {81, 95, 97, 180}, StaticText { disabled, "DNS server" };
-        {105, 95, 121, 180}, StaticText { disabled, "Domain" };
-        {150, 95, 166, 316}, StaticText { disabled, "" };
+        {25, 186, 41, 314}, EditText { enabled, "" };
+        {47, 186, 63, 314}, EditText { enabled, "" };
+        {69, 186, 85, 314}, EditText { enabled, "" };
+        {91, 186, 107, 314}, EditText { enabled, "" };
+        {113, 186, 129, 314}, EditText { enabled, "" };
+        {25, 95, 41, 180}, StaticText { disabled, "IP address" };
+        {47, 95, 63, 180}, StaticText { disabled, "Subnet mask" };
+        {69, 95, 85, 180}, StaticText { disabled, "Router" };
+        {91, 95, 107, 180}, StaticText { disabled, "DNS server" };
+        {113, 95, 129, 180}, StaticText { disabled, "Domain" };
+        {152, 95, 168, 316}, StaticText { disabled, "" };
         {168, 95, 200, 316}, StaticText { disabled, "" };
         {202, 95, 218, 320}, StaticText { disabled, "Changes take effect after you restart." };
         {228, 250, 244, 320}, StaticText { disabled, "v1.0rc2" };
         {224, 170, 244, 235}, Button { enabled, "Save" };
-        {128, 93, 146, 316}, CheckBox { enabled, "Keep a diagnostic log" };
+        {133, 93, 151, 316}, CheckBox { enabled, "Keep a diagnostic log" };
+        {2, 93, 20, 316}, CheckBox { enabled, "Get the address by DHCP" };
     }
 };
 

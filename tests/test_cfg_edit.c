@@ -315,8 +315,12 @@ static void encode_keeps_prior_mode_flags_tail(void) {
     f.log = 0;                                          /* below: the checkbox off */
     /* prior without flags byte / tail: flags 0, no tail, mode kept */
     { static const uint8_t p2[] = { 0,1, 0,1, 10,0,0,2, 255,0,0,0, 0,0,0,0, 0,0,0,0, 0 };
+      f.dhcp = 1;                                       /* Plan 4: the DHCP box decides 0 / 1 */
       n = cfe_encode(&f, p2, sizeof p2, buf, sizeof buf);
-      T_EQ(n, 22 + 11); T_EQ(mt_cfg_raw_mode(buf, n), 1); T_EQ(buf[n - 1], 0); }
+      T_EQ(n, 22 + 11); T_EQ(mt_cfg_raw_mode(buf, n), 1); T_EQ(buf[n - 1], 0);
+      f.dhcp = 0;                                       /* unticked: DHCP mode becomes manual */
+      n = cfe_encode(&f, p2, sizeof p2, buf, sizeof buf);
+      T_EQ(mt_cfg_raw_mode(buf, n), 0); }
     /* a prior that is shorter than the version word, or only the version word */
     { static const uint8_t p3[] = { 0,1 };
       n = cfe_encode(&f, p3, sizeof p3, buf, sizeof buf);
@@ -474,8 +478,64 @@ static void parse_ip_idempotent_fuzz(void) {
     }
 }
 
+/* Plan 4: the DHCP box. In DHCP mode the IP is optional (a requested-address hint) and the other
+ * fields may be set without it (fallbacks); everything typed is still validated. */
+static void dhcp_mode_fields(void) {
+    CfeFields f, g;
+    CfeError e;
+    uint8_t buf[128];
+    uint32_t n;
+    uint8_t mode;
+    mt_ifconfig c;
+    setf(&f, "", "255.255.255.0", "192.168.1.1", "1.1.1.1", "lan");
+    T_EQ(cfe_validate(&f, &e), CFE_E_IP);               /* manual: IP required */
+    f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_OK);
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_CHECK(n > 0);
+    T_EQ(mt_cfg_raw_mode(buf, n), MT_CFG_MODE_DHCP);
+    T_EQ(mt_cfg_parse(buf, n, &c, &mode), 0);
+    T_EQ(mode, MT_CFG_MODE_DHCP);
+    T_EQ(c.addr, 0); T_EQ(c.gateway, 0xC0A80101u); T_EQ(c.dns, 0x01010101u);
+    T_EQ(cfe_decode(buf, n, &g), 0);
+    T_EQ(g.dhcp, 1);
+    T_CHECK(strcmp(g.gw, "192.168.1.1") == 0);
+    T_CHECK(strcmp(g.dns, "1.1.1.1") == 0);
+    /* reserved fallbacks are still refused, a bad hint too */
+    setf(&f, "", "", "127.0.0.1", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_E_ADDR_RESERVED); T_EQ(e.field, CFE_F_GW);
+    setf(&f, "", "", "", "224.0.0.1", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_E_ADDR_RESERVED); T_EQ(e.field, CFE_F_DNS);
+    setf(&f, "", "0.0.0.0", "", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_E_MASK);
+    setf(&f, "10.0.0.0", "", "", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_E_HOSTBITS);
+    /* a hint with fields: as in manual mode */
+    setf(&f, "192.168.1.50", "255.255.255.0", "192.168.1.1", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_OK);
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(cfe_decode(buf, n, &g), 0);
+    T_EQ(g.dhcp, 1);
+    T_CHECK(strcmp(g.ip, "192.168.1.50") == 0);
+    /* all empty, DHCP on: valid (the common case) */
+    setf(&f, "", "", "", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_OK);
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(n, 22);
+    T_EQ(mt_cfg_raw_mode(buf, n), 1);
+    /* an unknown mode word is kept while the box is off */
+    { static const uint8_t p7[] = { 0,1, 0,7, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0, 0 };
+      T_EQ(cfe_decode(p7, sizeof p7, &g), 0);
+      T_EQ(g.dhcp, 0);
+      n = cfe_encode(&g, p7, sizeof p7, buf, sizeof buf);
+      T_EQ(mt_cfg_raw_mode(buf, n), 7);
+      g.dhcp = 1;
+      n = cfe_encode(&g, p7, sizeof p7, buf, sizeof buf);
+      T_EQ(mt_cfg_raw_mode(buf, n), 1); }
+}
+
 T_MAIN(parse_ip_table, parse_mask_table, format_round_trip, validate_empty_and_basic,
        validate_reserved_addresses, validate_host_bits, validate_ip_required,
        validate_gateway_offnet_warning, validate_domain, encode_decode_round_trip,
        encode_refuses_fatal_and_small_cap, encode_keeps_prior_mode_flags_tail, encode_rewrite_stable,
-       decode_blanks_invalid, parse_ip_idempotent_fuzz, log_flag_encode_decode)
+       decode_blanks_invalid, parse_ip_idempotent_fuzz, log_flag_encode_decode, dhcp_mode_fields)

@@ -136,6 +136,20 @@ int main(void)
             ip(a1, m->cfg.addr); ip(a2, m->cfg.mask); ip(a3, m->cfg.gateway); ip(a4, m->cfg.dns);
             P("config: addr %s mask %s gateway %s dns %s domain '%s' mtu %u\r", a1, a2, a3, a4,
               m->cfg.domain, m->cfg.mtu);
+            P("view: magic %04x version %u mode %u state %u linked %u addr %08lx lease %lu t_bound %lu\r",
+              m->view.magic, m->view.version, m->view.mode, m->view.state, m->view.linked,
+              (unsigned long)m->view.addr, (unsigned long)m->view.lease_s, (unsigned long)m->view.t_bound);
+            {
+                mt_stack *ds;
+                mt_dhcp_info di;
+                memcpy(&ds, m->d, sizeof ds);        /* MtDrv's first member: mt_stack *s */
+                mt_dhcp_get_info(ds, &di, mt_ms_from_ticks((uint32_t)TickCount()));
+                ip(a1, di.addr); ip(a2, di.server); ip(a3, m->dhcp_hint);
+                P("dhcp: state %u addr %s server %s hint %s lease %lu left %lu tx %lu offers %lu acks %lu naks %lu bad %lu\r",
+                  di.state, a1, a2, a3, (unsigned long)di.lease_s, (unsigned long)di.left_s,
+                  (unsigned long)di.tx, (unsigned long)di.offers, (unsigned long)di.acks,
+                  (unsigned long)di.naks, (unsigned long)di.bad);
+            }
             P("entries: calls %lu refused %lu pending-run %lu queued %lu queue-full %lu goodbye %lu\r",
               (unsigned long)m->entry.n_calls, (unsigned long)m->entry.n_refused,
               (unsigned long)m->entry.n_pend_run, (unsigned long)m->entry.pend.queued,
@@ -185,13 +199,13 @@ int main(void)
             {
                 mt_logrec rec[16];
                 uint16_t got, tot = 0;
-                static const char *const nm[] = { "?", "TCP_STATE", "TCP_TERM", "TCP_REXMT", "DROP", "ARP_FAIL", "DNS_FAIL" };
+                static const char *const nm[] = { "?", "TCP_STATE", "TCP_TERM", "TCP_REXMT", "DROP", "ARP_FAIL", "DNS_FAIL", "DHCP" };
                 /* mt_log_read at task time = the one reader context; the driver writes at gate time */
                 while ((got = mt_log_read(s, rec, 16)) != 0) {
                     uint16_t i;
                     for (i = 0; i < got; i++)
                         P("log: t %lu %s a %u b %u\r", (unsigned long)rec[i].t,
-                          nm[rec[i].code < 7 ? rec[i].code : 0], rec[i].a, rec[i].b);
+                          nm[rec[i].code < 8 ? rec[i].code : 0], rec[i].a, rec[i].b);
                     tot = (uint16_t)(tot + got);
                     if (tot >= 1000) break;
                 }
