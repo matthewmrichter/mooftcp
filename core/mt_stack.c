@@ -13,6 +13,7 @@ typedef struct {
     uint32_t dns;       /* offset of the DNS state (query slots + rx buffer) */
     uint32_t dcache;    /* offset of the DNS cache */
     uint32_t log;       /* offset of the diagnostic log ring */
+    uint32_t dhcp;      /* offset of the DHCP client state */
     uint32_t total;     /* bytes needed, including struct mt_stack at offset 0 */
 } mt_layout;
 
@@ -39,6 +40,8 @@ static void mt_layout_calc(const mt_limits *l, mt_layout *o) {
     off = mt_arena_up(off + (uint32_t)l->dns_cache * (uint32_t)sizeof(mt_dns_cent));
     o->log = off;
     off = mt_arena_up(off + MT_LOG_RECS * (uint32_t)sizeof(mt_logrec));
+    o->dhcp = off;
+    off = mt_arena_up(off + (uint32_t)sizeof(mt_dhcp));
     o->total = off;
 }
 
@@ -82,6 +85,8 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->lis_eph = (uint16_t)(1024u + (seed + 104729u) % 1024u);
     s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
     s->log = (mt_logrec *)(void *)(base + lay.log);
+    s->dhcp = (mt_dhcp *)(void *)(base + lay.dhcp);
+    s->dhcp->rnd = (seed * 2654435761u ^ 0x6A09E667u) | 1u;
     return s;
 }
 
@@ -93,17 +98,23 @@ void mt_set_entropy(mt_stack *s, uint32_t a, uint32_t b) {
     s->tcp_eph = (uint16_t)(49152u + ((a + 7919u) ^ (b >> 3)) % 16384u);
     s->lis_eph = (uint16_t)(1024u + ((a >> 7) ^ b) % 1024u);
     mt_dns_reseed(s, a, b);
+    mt_dhcp_reseed(s, a, b);
 }
 
 /* mtu is clamped to 68..1500 (IPv4 minimum, txbuf limit); 0 means 68, never "unlimited".
  * The full semantics are written down at the declaration in mt.h. */
 void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
-    mt_ifconfig old = s->cfg;
-    uint16_t i, lm;
+    mt_ip4 oa = s->cfg.addr, om = s->cfg.mask, og = s->cfg.gateway;
+    uint16_t omtu = s->cfg.mtu;
     s->cfg = *c;
     if (s->cfg.mtu < 68u) s->cfg.mtu = 68u;
     if (s->cfg.mtu > MT_TXBUF_SIZE - MT_ETH_HDR) s->cfg.mtu = (uint16_t)(MT_TXBUF_SIZE - MT_ETH_HDR);
-    if (old.addr != s->cfg.addr || old.mask != s->cfg.mask || old.gateway != s->cfg.gateway) {
+    mt_cfg_commit(s, oa, om, og, omtu);
+}
+
+void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t omtu) {
+    uint16_t i, lm;
+    if (oaddr != s->cfg.addr || omask != s->cfg.mask || ogw != s->cfg.gateway) {
         memset(s->arp, 0, (size_t)s->lim.arp_entries * sizeof(mt_arp_entry));
         if (s->pend->len) {                      /* the held frame was addressed from the old setup */
             s->pend->len = 0;
@@ -111,9 +122,9 @@ void mt_set_config(mt_stack *s, const mt_ifconfig *c) {
             MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
         }
         s->arp_rel.live = 0;
-        if (old.addr != s->cfg.addr) mt_ip_lo_flush(s);   /* queued with the old source address */
+        if (oaddr != s->cfg.addr) mt_ip_lo_flush(s);   /* queued with the old source address */
     }
-    if (s->cfg.mtu < old.mtu) {
+    if (s->cfg.mtu < omtu) {
         lm = mt_tcp_local_mss(s);
         for (i = 0; i < s->lim.max_tcp; i++)
             if (s->tcp[i].used && s->tcp[i].mss > lm) s->tcp[i].mss = lm;
@@ -247,6 +258,7 @@ void mt_tick(mt_stack *s, uint32_t now) {
     mt_ip_timers(s, now);
     mt_tcp_timers(s, now);
     mt_dns_timers(s, now);
+    mt_dhcp_timers(s, now);
     mt_ip_lo_drain(s, now);       /* last: frames the timers just queued to ourselves go too */
 }
 
@@ -255,5 +267,6 @@ uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     d = mt_dl_min(d, mt_ip_deadline(s, now));
     d = mt_dl_min(d, mt_tcp_deadline(s, now));
     d = mt_dl_min(d, mt_dns_deadline(s, now));
+    d = mt_dl_min(d, mt_dhcp_deadline(s, now));
     return d;
 }

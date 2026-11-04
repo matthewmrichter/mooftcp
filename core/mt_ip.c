@@ -92,9 +92,18 @@ static void ip_in(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now, in
     src = mt_rd32(ip + 12);
     if (lo) {                         /* built by us, to and from a local address */
         if (!mt_ip_is_local(s, dst) || !mt_ip_is_local(s, src)) MT_DROP_GOTO(why);
+    } else if (s->cfg.addr == 0) {
+        /* Unconfigured: only the DHCP client's replies pass (client running, unfragmented UDP to
+         * port 68, any destination: servers may unicast to the offered address), from a unicast
+         * source. Everything else is dropped as before. */
+        if (!mt_dhcp_on(s) || ip[9] != 17 || (mt_rd16(ip + 6) & 0x3FFFu) != 0 || tot < ihl + 8u ||
+            mt_rd16(ip + ihl + 2) != 68 || src >= 0xE0000000u || mt_ip_is_127(src))
+            MT_DROP_GOTO(why);
+        s->stats.ip_in++;
+        mt_udp_input(s, src, dst, ip + ihl, (uint16_t)(tot - ihl), now);
+        return;
     } else {
-        if (s->cfg.addr == 0 ||
-            (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
+        if (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask))
             MT_DROP_GOTO(why);
         /* Source validation (RFC 1122 3.2.1.3, RFC 6890): never a multicast / class E / limited
          * broadcast address, our own address, 127/8 or the directed broadcast, so no reply (RST,
@@ -269,6 +278,17 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
         if (lo ? !lo_put(s, (uint16_t)(MT_IP_HDR + n))
                : mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + n), now) != 1) break;
     }
+    return MT_OK;
+}
+
+int mt_ip_output_bcast0(mt_stack *s, uint8_t proto, uint16_t plen) {
+    if (plen > MT_TXBUF_SIZE - MT_ETH_HDR - MT_IP_HDR) return MT_ERR_INVAL;
+    ip_hdr(s, MT_ETH_BCAST_IP, proto, s->ip_id++, 0, plen);   /* source: cfg.addr, i.e. 0.0.0.0 */
+    s->stats.ip_out++;
+    memset(s->txbuf, 0xFF, 6);
+    memcpy(s->txbuf + 6, s->cfg.mac, 6);
+    mt_wr16(s->txbuf + 12, 0x0800);
+    if (mt_eth_tx(s, s->txbuf, (uint16_t)(MT_ETH_HDR + MT_IP_HDR + plen)) != 0) s->tx_refused = 1;
     return MT_OK;
 }
 

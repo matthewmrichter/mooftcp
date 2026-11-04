@@ -28,6 +28,7 @@ static uint32_t pseudo_sum(mt_ip4 src, mt_ip4 dst, uint16_t ulen) {
 static mt_udp *udp_create(mt_stack *s, mt_udp *u, uint16_t lport, uint8_t *buf, uint32_t buflen,
                           mt_udp_cb cb, void *user) {
     if (!u || !buf || buflen < UDP_MIN_BUF) return NULL;
+    if (lport == 68 && mt_dhcp_on(s)) return NULL;          /* the DHCP client's port */
     if (lport == 0) {
         uint32_t tries;
         uint16_t p = s->udp_eph;
@@ -174,6 +175,10 @@ void mt_udp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     if (!u) {
         if (checked &&
             mt_cksum_fold(mt_cksum_add(pseudo_sum(src, dst, ulen), pl, ulen)) != 0) MT_DROP_GOTO(why);
+        if (mt_rd16(pl + 2) == 68 && mt_dhcp_on(s)) {          /* no endpoint: the DHCP client */
+            mt_dhcp_input(s, pl + UDP_HDR, dlen, now);
+            return;
+        }
         s->stats.udp_noport++;
         if (mt_ip_is_local(s, dst)) mt_icmp_send_unreach(s, src, dst, UDP_PROTO, pl, ulen, 3, now);
         return;
