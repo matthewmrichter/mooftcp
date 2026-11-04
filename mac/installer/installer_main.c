@@ -163,18 +163,21 @@ static void run(int remove) {
         if (hd) LoadResource(hd);
         if (!hr || !hi || GetHandleSize(hi) < 10 || (hd && !*hd)) {
             strcpy(buf, "There is not enough memory to install MoofTCP (or this copy of the installer is damaged). Nothing was changed.");
-        } else if (HLock(hr), inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != g_lite) {
-            strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
         } else {
             HLock(hr); HLock(hi);
             if (hd) HLock(hd);
-            pl.rsrc = (const uint8_t *)*hr; pl.rlen = GetHandleSize(hr);
-            pl.data = hd ? (const uint8_t *)*hd : NULL; pl.dlen = hd ? GetHandleSize(hd) : 0;
-            pl.type = be32((const unsigned char *)*hi);
-            pl.creator = be32((const unsigned char *)*hi + 4);
-            pl.flags = (uint16_t)((((const unsigned char *)*hi)[8] << 8) | ((const unsigned char *)*hi)[9]);
-            (void)inst_do_install(&fs, &pl, g_stop_only == 'R' ? 0 : g_stop, &r);
-            restart = inst_message(&r, VERS_STR, buf, sizeof buf);
+            if (inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != g_lite) {
+                /* the file under this id must be the variant the box names (scripts/mkembed.py checks it at build time too) */
+                strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
+            } else {
+                pl.rsrc = (const uint8_t *)*hr; pl.rlen = GetHandleSize(hr);
+                pl.data = hd ? (const uint8_t *)*hd : NULL; pl.dlen = hd ? GetHandleSize(hd) : 0;
+                pl.type = be32((const unsigned char *)*hi);
+                pl.creator = be32((const unsigned char *)*hi + 4);
+                pl.flags = (uint16_t)((((const unsigned char *)*hi)[8] << 8) | ((const unsigned char *)*hi)[9]);
+                (void)inst_do_install(&fs, &pl, g_stop_only == 'R' ? 0 : g_stop, &r);
+                restart = inst_message(&r, VERS_STR, buf, sizeof buf);
+            }
         }
         if (hr) { HUnlock(hr); ReleaseResource(hr); }
         if (hd) { HUnlock(hd); ReleaseResource(hd); }

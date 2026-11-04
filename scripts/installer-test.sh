@@ -211,7 +211,7 @@ set_debug() {  # set_debug <SPEC|none>
 }
 put_app_body() {  # one app in the test folder (the Finder puts it at 238,322)
   local f
-  for f in "MoofTCP Installer" "MoofTCP Lite Installer" "Installer Dbg" "MoofDiag" "MoofDiag Lite" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
+  for f in "MoofTCP Installer" "MoofTCP Lite Installer" "Installer Dbg" "MoofDiag" "MoofDiag Lite" "MoofDiag.out" "Flynn"; do hdel ":MoofTCP Test:$f" 2>/dev/null || true; done
   hcopy -m "$1" ":MoofTCP Test:"
 }
 put_app() { with_volume put_app_body "$1"; }
