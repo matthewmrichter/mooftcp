@@ -14,6 +14,16 @@
  *   P:k<slot>:r<ioResult>@tick                                        poll loop saw completion
  * Tick values in events are relative to the start of the case.
  *
+ * ApiProbe.cfg (optional, one line in the app's folder; no file = all groups 1-9 and 0, host 172.17.0.1, ports 17000+):
+ *   digits 1-9, 0   groups to run (0 = group 10); D = DNR group; Q = quit-with-lookup-pending group
+ *   B<port>         testnet.py port base (default 17000; echo = base+7, discard +9, banner +23, ...)
+ *   H<a.b.c.d>      the host running scripts/testnet.py (default 172.17.0.1, the Snow host). Giving H switches on
+ *                   real-network mode: a preflight connect to the echo port first (7 s at most; only when group 2-6 or 8 is selected); when it fails
+ *                   one "# PRE host unreachable" line is written and groups 2-6 and the host parts of group 8 are skipped
+ *                   (G1, G7, G9, G10, D, Q and the other group 8 cases do not need testnet.py); every case also writes
+ *                   a "# begin <id> <name>" line before it starts, so a hang leaves the case name on disk.
+ *   Example: "H192.168.50.190 B17000 6" (digits inside H and B belong to the number, not to the group list).
+ *
  * Only mt_mactcp.h and probe_os.h are included: Toolbox headers live in probe_os.c.
  */
 #include <stdint.h>
@@ -24,7 +34,11 @@
 #define P32(x) ((MacPtr32)(uintptr_t)(x))
 #define TK(s)  ((long)(s) * 60)
 
-#define HOST       0xAC110001UL   /* 172.17.0.1 : the Snow host, testnet.py */
+/* The host running scripts/testnet.py: 172.17.0.1 (the Snow host) unless ApiProbe.cfg gives "H<a.b.c.d>". */
+static uint32_t g_host = 0xAC110001UL;
+#define HOST       g_host
+static int g_real;                  /* an H token was given: real network, so preflight + per-case "# begin" lines */
+static int g_host_ok = 1;           /* preflight result (only ever 0 when g_real) */
 #define GATEWAY    0x0A000001UL   /* 10.0.0.1 */
 #define DEADLINK   0x0A630063UL   /* 10.99.0.99 : on-link (mask 255.0.0.0), nobody home */
 #define DEADROUTED 0xC0000201UL   /* 192.0.2.1 : off-link, via the gateway */
@@ -237,6 +251,11 @@ static void BEGIN(const char *id, const char *name, int async)
     strncpy(cur_name, name, sizeof cur_name - 1); cur_name[sizeof cur_name - 1] = 0;
     cur_async = async; ex.n = 0; ex.s[0] = 0;
     ev_n = 0; ev_drop = 0; case_t0 = os_ticks(); g_watch = 0;
+    if (g_real) {   /* progress on disk before the case runs (it may hang; emit() only writes when it ends) */
+        os_out_write("# begin ", 8); os_out_write(cur_id, (long)strlen(cur_id)); os_out_write(" ", 1);
+        os_out_write(cur_name, (long)strlen(cur_name)); os_out_write("\r", 1);
+        os_out_flush();
+    }
 }
 
 static void emit(int cs, long res)
@@ -1412,7 +1431,7 @@ static void c_udp_misc(int async)
 #endif
 static void c_icmp(int async)
 {
-    static const struct { const char *id, *name; uint32_t dest; } t[] = {
+    const struct { const char *id, *name; uint32_t dest; } t[] = {
         { "A00", "echo_gateway", GATEWAY }, { "A01", "echo_host", HOST },
         { "A02", "echo_dead_onlink", DEADLINK }, { "A03", "echo_self", 0 }
     };
@@ -1615,6 +1634,32 @@ static void c_driver_close(void)
 
 static void both(void (*f)(int)) { f(0); f(1); }
 
+static void ap_ip(uint32_t a)
+{
+    apd((a >> 24) & 255); ap("."); apd((a >> 16) & 255); ap("."); apd((a >> 8) & 255); ap("."); apd(a & 255);
+}
+
+/* Real-network preflight: one TCP connect to testnet.py's echo port, short timeout. Returns 1 when it connects. */
+static int preflight(void)
+{
+    Slot *s = &slots[0]; short r, e; StreamPtr sp;
+    char m[200]; B *sv = cb;
+    sp = mk(1, 4096, &e);
+    if (!sp) r = e;
+    else {
+        r = aopen(s, sp, HOST, P_ECHO, 0, 4, 1, TK(7));
+        if (r == 1) tcall(TCPAbort, sp);
+        tcall(TCPAbort, sp); rel(sp);
+    }
+    if (r == 0) return 1;
+    cb = &hd; hd.n = 0; hd.s[0] = 0; ap("host unreachable: connect to "); ap_ip(HOST);
+    ap(" port "); apd((long)P_ECHO); ap(" failed (result "); apd(r);
+    ap("); configure H<ip> in ApiProbe.cfg and start scripts/testnet.py on that host (groups 2-6 and the host cases of 8 skipped)");
+    strncpy(m, hd.s, sizeof m - 1); m[sizeof m - 1] = 0; cb = sv;
+    note("PRE", m);
+    return 0;
+}
+
 static unsigned grp_mask = 0x7FF;   /* groups D (11, DNR) and Q (12, quit with a lookup pending) only when named in ApiProbe.cfg */
 static int grp(int g) { return (grp_mask >> g) & 1; }
 
@@ -1628,10 +1673,20 @@ int main(void)
     for (i = 0; i < (int)sizeof big; i++) big[i] = (char)('a' + i % 26);
 
     {   /* ApiProbe.cfg: digits 1-9 name the groups to run; missing = all */
-        char cfg[16]; int n = os_read_cfg("\pApiProbe.cfg", cfg, (int)sizeof cfg), k;
+        char cfg[64]; int n = os_read_cfg("\pApiProbe.cfg", cfg, (int)sizeof cfg), k;
         if (n > 0) {
             grp_mask = 0;
-            for (k = 0; k < n; k++) if (cfg[k] == 'B') {   /* B<port base>: digits up to the next non-digit */
+            for (k = 0; k < n; k++) if (cfg[k] == 'H') {   /* H<a.b.c.d>: digits and dots up to the next other character */
+                uint32_t a = 0, o = 0; int dots = 0, ok = 1;
+                while (k + 1 < n && ((cfg[k + 1] >= '0' && cfg[k + 1] <= '9') || cfg[k + 1] == '.')) {
+                    char c = cfg[++k];
+                    if (c == '.') { if (++dots > 3 || o > 255) ok = 0; a = (a << 8) | (o & 255); o = 0; }
+                    else { o = o * 10u + (uint32_t)(c - '0'); if (o > 255) ok = 0; }
+                }
+                a = (a << 8) | (o & 255);
+                if (ok && dots == 3 && a != 0) { g_host = a; g_real = 1; }
+            }
+            else if (cfg[k] == 'B') {   /* B<port base>: digits up to the next non-digit */
                 unsigned b = 0;
                 while (k + 1 < n && cfg[k + 1] >= '0' && cfg[k + 1] <= '9') b = b * 10u + (unsigned)(cfg[++k] - '0');
                 if (b >= 1024 && b <= 65000) p_base = b;
@@ -1647,6 +1702,8 @@ int main(void)
     note("0", "ApiProbe 1: format id name S|A cs= res= extras | events (A=ASR C=completion P=poll)");
     { char m[16]; int k, n = 0; for (k = 1; k <= 12; k++) if (grp(k)) m[n++] = (char)(k == 12 ? 'Q' : k == 11 ? 'D' : '0' + (k % 10)); m[n] = 0; note("0", m); }
     note("0", "values written =@N are tick counts (timing dependent)");
+    if (g_real) { char m[40]; B *sv = cb; cb = &hd; hd.n = 0; hd.s[0] = 0; ap("host "); ap_ip(HOST);
+                  strncpy(m, hd.s, sizeof m - 1); m[sizeof m - 1] = 0; cb = sv; note("0", m); }
     if (p_base != 17000) { char m[24]; B *sv = cb; cb = &hd; hd.n = 0; apd((long)p_base); cb = sv;
                            strcpy(m, "port base "); strcat(m, hd.s); note("0", m); }
 
@@ -1665,6 +1722,11 @@ int main(void)
         os_out_close();
         os_done_alert();
         return 0;
+    }
+
+    if (g_real && (grp(2) || grp(3) || grp(4) || grp(5) || grp(6) || grp(8))) {   /* only when a group needs testnet.py */
+        g_host_ok = preflight();
+        if (!g_host_ok) grp_mask &= ~((1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6));
     }
 
     /* Groups (ApiProbe.cfg selects them; no cfg = all). probe-run.sh runs one group set per
@@ -1729,13 +1791,13 @@ int main(void)
         note("G8", "csCode sweeps, null pointers, driver close");
         sweep("120", "sweep_stream0", 0, 0);
         sweep("121", "sweep_stale_stream", 1, 1);
-        both(c_risky);
+        if (g_host_ok) both(c_risky);
         c_driver_close();
         /* completion marker (the host echo server logs it) */
         {
             Slot *s = &slots[0]; StreamPtr sp;
             memcpy(tmpbuf, "PROBE-DONE\n", 11);
-            if (connect_to(1, HOST, P_ECHO, &sp, 0) == 0) {
+            if (g_host_ok && connect_to(1, HOST, P_ECHO, &sp, 0) == 0) {
                 snd(s, sp, w1(0, tmpbuf, 11), 1, 0);
                 delay(60);
                 tcall(TCPAbort, sp); rel(sp);
