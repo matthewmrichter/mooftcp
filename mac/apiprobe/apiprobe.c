@@ -22,6 +22,10 @@
  *                   one "# PRE host unreachable" line is written and groups 2-6 and the host parts of group 8 are skipped
  *                   (G1, G7, G9, G10, D, Q and the other group 8 cases do not need testnet.py); every case also writes
  *                   a "# begin <id> <name>" line before it starts, so a hang leaves the case name on disk.
+ *   N               non-interactive (scripts): no launch dialog, tokens exactly as above. WITHOUT N the app first shows a
+ *                   dialog (Target host IP, Groups; OK/Return, Quit/Cmd-Q) and uses its answers instead of H and the digits
+ *                   (B still comes from the cfg). The accepted values are remembered in ApiProbe.last ("<ip> <groups>"
+ *                   + CR) and prefill the next launch. An IP other than 172.17.0.1 turns real-network mode on, as H does.
  *   Example: "H192.168.50.190 B17000 6" (digits inside H and B belong to the number, not to the group list).
  *
  * Only mt_mactcp.h and probe_os.h are included: Toolbox headers live in probe_os.c.
@@ -1663,6 +1667,63 @@ static int preflight(void)
 static unsigned grp_mask = 0x7FF;   /* groups D (11, DNR) and Q (12, quit with a lookup pending) only when named in ApiProbe.cfg */
 static int grp(int g) { return (grp_mask >> g) & 1; }
 
+/* Parse the ApiProbe.cfg grammar (see the header) into g_host/g_real/p_base/grp_mask. */
+static void apply_tokens(const char *cfg, int n)
+{
+    int k;
+    for (k = 0; k < n; k++) if (cfg[k] == 'H') {   /* H<a.b.c.d>: digits and dots up to the next other character */
+        uint32_t a = 0, o = 0; int dots = 0, ok = 1;
+        while (k + 1 < n && ((cfg[k + 1] >= '0' && cfg[k + 1] <= '9') || cfg[k + 1] == '.')) {
+            char c = cfg[++k];
+            if (c == '.') { if (++dots > 3 || o > 255) ok = 0; a = (a << 8) | (o & 255); o = 0; }
+            else { o = o * 10u + (uint32_t)(c - '0'); if (o > 255) ok = 0; }
+        }
+        a = (a << 8) | (o & 255);
+        if (ok && dots == 3 && a != 0) { g_host = a; g_real = 1; }
+    }
+    else if (cfg[k] == 'B') {   /* B<port base>: digits up to the next non-digit */
+        unsigned b = 0;
+        while (k + 1 < n && cfg[k + 1] >= '0' && cfg[k + 1] <= '9') b = b * 10u + (unsigned)(cfg[++k] - '0');
+        if (b >= 1024 && b <= 65000) p_base = b;
+    }
+    else if (cfg[k] >= '1' && cfg[k] <= '9') grp_mask |= 1u << (cfg[k] - '0');
+    else if (cfg[k] == '0') grp_mask |= 1u << 10;
+    else if (cfg[k] == 'D') grp_mask |= 1u << 11;
+    else if (cfg[k] == 'Q') grp_mask |= 1u << 12;
+}
+
+/* "a.b.c.d", four decimal octets, nothing else (trailing spaces already trimmed) */
+static int parse_ip4(const char *s, uint32_t *ip)
+{
+    uint32_t v = 0; int part;
+    for (part = 0; part < 4; part++) {
+        long n = 0; int d = 0;
+        while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; d++; if (n > 255) return 0; }
+        if (!d) return 0;
+        v = (v << 8) | (uint32_t)n;
+        if (part < 3) { if (*s != '.') return 0; s++; }
+    }
+    if (*s) return 0;
+    *ip = v;
+    return 1;
+}
+
+/* Dialog check: trim/normalize the entries; NULL = fine, else the message shown in the dialog. */
+static const char *ask_check(char *ip, char *gr)
+{
+    char *c; int q; uint32_t a;
+    for (c = ip; *c == ' '; c++) { }
+    if (c != ip) memmove(ip, c, strlen(c) + 1);
+    for (q = (int)strlen(ip); q > 0 && ip[q - 1] == ' '; ) ip[--q] = 0;
+    if (!parse_ip4(ip, &a)) return "Bad IP: use four numbers 0-255 with dots, like 192.168.50.190.";
+    for (q = 0, c = gr; *c; c++) {
+        if (*c == 'd') *c = 'D'; else if (*c == 'q') *c = 'Q';
+        if (!((*c >= '0' && *c <= '9') || *c == 'D' || *c == 'Q' || *c == ' ' || *c == ',')) q = 1;
+    }
+    if (q) return "Bad groups: only digits 0-9, D and Q; or leave it empty for all.";
+    return 0;
+}
+
 int main(void)
 {
     short r;
@@ -1672,29 +1733,32 @@ int main(void)
     g_uasr_target = (uint32_t)(uintptr_t)uasr_c;
     for (i = 0; i < (int)sizeof big; i++) big[i] = (char)('a' + i % 26);
 
-    {   /* ApiProbe.cfg: digits 1-9 name the groups to run; missing = all */
-        char cfg[64]; int n = os_read_cfg("\pApiProbe.cfg", cfg, (int)sizeof cfg), k;
+    {   /* ApiProbe.cfg: tokens as in the header. With the N token (scripts) or no dialog resource nothing is asked. */
+        char cfg[64]; int n = os_read_cfg("\pApiProbe.cfg", cfg, (int)sizeof cfg), k, noninter = 0;
         if (n > 0) {
+            for (k = 0; k < n; k++) if (cfg[k] == 'N') noninter = 1;
             grp_mask = 0;
-            for (k = 0; k < n; k++) if (cfg[k] == 'H') {   /* H<a.b.c.d>: digits and dots up to the next other character */
-                uint32_t a = 0, o = 0; int dots = 0, ok = 1;
-                while (k + 1 < n && ((cfg[k + 1] >= '0' && cfg[k + 1] <= '9') || cfg[k + 1] == '.')) {
-                    char c = cfg[++k];
-                    if (c == '.') { if (++dots > 3 || o > 255) ok = 0; a = (a << 8) | (o & 255); o = 0; }
-                    else { o = o * 10u + (uint32_t)(c - '0'); if (o > 255) ok = 0; }
-                }
-                a = (a << 8) | (o & 255);
-                if (ok && dots == 3 && a != 0) { g_host = a; g_real = 1; }
+            apply_tokens(cfg, n);
+        }
+        if (!noninter) {   /* launch dialog: target host IP + groups; the last accepted values are remembered in ApiProbe.last */
+            char ip[20] = "172.17.0.1", gr[24] = "", last[48]; uint32_t a;
+            int ln = os_read_cfg("\pApiProbe.last", last, (int)sizeof last - 1), q;
+            if (ln > 0) {   /* "<ip> <groups>" */
+                last[ln] = 0;
+                for (q = 0; q < ln && last[q] != ' ' && last[q] != '\r' && last[q] != '\n'; q++) { }
+                if (q < (int)sizeof ip) { memcpy(ip, last, (size_t)q); ip[q] = 0; }
+                while (q < ln && (last[q] == ' ' || last[q] == '\r' || last[q] == '\n')) q++;
+                { int g = 0; while (q < ln && last[q] != '\r' && last[q] != '\n' && g < (int)sizeof gr - 1) gr[g++] = last[q++]; gr[g] = 0; }
             }
-            else if (cfg[k] == 'B') {   /* B<port base>: digits up to the next non-digit */
-                unsigned b = 0;
-                while (k + 1 < n && cfg[k + 1] >= '0' && cfg[k + 1] <= '9') b = b * 10u + (unsigned)(cfg[++k] - '0');
-                if (b >= 1024 && b <= 65000) p_base = b;
-            }
-            else if (cfg[k] >= '1' && cfg[k] <= '9') grp_mask |= 1u << (cfg[k] - '0');
-            else if (cfg[k] == '0') grp_mask |= 1u << 10;
-            else if (cfg[k] == 'D') grp_mask |= 1u << 11;
-            else if (cfg[k] == 'Q') grp_mask |= 1u << 12;
+            if (!os_ask(ip, (int)sizeof ip, gr, (int)sizeof gr, ask_check)) return 0;   /* Quit / Cmd-Q: nothing touched yet */
+            parse_ip4(ip, &a);   /* ask_check accepted it */
+            ln = (int)strlen(ip); memcpy(last, ip, (size_t)ln); last[ln++] = ' ';
+            memcpy(last + ln, gr, strlen(gr)); ln += (int)strlen(gr); last[ln++] = '\r';
+            os_write_file("\pApiProbe.last", last, ln);
+            g_host = a; g_real = (a != 0xAC110001UL);   /* the Snow default stays the old quiet mode; any other address = real network */
+            grp_mask = 0;
+            apply_tokens(gr, (int)strlen(gr));
+            if (grp_mask == 0) grp_mask = 0x7FF;
         }
     }
     r = os_out_open("\pApiProbe.out");

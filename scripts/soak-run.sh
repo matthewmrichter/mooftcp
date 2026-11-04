@@ -84,7 +84,7 @@ with_volume() {
 }
 # The files the apps write exist up front (empty) so the Finder's icon grid does not shift during the run.
 put_files() {
-  printf '%s' "$groups" > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
+  printf '%s N' "$groups" > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
   hcopy -t "$out_dir/ApiProbe.cfg" ":MoofTCP Test:ApiProbe.cfg"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:ApiProbe.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:HeapInfo.out"

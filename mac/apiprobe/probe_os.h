@@ -16,6 +16,10 @@ short         os_out_write(const char *buf, long n);
 void          os_out_flush(void);             /* FlushVol: survive a crash of the machine */
 void          os_out_close(void);
 void          os_done_alert(void);
+/* launch dialog (DLOG 129): 1 = OK, 0 = Quit/Cmd-Q. check(ip, groups) validates/normalizes the entries on OK and returns
+ * NULL or a message that is shown inside the dialog (which stays open). */
+int           os_ask(char *ip, int ipmax, char *groups, int gmax, const char *(*check)(char *ip, char *groups));
+void          os_write_file(const char *pname, const char *buf, long n);   /* create/truncate+write+FlushVol, default dir */
 int           os_read_cfg(const char *pname, char *buf, int max);   /* bytes read, 0 if absent */
 /* DNR: load the 'dnrp' resource of "MacTCP DNR" (System Folder; else of the "MoofTCP" file), locked; NULL on failure (err gets the
  * OSErr). os_free_dnr disposes it. os_set_a5 sets A5 (returns the old one); os_get_sr reads SR. */

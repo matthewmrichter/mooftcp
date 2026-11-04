@@ -120,7 +120,7 @@ with_volume() {
 }
 write_cfg() {  # write_cfg "<groups>" : ApiProbe.cfg (digits only)
   local f="$out_dir/$label.cfg"
-  printf '%s' "$1" | tr -d ' ' > "$f"
+  printf '%s' "$1" | tr -d ' ' > "$f"; printf ' N' >> "$f"
   if [ -n "$host" ]; then printf ' H%s ' "$host" >> "$f"; fi
   if [ "$base" != 17000 ]; then printf 'B%s' "$base" >> "$f"; fi
   hcopy -t "$f" ":MoofTCP Test:ApiProbe.cfg"
