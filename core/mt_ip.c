@@ -92,9 +92,18 @@ static void ip_in(mt_stack *s, const uint8_t *ip, uint16_t len, uint32_t now, in
     src = mt_rd32(ip + 12);
     if (lo) {                         /* built by us, to and from a local address */
         if (!mt_ip_is_local(s, dst) || !mt_ip_is_local(s, src)) MT_DROP_GOTO(why);
+    } else if (s->cfg.addr == 0) {
+        /* Unconfigured: only the DHCP client's replies pass (client running, unfragmented UDP to
+         * port 68, any destination: servers may unicast to the offered address), from a unicast
+         * source. Everything else is dropped as before. */
+        if (!mt_dhcp_on(s) || ip[9] != 17 || (mt_rd16(ip + 6) & 0x3FFFu) != 0 || tot < ihl + 8u ||
+            mt_rd16(ip + ihl + 2) != 68 || src >= 0xE0000000u || mt_ip_is_127(src))
+            MT_DROP_GOTO(why);
+        s->stats.ip_in++;
+        mt_udp_input(s, src, dst, ip + ihl, (uint16_t)(tot - ihl), now);
+        return;
     } else {
-        if (s->cfg.addr == 0 ||
-            (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask)))
+        if (dst != s->cfg.addr && dst != MT_ETH_BCAST_IP && dst != (s->cfg.addr | ~s->cfg.mask))
             MT_DROP_GOTO(why);
         /* Source validation (RFC 1122 3.2.1.3, RFC 6890): never a multicast / class E / limited
          * broadcast address, our own address, 127/8 or the directed broadcast, so no reply (RST,
@@ -223,7 +232,8 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     int lo;
     uint8_t *body = s->txbuf + MT_ETH_HDR + MT_IP_HDR;
 
-    if (s->cfg.addr == 0) return MT_ERR_UNCONFIGURED;
+    if (s->cfg.addr == 0 && !(proto == 17 && dst == MT_ETH_BCAST_IP && mt_dhcp_on(s)))
+        return MT_ERR_UNCONFIGURED;                    /* the DHCP client's broadcast passes (from 0.0.0.0) */
     lo = mt_ip_is_local(s, dst);
     if (lo) nexthop = dst;                                          /* loopback FIFO */
     else if (dst == MT_ETH_BCAST_IP || dst == (s->cfg.addr | ~s->cfg.mask)) nexthop = MT_ETH_BCAST_IP;

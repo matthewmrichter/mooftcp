@@ -9,13 +9,15 @@
  *              resource) and the draft MCFD 128 (edits that could not be saved last time; shown
  *              instead of the saved values when present), show the status line.
  *   hitDev     "Keep a diagnostic log" checkbox (prefs flags bit 0; on by default for a new prefs file,
- *              Task 11b): toggles, counts as an edit like the text fields.
+ *              Task 11b) and "Get the address by DHCP" (MCFG mode word 1, Plan 4): toggle, count
+ *              as edits like the text fields.
  *              Save: validate (an invalid field gets an alert naming it, the field is selected and
  *              the text stays; the off-subnet router warning asks first), then write the prefs.
  *              Revert: put the saved values back.
  *   keyEvtDev  Return/Enter are swallowed (a field would get a CR); a character that would make a
  *              field longer than its cap (15 / 63) is refused with a beep; every key re-checks.
- *   nulDev     caret blink, and the check line (validation feedback) after a change.
+ *   nulDev     caret blink, the check line (validation feedback) after a change, and the status
+ *              line once a second (it follows the DHCP client: cdl_status_text).
  *   cut/copy/paste/clearDev   TextEdit on the current field, with the desk scrap; paste respects
  *              the cap (checked before the scrap is copied).
  *   closeDev   cdl_close_action: valid unsaved edits ask Save / Don't Save (closeDev cannot stop
@@ -24,7 +26,8 @@
  *   macDev     1 (runs on every machine; the 'mach' resource asks).
  * Every write passes the existing MCFG bytes to cfe_encode so the mode word, flags byte and unknown
  * tail survive (ledger R3). The status line looks at the unit table only (mt_units.h; ruling P3:
- * the panel never opens .IPP or .ENET0). Settings take effect at the next restart.
+ * the panel never opens .IPP or .ENET0); MoofTCP's status view (mt_view.h) is reached through the
+ * unit's DCE (dCtlStorage). Settings take effect at the next restart.
  *
  * Files: System 6 has no FindFolder/FSSpec. The prefs live in the blessed System Folder, whose
  * working-directory refnum is BootDrive (0x210): the same reference the driver's loader uses
@@ -62,7 +65,7 @@ enum { cdevGenErr = -1, cdevMemErr = 0, cdevResErr = 1, cdevUnset = 3 };
  * numItems items. Field item = IT_IP + (CFE_F_* - 1). */
 enum { IT_REVERT = 1, IT_IP, IT_MASK, IT_GW, IT_DNS, IT_DOMAIN,
        IT_L_IP, IT_L_MASK, IT_L_GW, IT_L_DNS, IT_L_DOMAIN, IT_STATUS, IT_CHECK, IT_NOTE, IT_VERSION,
-       IT_SAVE, IT_LOG };
+       IT_SAVE, IT_LOG, IT_DHCP };
 
 /* Alerts (moofcdev.r). Fixed IDs in the cdev's own file: CPanelID is the Control Panel desk
  * accessory's own resource base (observed -15904 = 0xC1E0 in Snow, DRVR 15's owned range), not the
@@ -75,6 +78,8 @@ typedef struct {
     short has_draft;
     short check_pending;  /* a key or edit happened: re-check in the next nulDev */
     short shown_key;      /* cdl_check_key of what the check line shows; -1 = force a redraw */
+    long status_at;       /* TickCount of the last status refresh */
+    unsigned char status[64];   /* what the status line shows (Pascal) */
 } CdevState;
 
 #define PREFS_NAME ((ConstStringPtr)"\pMoofTCP Prefs")
@@ -124,17 +129,18 @@ static void get_text(DialogPtr d, short base, short it, char *out, int cap) {
     out[n] = 0;
 }
 
-/* The "Keep a diagnostic log" checkbox (Task 11b). */
-static ControlHandle log_box(DialogPtr d, short base) {
+/* The checkboxes: "Keep a diagnostic log" (Task 11b), "Get the address by DHCP" (Plan 4). */
+static ControlHandle box(DialogPtr d, short base, short it) {
     short type;
     Handle h;
     Rect r;
-    GetDialogItem(d, (short)(base + IT_LOG), &type, &h, &r);
+    GetDialogItem(d, (short)(base + it), &type, &h, &r);
     return (ControlHandle)h;
 }
 
 static void read_fields(DialogPtr d, short base, CfeFields *f) {
-    f->log = (uint8_t)(GetControlValue(log_box(d, base)) ? 1 : 0);
+    f->log = (uint8_t)(GetControlValue(box(d, base, IT_LOG)) ? 1 : 0);
+    f->dhcp = (uint8_t)(GetControlValue(box(d, base, IT_DHCP)) ? 1 : 0);
     get_text(d, base, IT_IP, f->ip, (int)sizeof f->ip);
     get_text(d, base, IT_MASK, f->mask, (int)sizeof f->mask);
     get_text(d, base, IT_GW, f->gw, (int)sizeof f->gw);
@@ -148,7 +154,8 @@ static void show_fields(DialogPtr d, short base, const CfeFields *f) {
     set_text(d, base, IT_GW, f->gw);
     set_text(d, base, IT_DNS, f->dns);
     set_text(d, base, IT_DOMAIN, f->domain);
-    SetControlValue(log_box(d, base), f->log ? 1 : 0);
+    SetControlValue(box(d, base, IT_LOG), f->log ? 1 : 0);
+    SetControlValue(box(d, base, IT_DHCP), f->dhcp ? 1 : 0);
 }
 
 static short alert(short which, const unsigned char *msg) {
@@ -168,11 +175,23 @@ static void alert_c(short which, const char *a, const char *b, const char *c) {
 
 /* --- the status line: what the unit table says (never opens a driver) --- */
 
-static void show_status(DialogPtr d, short base) {
-    const uint8_t *drv = mt_units_find_ipp();
-    set_text(d, base, IT_STATUS, !drv ? "Not loaded: restart after saving."
-                                 : mt_units_is_moof(drv) ? "MoofTCP is loaded."
-                                 : "MacTCP is loaded; MoofTCP is off.");
+/* Redraw only when the text changed (force: always). */
+static void show_status(DialogPtr d, short base, CdevState *st, int force) {
+    const uint8_t *dce, *drv = mt_units_find_ipp_dce(&dce);
+    const MtStatusView *v = NULL;
+    int unit = !drv ? CDL_UNIT_NONE : mt_units_is_moof(drv) ? CDL_UNIT_MOOF : CDL_UNIT_MACTCP;
+    Str255 ps;
+    int i;
+    if (unit == CDL_UNIT_MOOF) v = mt_units_view_in(dce, MT_UNITS_MASK24);
+    cdl_status_text(unit, v, (uint32_t)TickCount(), ps);
+    st->status_at = TickCount();
+    if (ps[0] > 63) ps[0] = 63;
+    if (!force && ps[0] == st->status[0]) {
+        for (i = 1; i <= ps[0] && ps[i] == st->status[i]; i++) {}
+        if (i > ps[0]) return;
+    }
+    for (i = 0; i <= ps[0]; i++) st->status[i] = ps[i];
+    set_ptext(d, base, IT_STATUS, ps);
 }
 
 /* --- the check line: live validation feedback --- */
@@ -553,7 +572,7 @@ static long dispatch(const CdevArgs *a) {
         st->has_draft = (short)load_prefs(&st->saved, &st->draft);
         show_fields(d, base, st->has_draft ? &st->draft : &st->saved);
         if (st->has_draft) set_text(d, base, IT_NOTE, NOTE_DRAFT);
-        show_status(d, base);
+        show_status(d, base, st, 1);
         update_check(d, base, st);
         SelectDialogItemText(d, (short)(base + IT_IP), 0, 32767);
         HUnlock(sh);
@@ -571,8 +590,8 @@ static long dispatch(const CdevArgs *a) {
             st->check_pending = 1;
         } else if (a->item - base == IT_SAVE) {
             (void)save_now(a, st);
-        } else if (a->item - base == IT_LOG) {
-            ControlHandle c = log_box(d, base);
+        } else if (a->item - base == IT_LOG || a->item - base == IT_DHCP) {
+            ControlHandle c = box(d, base, (short)(a->item - base));
             SetControlValue(c, GetControlValue(c) ? 0 : 1);
             st->check_pending = 1;
         }
@@ -597,6 +616,7 @@ static long dispatch(const CdevArgs *a) {
             st->check_pending = 0;
             update_check(d, base, st);
         }
+        if ((unsigned long)(TickCount() - st->status_at) >= 60ul) show_status(d, base, st, 0);
         break;
     case undoDev:
     case cutDev:

@@ -18,6 +18,8 @@ int     mt_mac_unit_find(const uint8_t *pname);
  * unit above it, growing the unit table when it is too short. 0 and *refnum, or an OSErr
  * (unitTblFullErr -29, memFullErr -108). */
 int     mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum);
+/* Store p in the DCE's dCtlStorage (offset 20) of unit refnum (Plan 4: the status view, mt_view.h). */
+void    mt_mac_dce_storage(int16_t refnum, void *p);
 /* Make the system heap the current zone and the System file the current resource file, as an
  * application's environment would be (returns the previous zone; mt_mac_zone_restore puts both
  * back). The boot runs with them: .ENET0 is opened at INIT time, when the current resource file

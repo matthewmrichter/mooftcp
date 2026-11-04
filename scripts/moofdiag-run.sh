@@ -8,6 +8,10 @@
 #                     --keep-disk --no-install, and refuse unless ":System Folder:MoofTCP" is cdev/ztcp
 #     --no-prefs      install MoofTCP without "MoofTCP Prefs" (unconfigured)
 #     --log           install prefs with the diagnostic log flag (mkprefs.sh --log); MoofDiag then lists the log records
+#     --dhcp          install DHCP-mode prefs (mkprefs.sh --dhcp --log --gw 10.0.0.1 --dns 1.1.1.1: fallbacks only). Snow's
+#                     NAT has no DHCP server, so the open waits 10 s and fails -23004 (RESULT UNCONFIGURED, accepted);
+#                     MoofDiag then reads the block through the status view and shows the client's state, DISCOVER
+#                     count and DHCP log records. Over TAP with a host server (EMULATOR.md "DHCP over TAP") it binds.
 #     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
 #                     is then not fetched
 # Same launch and screen checks as scripts/enetspike-run.sh. Exit status 0 when MoofDiag.out was fetched
@@ -20,7 +24,7 @@ DISPLAY_NUM="${MT_DISPLAY:-:142}"
 TIMEOUT="${MOOFDIAG_TIMEOUT:-300}"
 die() { echo "moofdiag-run.sh: $*" >&2; exit 1; }
 
-keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""
+keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""; dhcp=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
@@ -29,7 +33,8 @@ while [ $# -gt 0 ]; do
     --no-prefs) prefs="--no-prefs"; shift;;
     --keep-running) keeprun=1; shift;;
     --log) logp=1; shift;;
-    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--log] [--keep-running]" >&2; exit 2;;
+    --dhcp) dhcp=1; shift;;
+    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--log] [--dhcp] [--keep-running]" >&2; exit 2;;
   esac
 done
 
@@ -120,7 +125,10 @@ snow_stop
 [ -n "$keepdisk" ] || scripts/fresh-disk.sh
 pargs=()
 [ -z "$prefs" ] || pargs=("$prefs")
-if [ -n "$logp" ] && [ -z "$prefs" ]; then
+if [ -n "$dhcp" ] && [ -z "$prefs" ]; then
+  scripts/mkprefs.sh --dhcp --gw 10.0.0.1 --dns 1.1.1.1 --log >/dev/null
+  pargs=(--prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin")
+elif [ -n "$logp" ] && [ -z "$prefs" ]; then
   scripts/mkprefs.sh --ip 10.0.0.2 --mask 255.0.0.0 --gw 10.0.0.1 --dns 1.1.1.1 --log >/dev/null
   pargs=(--prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin")
 fi

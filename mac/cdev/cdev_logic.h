@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "cfg_edit.h"
+#include "mt_view.h"
 
 /* The Control Panel's Pascal arguments as they lie on the stack above the return address
  * (cdev_start.s passes their address): CPDialog, cdevStorage, theEvent, CPanelID, numItems,
@@ -81,15 +82,22 @@ enum { CDL_CLOSE_NOTHING = 1,  /* nothing changed (or the same invalid draft is 
 /* draft: the draft read at initDev, NULL if there was none. rc: cfe_validate(cur). */
 int cdl_close_action(const CfeFields *cur, const CfeFields *saved, const CfeFields *draft, int rc);
 
-/* The draft resource: version byte 2, the five fields as Pascal strings, then the log flag byte
- * (0/1). Version 1 (Task 8 fix round 1: no flag byte) still decodes; its log comes from
- * default_log (the panel passes the saved value). encode returns the length, 0 if cap is too
- * small. decode: 0 on success, -1 if not a usable draft (f all empty). */
+/* The draft resource: version byte 3, the five fields as Pascal strings, then the log flag byte
+ * (0/1) and the DHCP flag byte (0/1, Plan 4). Version 2 (Task 11b: no DHCP byte, dhcp 0) and
+ * version 1 (Task 8 fix round 1: no flag bytes; its log comes from default_log, the panel passes
+ * the saved value) still decode. encode returns the length, 0 if cap is too small. decode: 0 on
+ * success, -1 if not a usable draft (f all empty). */
 uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap);
 int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log);
 
 /* The saved settings from MCFG 128 (res may be NULL: no file / no resource). An unusable or
  * missing resource gives empty fields with log ON: the default for a new prefs file (Task 11b). */
 void cdl_load_saved(const uint8_t *res, uint32_t n, CfeFields *f);
+
+/* The status line (Plan 4). unit: what the unit table holds; v: MoofTCP's status view (mt_view.h,
+ * NULL for a driver without one); now_ticks: TickCount (DHCP lease time left = lease_s minus the
+ * seconds since v->t_bound). The text fits the panel's one-line status item. */
+enum { CDL_UNIT_NONE = 0, CDL_UNIT_MACTCP, CDL_UNIT_MOOF };
+void cdl_status_text(int unit, const MtStatusView *v, uint32_t now_ticks, unsigned char *ps);
 
 #endif

@@ -31,7 +31,13 @@
  *  - cfe_decode sets f->log from flags bit 0 (0 when the resource has no flags byte). The panel's
  *    default for a NEW file (no usable resource) is log on: cdl_load_saved (cdev_logic.h).
  *  - cfe_decode shows what is stored but blanks fields the validator would refuse (an address the
- *    loader treats as unconfigured, a reserved gateway/DNS, a bad domain). */
+ *    loader treats as unconfigured, a reserved gateway/DNS, a bad domain).
+ *  - DHCP (Plan 4, DHCP-DESIGN.md section 5): f->dhcp = MCFG mode word 1. In DHCP mode the IP may be
+ *    empty while mask / gateway / DNS / domain are set (they are fallbacks for options the server
+ *    does not send); a typed IP (the requested-address hint) and every other typed field are
+ *    validated exactly as in manual mode. cfe_encode writes mode 1 when f->dhcp is set, 0 when it
+ *    is clear and the prior said 1, and keeps any other (unknown) prior mode word while the box is
+ *    off. cfe_decode sets f->dhcp from the mode word. */
 #ifndef CFG_EDIT_H
 #define CFG_EDIT_H
 
@@ -39,7 +45,8 @@
 #include "mt.h"
 
 /* log: the "Keep a diagnostic log" checkbox = prefs flags bit 0 (MT_CFG_FLAG_LOG), 0 or 1 (Task 11b). */
-typedef struct { char ip[16], mask[16], gw[16], dns[16], domain[64]; uint8_t log; } CfeFields;
+/* dhcp: the "Get the address from a DHCP server" checkbox = MCFG mode word 1 (Plan 4). */
+typedef struct { char ip[16], mask[16], gw[16], dns[16], domain[64]; uint8_t log, dhcp; } CfeFields;
 
 /* field ids (CfeError.field) */
 enum { CFE_F_NONE = 0, CFE_F_IP, CFE_F_MASK, CFE_F_GW, CFE_F_DNS, CFE_F_DOMAIN };

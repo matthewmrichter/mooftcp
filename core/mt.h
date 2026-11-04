@@ -90,7 +90,8 @@ typedef struct {
     uint32_t udp_in;        /* datagrams queued to an endpoint */
     uint32_t udp_out;       /* datagrams handed to IPv4 output */
     uint32_t udp_drops;     /* malformed, bad checksum, or receive buffer full */
-    uint32_t udp_noport;    /* datagrams for a port nobody owns */
+    uint32_t udp_noport;    /* datagrams for a port nobody owns (port 68 belongs to the DHCP client
+                             * while it runs: its replies are counted in mt_dhcp_info instead) */
     uint32_t tcp_in;           /* well-formed segments (checksum, header, options ok) */
     uint32_t tcp_out;          /* segments handed to IPv4 output */
     uint32_t tcp_in_drops;     /* malformed / bad checksum / bad options */
@@ -117,7 +118,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
                         uint32_t seed);
 /* `seed` is the initial default entropy (deterministic for tests); real embedders follow with
  * mt_set_entropy. */
-/* A stack with addr==0 sends nothing and answers nothing.
+/* A stack with addr==0 sends nothing and answers nothing (except the DHCP client, see below).
  * mt_set_config semantics, each applied when the config is set:
  *  - mtu is clamped to 68..1500.
  *  - If addr, mask or gateway changes, the ARP table is flushed (every entry, resolved or
@@ -157,10 +158,11 @@ uint8_t mt_tcp_count_open(const mt_stack *s);
  *   TCP_REXMT                            b = local port
  *   DROP      a = layer (MT_LOGL_xxx),     b = source line of the reason in the core sources
  *   ARP_FAIL  a = requests sent,         b = low 16 bits of the unresolved IP
- *   DNS_FAIL  a = mt_dns_status,         b = query id */
+ *   DNS_FAIL  a = mt_dns_status,         b = query id
+ *   DHCP      a = new mt_dhcp_state,     b = low 16 bits of the address in use (0 = none) */
 typedef struct { uint32_t t; uint8_t code, a; uint16_t b; } mt_logrec;
 enum { MT_LOG_TCP_STATE = 1, MT_LOG_TCP_TERM, MT_LOG_TCP_REXMT, MT_LOG_DROP, MT_LOG_ARP_FAIL,
-       MT_LOG_DNS_FAIL };
+       MT_LOG_DNS_FAIL, MT_LOG_DHCP };
 /* MT_LOGL_IP covers ICMP too. */
 enum { MT_LOGL_ETH = 1, MT_LOGL_ARP, MT_LOGL_IP, MT_LOGL_UDP, MT_LOGL_TCP };
 #define MT_LOG_RECS 128u
@@ -255,6 +257,41 @@ int  mt_dns_ptr_name(mt_ip4 a, char out[32]);    /* "d.c.b.a.in-addr.arpa"; retu
 typedef void (*mt_dns_enum_cb)(void *user, const char *name, const mt_ip4 *addr, uint8_t naddr,
                                uint32_t ttl_left_s);
 void mt_dns_enum_cache(mt_stack *s, mt_dns_enum_cb cb, void *user, uint32_t now);
+
+/* ---- DHCP client (mt_dhcp.c; rulings in docs/dev/DHCP-DESIGN.md) ----
+ * RFC 2131 client states. OFF until mt_dhcp_start. The client applies a lease itself (address,
+ * mask, router, DNS, domain) with the mt_set_config semantics above; fields the server does not
+ * send keep their current values (the embedder's fallbacks). While it runs and the stack has no
+ * address, the only datagrams accepted are unfragmented UDP to port 68 (any IPv4 destination, so
+ * unicast OFFER/ACK work); sends from 0.0.0.0 go to the Ethernet broadcast address. UDP port 68 is
+ * refused to mt_udp_create while the client runs. */
+typedef enum { MT_DHCP_OFF = 0, MT_DHCP_INIT, MT_DHCP_SELECTING, MT_DHCP_REQUESTING, MT_DHCP_BOUND,
+               MT_DHCP_RENEWING, MT_DHCP_REBINDING } mt_dhcp_state;
+/* Events: BOUND = an address was applied (first lease, or a lease with a different address);
+ * LOST = the address was dropped (lease expired, or a NAK while holding it; cfg.addr is 0 now);
+ * STATE = any other state change (renewal started / answered, a new DISCOVER round). addr is the
+ * address in use (0 if none), lease_s the granted lease (0xFFFFFFFF = infinite, 0 = none).
+ * Fires synchronously inside mt_input / mt_tick / mt_dhcp_start (interrupt time is possible). */
+enum { MT_DHCP_EV_BOUND = 1, MT_DHCP_EV_LOST, MT_DHCP_EV_STATE };
+typedef void (*mt_dhcp_cb)(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t lease_s);
+void mt_dhcp_set_cb(mt_stack *s, mt_dhcp_cb cb, void *user);
+/* Start the client: drops any address (the stack is unconfigured until the first ACK) and makes
+ * the first DISCOVER due at once (it leaves at the next mt_tick; mt_next_deadline returns 0).
+ * hint (0 = none) is sent as the requested address (option 50). Needs cfg.mac set: MT_ERR_INVAL
+ * if it is all zero. Restarting a running client starts over. */
+int  mt_dhcp_start(mt_stack *s, mt_ip4 hint, uint32_t now);
+/* Stop the client (state OFF); the current configuration, leased or not, is kept as it is. */
+void mt_dhcp_stop(mt_stack *s);
+typedef struct {
+    uint8_t  state;                 /* mt_dhcp_state */
+    mt_ip4   addr, server;          /* leased / offered address, server identifier (0 = none) */
+    uint32_t lease_s;               /* granted lease, seconds (0xFFFFFFFF infinite, 0 none) */
+    uint32_t left_s;                /* seconds until the lease expires (bound states; else 0) */
+    uint32_t tx;                    /* DHCP messages sent */
+    uint32_t offers, acks, naks;    /* accepted OFFER / ACK / NAK */
+    uint32_t bad;                   /* replies ignored: malformed, foreign xid/chaddr, unusable */
+} mt_dhcp_info;
+void mt_dhcp_get_info(const mt_stack *s, mt_dhcp_info *out, uint32_t now);
 
 /* ---- TCP ---- */
 typedef struct mt_tcp mt_tcp;

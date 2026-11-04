@@ -18,7 +18,7 @@
 #define LM_VIA       (*(uint8_t *volatile *)0x1D4)      /* VIA1 base */
 
 /* DCE layout (Inside Macintosh II, Device Manager): offsets used here. */
-enum { DCE_DRIVER = 0, DCE_FLAGS = 4, DCE_QHDR = 6, DCE_REFNUM = 24, DCE_DELAY = 34,
+enum { DCE_DRIVER = 0, DCE_FLAGS = 4, DCE_QHDR = 6, DCE_STORAGE = 20, DCE_REFNUM = 24, DCE_DELAY = 34,
        DCE_EMASK = 36, DCE_MENU = 38, DCE_SIZE = 40 };
 enum { DRVR_FLAGS = 0, DRVR_DELAY = 2, DRVR_EMASK = 4, DRVR_MENU = 6, DRVR_NAME = 18 };
 #define F_RAMBASED 0x0040u
@@ -126,6 +126,11 @@ int mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum) {
     UTABLE_BASE[unit] = (uint8_t **)h;
     *refnum = (int16_t)~unit;
     return 0;
+}
+
+void mt_mac_dce_storage(int16_t refnum, void *p) {
+    uint8_t **h = UTABLE_BASE[~refnum];
+    if (h && *h) wr32((uint8_t *)strip24(*h) + DCE_STORAGE, strip24(p));
 }
 
 int mt_mac_dequeue(void *pb, void *dce, void **extra, int max) {

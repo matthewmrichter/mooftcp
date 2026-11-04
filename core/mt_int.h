@@ -259,6 +259,37 @@ mt_udp *mt_udp_create_reserved(mt_stack *s, uint16_t lport, uint8_t *buf, uint32
 void mt_dns_reseed(mt_stack *s, uint32_t a, uint32_t b);
 uint32_t mt_dns_deadline(const mt_stack *s, uint32_t now);
 
+/* ---- DHCP client (mt_dhcp.c; docs/dev/DHCP-DESIGN.md) ----
+ * One arena section. Retransmission times are absolute ms (wrap-safe compares); lease times are
+ * seconds remaining after t_base, which mt_dhcp_timers moves forward by whole seconds (every
+ * wake-up is capped so now - t_base stays far below 2^31 ms). MT_DHCP_INF = infinite / never. */
+#define MT_DHCP_INF 0xFFFFFFFFu
+typedef struct {
+    mt_dhcp_cb cb;
+    void *user;
+    uint32_t rnd;                /* xorshift32 state: xids, jitter */
+    uint32_t xid;                /* transaction id of the exchange in progress */
+    uint32_t t_round;            /* ms: start of the exchange (the secs field) */
+    uint32_t t_next;             /* ms: next send (INIT .. REQUESTING, RENEWING, REBINDING) */
+    uint32_t t_sent;             /* ms: last REQUEST sent (a lease starts there, RFC 2131 4.4.1) */
+    uint32_t t_base;             /* ms: base of tm[] */
+    uint32_t tm[3];              /* seconds after t_base: T1 renew, T2 rebind, lease end (left) */
+    uint32_t lease;              /* granted lease, s (MT_DHCP_INF infinite, 0 none) */
+    mt_ip4 server, offer, hint;  /* server id; offered / leased address; requested address */
+    uint32_t n_tx, n_offer, n_ack, n_nak, n_bad;
+    uint8_t state, tries;        /* mt_dhcp_state; sends of the current message */
+} mt_dhcp;
+void mt_dhcp_timers(mt_stack *s, uint32_t now);
+uint32_t mt_dhcp_deadline(const mt_stack *s, uint32_t now);
+void mt_dhcp_reseed(mt_stack *s, uint32_t a, uint32_t b);
+/* A BOOTP message (UDP payload, checksum already verified) for port 68 while the client runs:
+ * called from mt_udp_input's no-endpoint branch. */
+void mt_dhcp_input(mt_stack *s, const uint8_t *b, uint16_t n, uint32_t now);
+/* The side effects of a configuration change, after s->cfg was written (mt_set_config, the DHCP
+ * client): ARP flush on an address / mask / gateway change, loopback flush on an address change,
+ * MSS clamp when the MTU shrank. o* are the values before the change. */
+void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t omtu);
+
 struct mt_stack {
     mt_ifconfig cfg;
     mt_link link;
@@ -276,6 +307,7 @@ struct mt_stack {
     mt_dns *dns;
     mt_dns_cent *dcache;     /* lim.dns_cache entries */
     mt_logrec *log;          /* MT_LOG_RECS records (arena section) */
+    mt_dhcp *dhcp;           /* DHCP client state (arena section) */
     /* Free-running counters, modulo 65536 (a multiple of MT_LOG_RECS); record index = counter &
      * (MT_LOG_RECS - 1). volatile: the writer may be an interrupt handler and the reader main
      * code. Assumption: exactly one writer context (log_wr) and one reader context (log_rd). */
@@ -309,6 +341,8 @@ struct mt_stack {
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
 };
+
+static inline int mt_dhcp_on(const mt_stack *s) { return s->dhcp->state != MT_DHCP_OFF; }
 
 /* ---- Diagnostic log (mt_stack.c) ----
  * mt_log() is the only call sites use: one load + branch while the log is off. */
@@ -367,6 +401,9 @@ static inline uint8_t *mt_ip_payload(mt_stack *s) { return s->txbuf + MT_ETH_HDR
  * MT_OK (sent, held for ARP or dropped by the link), MT_ERR_NOROUTE,
  * MT_ERR_UNCONFIGURED, MT_ERR_INVAL. */
 int mt_ip_output(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t plen, uint32_t now);
+/* (mt_ip_output_hdr and the two above) While unconfigured the only datagram they send is the DHCP
+ * client's: UDP to 255.255.255.255 while it runs, from 0.0.0.0 to the Ethernet broadcast address;
+ * anything else is MT_ERR_UNCONFIGURED. */
 /* Same, with the payload in caller memory `pl` (any size up to 65515); the only way
  * to send datagrams larger than txbuf. pl may equal mt_ip_payload(). */
 int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
@@ -375,6 +412,7 @@ int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, 
  * lets UDP send big datagrams without a contiguous copy. */
 int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr, uint16_t hlen,
                      const uint8_t *pl, uint16_t plen, uint32_t now);
+
 /* 127.0.0.0/8 (RFC 1122 3.2.1.3 (g)): never on the wire, looped back like our own address. */
 static inline int mt_ip_is_127(mt_ip4 a) { return (a >> 24) == 127u; }
 /* One of our own addresses (cfg.addr or 127/8); never true while unconfigured. Datagrams to a

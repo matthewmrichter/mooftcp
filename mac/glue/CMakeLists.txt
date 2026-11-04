@@ -10,6 +10,9 @@ target_include_directories(mtcore68k PUBLIC ${MT_CORE_DIR})
 target_compile_definitions(mtcore68k PUBLIC MT_ASM_CKSUM)
 target_compile_options(mtcore68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
+# Plan 4 ruling: the DHCP client is off every per-packet path (a handful of messages per lease) and
+# its code is resident in the system heap, so it is built for size (the later -Os wins over -O2).
+set_source_files_properties(${MT_CORE_DIR}/mt_dhcp.c PROPERTIES COMPILE_OPTIONS -Os)
 
 # The Mac Ethernet/clock/gate glue (Task 9). mt_enet.c and mt_timer.c include Toolbox headers;
 # nothing here includes mt_mactcp.h next to them (the two clash), mt_os_mac.c only mt_os.h.
