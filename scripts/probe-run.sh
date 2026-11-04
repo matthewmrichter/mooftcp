@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build ApiProbe, run it in Snow against whichever stack the image loads, and collect
-# ApiProbe.out into build-mac/probe/<label>.out.
+# ApiProbe.out into build-mac/probe/<label>.out (MT_LITE=1: MoofTCP Lite, build-mac-lite/probe/).
 #   probe-run.sh [--moof] [--unconfigured] [--keep-disk] [--groups "1 2 3"] [--base N] [--host IP] <label>
 #     --moof          run against MoofTCP instead of MacTCP: after fresh-disk.sh, scripts/install-moof.sh
 #                     parks the MacTCP files and installs build-mac/moof/MoofTCP.bin (built first) and a
@@ -66,18 +66,19 @@ if [ -n "$unconf" ]; then
 fi
 
 cd "$ROOT"
-out_dir="$ROOT/build-mac/probe"
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite (--moof) and output in build-mac-lite/probe/
+out_dir="$ROOT/$BM/probe"
 mkdir -p "$out_dir"
 out="$out_dir/$label.out"
 rm -f "$out" "$out".g* "$out".partial*
 
 echo "== build"
 scripts/build-mac.sh ApiProbe >/dev/null
-bin="$ROOT/build-mac/apiprobe/ApiProbe.bin"
+bin="$ROOT/$BM/apiprobe/ApiProbe.bin"
 [ -f "$bin" ] || die "build did not produce $bin"
 if [ -n "$moof" ]; then
   scripts/build-mac.sh MoofTCP >/dev/null
-  [ -f "$ROOT/build-mac/moof/MoofTCP.bin" ] || die "build did not produce build-mac/moof/MoofTCP.bin"
+  [ -f "$ROOT/$BM/moof/MoofTCP.bin" ] || die "build did not produce $BM/moof/MoofTCP.bin"
 fi
 
 started_testnet=""

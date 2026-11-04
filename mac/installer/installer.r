@@ -7,8 +7,8 @@
 #include "Processes.r"
 
 /* MoofTCP Lite (Rez -DMT_NO_DHCP, mac/installer/CMakeLists.txt): the same application, embedding the
- * Lite MoofTCP file, says "Lite" in its window, its intro and its 'vers' resources. The file name stays
- * "MoofTCP Installer" (docs/dev/RELEASE.md "Variants"). */
+ * Lite MoofTCP file, says "Lite" in its window, its intro and its 'vers' resources, and is called
+ * "MoofTCP Lite Installer" (docs/dev/RELEASE.md "Variants"). */
 #ifdef MT_NO_DHCP
 #define MT_NAME "MoofTCP Lite"
 #define MT_INTRO_NOTE " MoofTCP Lite has no DHCP client: it needs a fixed IP address."

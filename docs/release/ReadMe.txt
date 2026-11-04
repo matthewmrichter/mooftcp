@@ -14,6 +14,26 @@ MacTCP Watcher, NCSA Telnet, Fetch and TurboGopher (they
 connect and work). Eudora starts; its mail was not tried.
 
 
+TWO VERSIONS: MOOFTCP AND MOOFTCP LITE
+
+MoofTCP comes in two versions. Pick the one that fits your
+network; each has its own download and its own Installer.
+
+  - MoofTCP (MoofTCP-<version>): can get its address from a
+    DHCP server (your router). Choose it if you want the address
+    set automatically.
+  - MoofTCP Lite (MoofTCP-Lite-<version>): no DHCP; you enter
+    the address by hand. It leaves about 5 KB more system memory
+    free, which helps when memory is tight. Choose it if you use
+    a fixed address anyway.
+
+Both work the same way otherwise and keep the same settings
+file. To switch from one to the other, click Remove in either
+Installer, restart, then install the other one.
+MoofTCP Lite uses the address saved in the settings even if
+"Get the address by DHCP" was ticked in the other version.
+
+
 WHAT YOU NEED
 
   - A Mac with System 6.0.8 (the only version tested).
@@ -26,11 +46,15 @@ WHAT YOU NEED
 
 INSTALL
 
-  1. Open "MoofTCP Installer" and click Install.
+  1. Open "MoofTCP Installer" ("MoofTCP Lite Installer" for
+     MoofTCP Lite) and click Install.
   2. Restart the Mac.
   3. Open the Control Panel (Apple menu), then "MoofTCP". Fill in
      your IP address, subnet mask, router, DNS server and
-     domain, and save. Restart again.
+     domain, and save. Restart again. (MoofTCP, not Lite: you can
+     tick "Get the address by DHCP" instead of typing an address.
+     MoofTCP Lite says "MoofTCP Lite does not support DHCP." in
+     that place.)
 
 Until you save an address, MoofTCP stays "not configured" and
 programs see that no network is set up. It needs no default
@@ -43,7 +67,8 @@ file in the System Folder.
 
 REMOVE
 
-  1. Open "MoofTCP Installer" and click Remove.
+  1. Open "MoofTCP Installer" (or "MoofTCP Lite Installer") and
+     click Remove.
   2. Restart the Mac.
 
 Remove deletes MoofTCP and puts your MacTCP files back where
@@ -98,6 +123,6 @@ what you were doing.
 
 KNOWN LIMITS
 
-  - No DHCP yet: you must enter the address yourself.
+  - MoofTCP Lite has no DHCP: you must enter the address yourself.
   - No IPv6.
   - Tested only with the DaynaPORT Ethernet driver.

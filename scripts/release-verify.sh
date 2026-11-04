@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verify the release artifacts with readers that did not write them (Plan 3 Task 11).
-#   release-verify.sh [--self-test] <version>      e.g. release-verify.sh 1.0rc1
+#   release-verify.sh [--self-test] [--lite] <version>      e.g. release-verify.sh 1.0rc1
+# --lite: MoofTCP Lite, dist/MoofTCP-Lite-<version>.* against build-mac-lite/ (volume "MoofTCP Lite").
 # Reads dist/MoofTCP-<version>.hqx  (macutils hexbin, and unar),
 #       dist/MoofTCP-<version>.sit  (unar),
 #       dist/MoofTCP-<version>.dsk  (hfsutils hmount/hls/hcopy -m)

@@ -216,7 +216,11 @@ static void do_menu(long mr) {
 static void setup_menus(void) {
     MenuHandle m;
     m = NewMenu(MN_APPLE, (ConstStringPtr)"\p\x14");
+#ifdef MT_NO_DHCP
+    AppendMenu(m, (ConstStringPtr)"\pAbout MoofTCP Lite Installer...;(-");
+#else
     AppendMenu(m, (ConstStringPtr)"\pAbout MoofTCP Installer...;(-");
+#endif
     AppendResMenu(m, 'DRVR');
     InsertMenu(m, 0);
     m = NewMenu(MN_FILE, (ConstStringPtr)"\pFile");

@@ -27,7 +27,14 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/installer.r)
 
 # "MoofTCP Installer" (type APPL, creator mtin, hasBundle). `scripts/build-mac.sh MoofInstaller` builds
-# build-mac/installer/MoofTCP Installer.bin (MT_LITE=1: build-mac-lite/installer/, the Lite installer).
+# build-mac/installer/MoofTCP Installer.bin (MT_LITE=1: build-mac-lite/installer/, the Lite installer). The
+# build file keeps that name in both trees; the name on the Mac (the MacBinary header) is "MoofTCP Lite
+# Installer" in Lite, so both installers can sit in one folder.
+if(MT_NO_DHCP)
+  set(INST_APP_NAME "MoofTCP Lite Installer")
+else()
+  set(INST_APP_NAME "MoofTCP Installer")
+endif()
 add_application(MoofInstallerApp installer_main.c inst_exec_mac.c ${INST_RSRC}
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
 target_link_libraries(MoofInstallerApp mtinst68k)
@@ -36,7 +43,7 @@ add_dependencies(MoofInstallerApp_APPL MoofTCP_APPL)
 add_custom_command(
     OUTPUT "MoofTCP Installer.bin"
     COMMAND ${CMAKE_COMMAND} -E copy MoofInstallerApp.bin "MoofTCP Installer.bin"
-    COMMAND python3 -I ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/mbflags.py "MoofTCP Installer.bin" 0x2000 "MoofTCP Installer"
+    COMMAND python3 -I ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/mbflags.py "MoofTCP Installer.bin" 0x2000 "${INST_APP_NAME}"
     DEPENDS MoofInstallerApp.bin)
 add_custom_target(MoofInstaller_APPL ALL DEPENDS "MoofTCP Installer.bin")
 

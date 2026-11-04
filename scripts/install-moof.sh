@@ -11,7 +11,8 @@
 #    made the folder, then "name<TAB>System Folder" per parked file). It removes MoofTCP files of an earlier
 #    install (MoofTCP, MoofTCP Prefs; a set file in the System Folder whose name is already parked is
 #    MoofTCP's own, e.g. the test-only "MacTCP DNR", and is deleted).
-# 2. Copies the MoofTCP control panel (default build-mac/moof/MoofTCP.bin, `scripts/build-mac.sh MoofTCP`)
+# 2. Copies the MoofTCP control panel (default build-mac/moof/MoofTCP.bin, `scripts/build-mac.sh MoofTCP`;
+#    MT_LITE=1: build-mac-lite/moof/MoofTCP.bin, MoofTCP Lite)
 #    and the prefs file (default: built by scripts/mkprefs.sh for Snow's NAT: 10.0.0.2/8,
 #    gateway 10.0.0.1, DNS 1.1.1.1) into :System Folder:. --no-prefs leaves MoofTCP unconfigured.
 #    --dnr also installs the test-only resolver file "MacTCP DNR" (build-mac/moof/MacTCP DNR.bin; the
@@ -23,8 +24,9 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="$MT_HOME/disks/work.hda"
 die() { echo "install-moof.sh: $*" >&2; exit 1; }
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: the default control panel is build-mac-lite/moof/MoofTCP.bin
 
-prefs="default"; cdev="$ROOT/build-mac/moof/MoofTCP.bin"; dnr=""; keepmac=""
+prefs="default"; cdev="$ROOT/$BM/moof/MoofTCP.bin"; dnr=""; keepmac=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-prefs) prefs=""; shift;;
