@@ -25,7 +25,7 @@ resource 'DITL' (128) {
         {204, 330, 224, 420}, Button { enabled, "Quit" };
         {92, 20, 196, 420}, StaticText { disabled, "" };
         {10, 20, 86, 420}, StaticText { disabled,
-            "Install puts MoofTCP 1.0rc2 into the System Folder. If MacTCP is there, its files are moved "
+            "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved "
             "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
             "back. MoofTCP needs an Ethernet driver (.ENET)." };
     }
@@ -73,20 +73,20 @@ resource 'DITL' (130) {
 };
 
 resource 'vers' (1) {
-    0x01, 0x00, beta, 0x02, verUS,
-    "1.0rc2",
-    "MoofTCP Installer 1.0rc2 (release candidate)"
+    0x01, 0x00, beta, 0x03, verUS,
+    "1.0rc3",
+    "MoofTCP Installer 1.0rc3 (release candidate)"
 };
 
 resource 'vers' (2) {
-    0x01, 0x00, beta, 0x02, verUS,
-    "1.0rc2",
-    "MoofTCP 1.0rc2"
+    0x01, 0x00, beta, 0x03, verUS,
+    "1.0rc3",
+    "MoofTCP 1.0rc3"
 };
 
 /* The owner (signature) resource of creator 'mtin'. */
 data 'mtin' (0) {
-    $"18" "MoofTCP Installer 1.0rc2"
+    $"18" "MoofTCP Installer 1.0rc3"
 };
 
 resource 'BNDL' (128) {

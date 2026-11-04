@@ -1,4 +1,4 @@
-MoofTCP 1.0rc2
+MoofTCP 1.0rc3
 ==============
 
 MoofTCP is a replacement for MacTCP. Programs that use MacTCP

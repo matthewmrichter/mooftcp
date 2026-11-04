@@ -49,7 +49,7 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
  * builds that file with the same resource); the cdev carries a copy as the real MacTCP file does. */
 #include "dnrp.r"
 
-/* System-heap bytes INIT 31 adds for us: 0x34000 = 212,992 (RC1 hardware, single Finder: 18,628 free at boot, 4,234 after
+/* System-heap bytes INIT 31 adds for us: 0x38000 = 229,376 (RC3: the DHCP client adds about 5.3 KB of resident driver code, which would have left about 15.3 KB free after the open on the real Mac, one step over the 15K floor; 0x34000 = 212,992 was RC2: RC1 hardware, single Finder: 18,628 free at boot, 4,234 after
  * the first open, the open costs 14,394; +0x4000 gives about 20.6K after the open, over the 15K floor. Before: 0x30000, the final re-review raised it from 0x2C000:
  * DRVR 79.8K and the resident block 59.1K left 14.5K free at the soak's worst step, under the 15K floor;
  * Task 11 had raised 0x28000 to 0x2C000 when the DNR grew the DRVR to about 78K). The DRVR code,
@@ -57,7 +57,7 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
  * the .ENET0 driver the first open loads (about 16.5K); 0x24000 booted but left too little (-23000).
  * Derivation: docs/dev/MACTCP-INTERFACE.md "MoofTCP driver (Task 10)". */
 data 'sysz' (0) {
-    $"0003 4000"
+    $"0003 8000"
 };
 
 /* Startup icon "Moof Stamp" (Moof icon concepts, round 2): 128 bytes of image, then 128 bytes of mask. */

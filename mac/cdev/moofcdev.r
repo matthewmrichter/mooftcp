@@ -53,7 +53,7 @@ resource 'DITL' (-4064) {
         {152, 95, 168, 316}, StaticText { disabled, "" };
         {168, 95, 200, 316}, StaticText { disabled, "" };
         {202, 95, 218, 320}, StaticText { disabled, "Changes take effect after you restart." };
-        {228, 250, 244, 320}, StaticText { disabled, "v1.0rc2" };
+        {228, 250, 244, 320}, StaticText { disabled, "v1.0rc3" };
         {224, 170, 244, 235}, Button { enabled, "Save" };
         {133, 93, 151, 316}, CheckBox { enabled, "Keep a diagnostic log" };
         {2, 93, 20, 316}, CheckBox { enabled, "Get the address by DHCP" };
@@ -113,19 +113,19 @@ resource 'BNDL' (-4064) {
 
 /* The owner (signature) resource of creator 'ztcp': a version string, as is customary. */
 data 'ztcp' (0) {
-    $"0E" "MoofTCP 1.0rc2"
+    $"0E" "MoofTCP 1.0rc3"
 };
 
 #include "icons.r"
 
 resource 'vers' (1) {
-    0x01, 0x00, beta, 0x02, verUS,
-    "1.0rc2",
-    "MoofTCP 1.0rc2 (release candidate)"
+    0x01, 0x00, beta, 0x03, verUS,
+    "1.0rc3",
+    "MoofTCP 1.0rc3 (release candidate)"
 };
 
 resource 'vers' (2) {
-    0x01, 0x00, beta, 0x02, verUS,
-    "1.0rc2",
-    "MoofTCP 1.0rc2"
+    0x01, 0x00, beta, 0x03, verUS,
+    "1.0rc3",
+    "MoofTCP 1.0rc3"
 };
