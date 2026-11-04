@@ -10,7 +10,8 @@
  *              instead of the saved values when present), show the status line.
  *   hitDev     "Keep a diagnostic log" checkbox (prefs flags bit 0; on by default for a new prefs file,
  *              Task 11b) and "Get the address by DHCP" (MCFG mode word 1, Plan 4): toggle, count
- *              as edits like the text fields.
+ *              as edits like the text fields. MoofTCP Lite (MT_NO_DHCP): item IT_DHCP is a static
+ *              text saying there is no DHCP (moofcdev.r); f->dhcp stays 0 and nothing saves mode 1.
  *              Save: validate (an invalid field gets an alert naming it, the field is selected and
  *              the text stays; the off-subnet router warning asks first), then write the prefs.
  *              Revert: put the saved values back.
@@ -65,7 +66,7 @@ enum { cdevGenErr = -1, cdevMemErr = 0, cdevResErr = 1, cdevUnset = 3 };
  * numItems items. Field item = IT_IP + (CFE_F_* - 1). */
 enum { IT_REVERT = 1, IT_IP, IT_MASK, IT_GW, IT_DNS, IT_DOMAIN,
        IT_L_IP, IT_L_MASK, IT_L_GW, IT_L_DNS, IT_L_DOMAIN, IT_STATUS, IT_CHECK, IT_NOTE, IT_VERSION,
-       IT_SAVE, IT_LOG, IT_DHCP };
+       IT_SAVE, IT_LOG, IT_DHCP /* Lite: the static text "MoofTCP Lite does not support DHCP." */ };
 
 /* Alerts (moofcdev.r). Fixed IDs in the cdev's own file: CPanelID is the Control Panel desk
  * accessory's own resource base (observed -15904 = 0xC1E0 in Snow, DRVR 15's owned range), not the
@@ -140,7 +141,11 @@ static ControlHandle box(DialogPtr d, short base, short it) {
 
 static void read_fields(DialogPtr d, short base, CfeFields *f) {
     f->log = (uint8_t)(GetControlValue(box(d, base, IT_LOG)) ? 1 : 0);
+#if CFE_HAS_DHCP
     f->dhcp = (uint8_t)(GetControlValue(box(d, base, IT_DHCP)) ? 1 : 0);
+#else
+    f->dhcp = 0;                        /* Lite: item IT_DHCP is the "no DHCP" static text */
+#endif
     get_text(d, base, IT_IP, f->ip, (int)sizeof f->ip);
     get_text(d, base, IT_MASK, f->mask, (int)sizeof f->mask);
     get_text(d, base, IT_GW, f->gw, (int)sizeof f->gw);
@@ -155,7 +160,9 @@ static void show_fields(DialogPtr d, short base, const CfeFields *f) {
     set_text(d, base, IT_DNS, f->dns);
     set_text(d, base, IT_DOMAIN, f->domain);
     SetControlValue(box(d, base, IT_LOG), f->log ? 1 : 0);
+#if CFE_HAS_DHCP
     SetControlValue(box(d, base, IT_DHCP), f->dhcp ? 1 : 0);
+#endif
 }
 
 static short alert(short which, const unsigned char *msg) {
@@ -590,7 +597,7 @@ static long dispatch(const CdevArgs *a) {
             st->check_pending = 1;
         } else if (a->item - base == IT_SAVE) {
             (void)save_now(a, st);
-        } else if (a->item - base == IT_LOG || a->item - base == IT_DHCP) {
+        } else if (a->item - base == IT_LOG || (CFE_HAS_DHCP && a->item - base == IT_DHCP)) {
             ControlHandle c = box(d, base, (short)(a->item - base));
             SetControlValue(c, GetControlValue(c) ? 0 : 1);
             st->check_pending = 1;

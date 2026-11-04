@@ -69,6 +69,74 @@ static void units_is_moof_matches_moof_r(void) {
     T_EQ(mt_units_is_moof(NULL), 0);
 }
 
+/* The Rez sources as each variant sees them: the lines of a .r file with MT_NO_DHCP defined (lite = 1)
+ * or not, after #ifdef / #ifndef / #else / #endif (no other conditionals are used around them). */
+static int rez_lines(const char *rel, int lite, char lines[][256], int cap) {
+    char path[512], line[256];
+    FILE *fp;
+    int n = 0, depth = 0, off_at = 0;              /* off_at: depth at which skipping began, 0 = not skipping */
+    snprintf(path, sizeof path, "%s/%s", MT_SOURCE_DIR, rel);
+    fp = fopen(path, "r");
+    if (!fp) return -1;
+    while (fgets(line, sizeof line, fp)) {
+        const char *t = line;
+        while (*t == ' ') t++;
+        if (!strncmp(t, "#ifdef ", 7) || !strncmp(t, "#ifndef ", 8)) {
+            int want = !strncmp(t, "#ifdef ", 7), is_dhcp = strstr(t, "MT_NO_DHCP") != NULL;
+            depth++;
+            if (!off_at && is_dhcp && (lite != want)) off_at = depth;
+            continue;
+        }
+        if (!strncmp(t, "#else", 5)) {
+            if (off_at == depth) off_at = 0;
+            else if (!off_at) off_at = depth;
+            continue;
+        }
+        if (!strncmp(t, "#endif", 6)) {
+            if (off_at == depth) off_at = 0;
+            depth--;
+            continue;
+        }
+        if (off_at || n >= cap) continue;
+        memcpy(lines[n++], line, sizeof line);
+    }
+    fclose(fp);
+    return n;
+}
+
+/* The items of DITL -4064 in a variant (item lines only, in order). */
+static int ditl_items(int lite, char items[][256], int cap) {
+    static char lines[400][256];
+    int n = rez_lines("mac/cdev/moofcdev.r", lite, lines, 400), i, in = 0, k = 0;
+    for (i = 0; i < n; i++) {
+        if (!in) { if (strstr(lines[i], "resource 'DITL' (-4064)")) in = 1; continue; }
+        if (lines[i][0] == '}') break;
+        if (strstr(lines[i], "}, ") && strchr(lines[i], ';') && k < cap) memcpy(items[k++], lines[i], 256);
+    }
+    return k;
+}
+
+/* MoofTCP Lite: the panel's item list keeps every number; item 18 (IT_DHCP) is a static text saying
+ * that Lite has no DHCP instead of the checkbox; moof.r's sysz is 0x34000 for Lite, 0x38000 full. */
+static void ditl_both_variants(void) {
+    static char full[32][256], lite[32][256], fl[400][256], ll[400][256];
+    int nf = ditl_items(0, full, 32), nl = ditl_items(1, lite, 32), i, sf = 0, sl = 0, n;
+    T_EQ(nf, 18);
+    T_EQ(nl, 18);
+    for (i = 0; i < 17; i++) T_CHECK(strcmp(full[i], lite[i]) == 0);
+    T_CHECK(strstr(full[17], "CheckBox") && strstr(full[17], "DHCP"));
+    T_CHECK(strstr(lite[17], "StaticText") && strstr(lite[17], "MoofTCP Lite does not support DHCP."));
+    n = rez_lines("mac/moof/moof.r", 0, fl, 400);
+    for (i = 0; i < n; i++) if (strstr(fl[i], "$\"0003 8000\"")) sf++;
+    n = rez_lines("mac/moof/moof.r", 1, ll, 400);
+    for (i = 0; i < n; i++) {
+        if (strstr(ll[i], "$\"0003 4000\"")) sl++;
+        if (strstr(ll[i], "$\"0003 8000\"")) sl += 10;
+    }
+    T_EQ(sf, 1);
+    T_EQ(sl, 1);
+}
+
 /* Fake unit table: DCEs with a native dCtlDriver pointer, the flags word right after it. */
 typedef struct { uint8_t b[2 * sizeof(void *) + 8]; } FakeDce;
 
@@ -248,9 +316,11 @@ static void draft_round_trip(void) {
     n = cdl_draft_encode(&f, b, sizeof b);
     T_EQ(n, 1 + 1 + 8 + 1 + 11 + 1 + 8 + 1 + 0 + 1 + 18 + 1 + 1);
     T_EQ(b[0], 3);                                     /* Plan 4: version 3, log + dhcp bytes */
+    T_EQ(b[n - 1], CFE_HAS_DHCP);                       /* MoofTCP Lite: the draft never carries DHCP */
     T_EQ(cdl_draft_decode(b, n, &g, 0), 0);
     T_EQ(g.log, 1);                                    /* the flag round-trips, default ignored */
-    T_EQ(g.dhcp, 1);
+    T_EQ(g.dhcp, CFE_HAS_DHCP);
+    g.dhcp = f.dhcp;
     T_EQ(cdl_fields_equal(&f, &g), 1);
     f.log = 0;
     f.dhcp = 0;
@@ -262,6 +332,9 @@ static void draft_round_trip(void) {
     T_EQ(cdl_draft_encode(&f, b, n - 1), 0);            /* no room for the dhcp byte */
     T_EQ(cdl_draft_decode(b, n - 1, &g, 0), -1);       /* truncated (dhcp byte missing) */
     T_EQ(g.ip[0], 0);
+    b[n - 1] = 1;                                      /* a full version's draft with DHCP on */
+    T_EQ(cdl_draft_decode(b, n, &g, 0), 0);
+    T_EQ(g.dhcp, CFE_HAS_DHCP);                        /* Lite: read as off */
     b[n - 1] = 2;
     T_EQ(cdl_draft_decode(b, n, &g, 0), -1);           /* dhcp byte not 0/1 */
     b[n - 1] = 0;
@@ -362,6 +435,17 @@ static void status_text_lines(void) {
     T_CHECK(ptext_is(ps, "MoofTCP is running at 10.0.0.2."));
     memset(&v, 0, sizeof v);
     v.magic = MT_VIEW_MAGIC; v.version = MT_VIEW_VERSION; v.mode = 1;
+#ifdef MT_NO_DHCP
+    /* MoofTCP Lite: the Lite driver never sets mode 1; even if a view said so, no line mentions DHCP */
+    cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
+    T_CHECK(ptext_is(ps, "MoofTCP is loaded, not configured."));
+    v.linked = 1; v.state = MT_DHCP_BOUND; v.addr = 0xC0A80117u; v.lease_s = 7200;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(ptext_is(ps, "MoofTCP is running at 192.168.1.23."));
+    v.state = MT_DHCP_RENEWING;
+    cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
+    T_CHECK(memchr(ps + 1, 'D', ps[0]) == NULL);
+#else
     cdl_status_text(CDL_UNIT_MOOF, &v, 0, ps);
     T_CHECK(ptext_is(ps, "DHCP: starts with the first network app."));
     v.linked = 1; v.state = MT_DHCP_SELECTING;
@@ -389,6 +473,7 @@ static void status_text_lines(void) {
     v.state = MT_DHCP_INIT; v.addr = 0;                /* lease lost, asking again */
     cdl_status_text(CDL_UNIT_MOOF, &v, 1000, ps);
     T_CHECK(ptext_is(ps, "DHCP: asking for an address..."));
+#endif
 }
 
 /* Plan 4: the status view through the DCE's dCtlStorage. */
@@ -421,4 +506,4 @@ static void units_view_from_dce(void) {
 
 T_MAIN(units_is_moof_matches_moof_r, units_find_ipp_fake_table, problem_text_messages,
        check_key_transitions, save_and_close_decisions, field_caps, draft_round_trip, pcat_caps_at_255,
-       draft_v1_decodes, load_saved_defaults, status_text_lines, units_view_from_dce)
+       draft_v1_decodes, load_saved_defaults, status_text_lines, units_view_from_dce, ditl_both_variants)

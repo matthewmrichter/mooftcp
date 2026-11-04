@@ -41,7 +41,17 @@
 #define MT_INST_DEBUG 0
 #endif
 
-#define VERS_STR "1.0rc3"
+/* VERS_STR goes into the result messages ("MoofTCP <VERS_STR> is installed."). MoofTCP Lite (MT_NO_DHCP,
+ * the build that embeds the Lite MoofTCP file) says "Lite" there and in About. */
+#ifdef MT_NO_DHCP
+#define VARIANT_STR "Lite "
+#define ABOUT_NOTE " This is MoofTCP Lite: no DHCP client, the address is set by hand."
+#else
+#define VARIANT_STR ""
+#define ABOUT_NOTE ""
+#endif
+#define VERS_NUM "1.0rc3"
+#define VERS_STR VARIANT_STR VERS_NUM
 
 enum { DLG_MAIN = 128, AL_RESTART = 129, AL_NOTE = 130 };
 enum { IT_INSTALL = 1, IT_REMOVE, IT_QUIT, IT_MSG, IT_INTRO };
@@ -189,8 +199,8 @@ static void do_menu(long mr) {
     Str255 name;
     if (menu == MN_APPLE) {
         if (item == 1) {
-            note("MoofTCP Installer " VERS_STR ". Installs or removes MoofTCP, a TCP/IP stack for System 6 that "
-                 "takes the place of MacTCP.");
+            note("MoofTCP " VARIANT_STR "Installer " VERS_NUM ". Installs or removes MoofTCP, a TCP/IP stack for System 6 that "
+                 "takes the place of MacTCP." ABOUT_NOTE);
         } else {
             GetMenuItemText(GetMenuHandle(MN_APPLE), item, name);
             (void)OpenDeskAcc(name);

@@ -1,6 +1,10 @@
 #include <string.h>
 #include "mt_int.h"
 
+#ifdef MT_NO_DHCP
+#error "mt_dhcp.c is not part of the MoofTCP Lite build (MT_NO_DHCP): leave it out of the source list"
+#endif
+
 /* DHCP client (RFC 2131 / 2132). Design and rulings: docs/dev/DHCP-DESIGN.md.
  *
  * No endpoint, no receive buffer: replies arrive through mt_udp_input's no-endpoint branch (and,

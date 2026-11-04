@@ -98,7 +98,7 @@ int cfe_validate(const CfeFields *f, CfeError *err) {
     if (!domain_ok(f->domain)) return fail(err, CFE_F_DOMAIN, CFE_E_DOMAIN);
 
     if (!have_ip) {
-        if (!f->dhcp) {
+        if (!CFE_HAS_DHCP || !f->dhcp) {           /* Lite: always the manual rule */
             if (have_mask || have_gw || have_dns) return fail(err, CFE_F_IP, CFE_E_IP);
             return CFE_OK;
         }
@@ -143,8 +143,8 @@ uint32_t cfe_encode(const CfeFields *f, const uint8_t *prior, uint32_t prior_len
     } else {
         flags = 0;
     }
-    if (f->dhcp) mode = MT_CFG_MODE_DHCP;
-    else if (mode == MT_CFG_MODE_DHCP) mode = MT_CFG_MODE_MANUAL;   /* unknown words stay (R3) */
+    if (CFE_HAS_DHCP && f->dhcp) mode = MT_CFG_MODE_DHCP;
+    else if (mode == MT_CFG_MODE_DHCP) mode = MT_CFG_MODE_MANUAL;   /* unknown words stay (R3); Lite: never 1 */
     flags = (uint8_t)((flags & (uint8_t)~MT_CFG_FLAG_LOG) | (f->log ? MT_CFG_FLAG_LOG : 0));
     return mt_cfg_build_keep(&c, mode, flags, tail, tail_len, out, cap);
 }
@@ -162,6 +162,6 @@ int cfe_decode(const uint8_t *res, uint32_t n, CfeFields *f) {
     if (plain_ok(c.dns)) cfe_format_ip(c.dns, f->dns);
     if (domain_ok(c.domain)) memcpy(f->domain, c.domain, sizeof f->domain);
     f->log = (uint8_t)(flags & MT_CFG_FLAG_LOG ? 1 : 0);
-    f->dhcp = (uint8_t)(mode == MT_CFG_MODE_DHCP ? 1 : 0);
+    f->dhcp = (uint8_t)(CFE_HAS_DHCP && mode == MT_CFG_MODE_DHCP ? 1 : 0);   /* Lite: 0 */
     return 0;
 }

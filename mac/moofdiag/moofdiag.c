@@ -141,11 +141,16 @@ int main(void)
             /* another layout: do not read a single field of it */
             P("VERSION MISMATCH: the driver's Status layout is version %u (block says %u), this MoofDiag reads version %d. Rebuild MoofDiag and the driver from the same sources.\r",
               (unsigned)pb.csParam[2], (unsigned)m->version, MT_STATUS_VERSION);
+        } else if (r == 0 && m && m->variant != MT_RES_VARIANT) {
+            /* the core's mt_stack differs between the full build and MoofTCP Lite: read nothing of it */
+            P("VARIANT MISMATCH: the driver is the %s build, this MoofDiag reads the %s build. Use the MoofDiag built with the driver (build-mac/ full, build-mac-lite/ Lite).\r",
+              m->variant == MT_RES_VARIANT_LITE ? "Lite" : "full", MT_RES_VARIANT == MT_RES_VARIANT_LITE ? "Lite" : "full");
         } else if (r == 0 && m) {
             const mt_stats *st;
             mt_stack *s;
-            P("boot: refnum %d cfg_result %d enet_err %d mode %u size %lu raw %08lx\r", m->refnum,
-              m->cfg_result, m->enet_err, m->mode, (unsigned long)m->size, (unsigned long)s24(m->raw));
+            P("boot: refnum %d cfg_result %d enet_err %d mode %u size %lu raw %08lx variant %s\r", m->refnum,
+              m->cfg_result, m->enet_err, m->mode, (unsigned long)m->size, (unsigned long)s24(m->raw),
+              m->variant == MT_RES_VARIANT_LITE ? "Lite" : "full");
             ip(a1, m->cfg.addr); ip(a2, m->cfg.mask); ip(a3, m->cfg.gateway); ip(a4, m->cfg.dns);
             P("config: addr %s mask %s gateway %s dns %s domain '%s' mtu %u\r", a1, a2, a3, a4,
               m->cfg.domain, m->cfg.mtu);
@@ -154,14 +159,20 @@ int main(void)
               (unsigned long)m->view.addr, (unsigned long)m->view.lease_s, (unsigned long)m->view.t_bound);
             {
                 mt_stack *ds;
-                mt_dhcp_info di;
                 memcpy(&ds, m->d, sizeof ds);        /* MtDrv's first member: mt_stack *s */
+#ifdef MT_NO_DHCP
+                P("dhcp: not in this build (MoofTCP Lite); prefs mode word %u runs as manual\r", m->mode);
+#else
+                {
+                mt_dhcp_info di;
                 mt_dhcp_get_info(ds, &di, mt_ms_from_ticks((uint32_t)TickCount()));
                 ip(a1, di.addr); ip(a2, di.server); ip(a3, m->dhcp_hint);
                 P("dhcp: state %u addr %s server %s hint %s lease %lu left %lu tx %lu offers %lu acks %lu naks %lu bad %lu\r",
                   di.state, a1, a2, a3, (unsigned long)di.lease_s, (unsigned long)di.left_s,
                   (unsigned long)di.tx, (unsigned long)di.offers, (unsigned long)di.acks,
                   (unsigned long)di.naks, (unsigned long)di.bad);
+                }
+#endif
                 {
                     mt_ifconfig cc;
                     mt_get_config(ds, &cc);          /* what the core runs with (DHCP: the lease) */

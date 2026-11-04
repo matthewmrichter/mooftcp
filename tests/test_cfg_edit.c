@@ -317,7 +317,8 @@ static void encode_keeps_prior_mode_flags_tail(void) {
     { static const uint8_t p2[] = { 0,1, 0,1, 10,0,0,2, 255,0,0,0, 0,0,0,0, 0,0,0,0, 0 };
       f.dhcp = 1;                                       /* Plan 4: the DHCP box decides 0 / 1 */
       n = cfe_encode(&f, p2, sizeof p2, buf, sizeof buf);
-      T_EQ(n, 22 + 11); T_EQ(mt_cfg_raw_mode(buf, n), 1); T_EQ(buf[n - 1], 0);
+      T_EQ(n, 22 + 11); T_EQ(mt_cfg_raw_mode(buf, n), CFE_HAS_DHCP ? 1 : 0);   /* Lite: never 1 */
+      T_EQ(buf[n - 1], 0);
       f.dhcp = 0;                                       /* unticked: DHCP mode becomes manual */
       n = cfe_encode(&f, p2, sizeof p2, buf, sizeof buf);
       T_EQ(mt_cfg_raw_mode(buf, n), 0); }
@@ -480,6 +481,7 @@ static void parse_ip_idempotent_fuzz(void) {
 
 /* Plan 4: the DHCP box. In DHCP mode the IP is optional (a requested-address hint) and the other
  * fields may be set without it (fallbacks); everything typed is still validated. */
+#if CFE_HAS_DHCP
 static void dhcp_mode_fields(void) {
     CfeFields f, g;
     CfeError e;
@@ -533,6 +535,55 @@ static void dhcp_mode_fields(void) {
       n = cfe_encode(&g, p7, sizeof p7, buf, sizeof buf);
       T_EQ(mt_cfg_raw_mode(buf, n), 1); }
 }
+#else
+/* MoofTCP Lite (MT_NO_DHCP): no DHCP box. f->dhcp is ignored (manual rules), nothing ever writes mode 1,
+ * and a DHCP-mode file saved by the full version shows (and is re-saved) as a manual setting with its
+ * flags byte and tail kept (DHCP-DESIGN.md section 10). */
+static void dhcp_mode_fields(void) {
+    CfeFields f, g;
+    CfeError e;
+    uint8_t buf[128];
+    uint32_t n;
+    T_EQ(CFE_HAS_DHCP, 0);
+    setf(&f, "", "255.255.255.0", "192.168.1.1", "1.1.1.1", "lan");
+    f.dhcp = 1;                                         /* a stray flag changes nothing */
+    T_EQ(cfe_validate(&f, &e), CFE_E_IP); T_EQ(e.field, CFE_F_IP);   /* the manual rule: IP required */
+    T_EQ(cfe_encode(&f, NULL, 0, buf, sizeof buf), 0);
+    setf(&f, "", "", "", "", ""); f.dhcp = 1;
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(n, 22); T_EQ(mt_cfg_raw_mode(buf, n), MT_CFG_MODE_MANUAL);
+    setf(&f, "192.168.1.50", "255.255.255.0", "192.168.1.1", "", ""); f.dhcp = 1;
+    T_EQ(cfe_validate(&f, &e), CFE_OK);
+    n = cfe_encode(&f, NULL, 0, buf, sizeof buf);
+    T_EQ(mt_cfg_raw_mode(buf, n), MT_CFG_MODE_MANUAL);
+    /* a full version's DHCP-mode file with a hint, flags 0x81 and a tail */
+    { static const uint8_t p1[] = { 0,1, 0,1, 10,0,0,2, 255,0,0,0, 10,0,0,1, 1,1,1,1, 3,'l','a','n',
+                                    0x81, 0xDE, 0xAD };
+      T_EQ(cfe_decode(p1, sizeof p1, &g), 0);
+      T_EQ(g.dhcp, 0); T_EQ(g.log, 1);
+      T_CHECK(strcmp(g.ip, "10.0.0.2") == 0);
+      T_CHECK(strcmp(g.gw, "10.0.0.1") == 0);
+      T_CHECK(strcmp(g.dns, "1.1.1.1") == 0);
+      T_EQ(cfe_validate(&g, &e), CFE_OK);
+      g.dhcp = 1;                                       /* even if something set it: saved as manual */
+      n = cfe_encode(&g, p1, sizeof p1, buf, sizeof buf);
+      T_EQ(n, sizeof p1);
+      T_EQ(mt_cfg_raw_mode(buf, n), MT_CFG_MODE_MANUAL);
+      T_EQ(memcmp(buf + 4, p1 + 4, sizeof p1 - 4), 0); }   /* fields, flags 0x81, tail: unchanged */
+    /* a DHCP-mode file without a hint: the fallbacks show, the IP must be typed before a save */
+    { static const uint8_t p2[] = { 0,1, 0,1, 0,0,0,0, 0,0,0,0, 10,0,0,1, 1,1,1,1, 0, 0 };
+      T_EQ(cfe_decode(p2, sizeof p2, &g), 0);
+      T_EQ(g.dhcp, 0); T_EQ(g.ip[0], 0);
+      T_CHECK(strcmp(g.gw, "10.0.0.1") == 0);
+      T_EQ(cfe_validate(&g, &e), CFE_E_IP); }
+    /* an unknown mode word is still kept */
+    { static const uint8_t p7[] = { 0,1, 0,7, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0, 0 };
+      T_EQ(cfe_decode(p7, sizeof p7, &g), 0);
+      g.dhcp = 1;
+      n = cfe_encode(&g, p7, sizeof p7, buf, sizeof buf);
+      T_EQ(mt_cfg_raw_mode(buf, n), 7); }
+}
+#endif
 
 T_MAIN(parse_ip_table, parse_mask_table, format_round_trip, validate_empty_and_basic,
        validate_reserved_addresses, validate_host_bits, validate_ip_required,

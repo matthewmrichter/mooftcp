@@ -18,9 +18,17 @@ add_custom_command(
     COMMAND ${REZ} ${EMBED}/embed.r -o ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin
     DEPENDS ${MOOF_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/mkembed.py)
 
+# installer.r goes through Rez here (not add_application's own rule) so MT_REZ_DEFS reach it: MoofTCP
+# Lite (-DMT_NO_DHCP) names itself "Lite" in the window, the texts and the 'vers' resources.
+set(INST_RSRC ${CMAKE_CURRENT_BINARY_DIR}/installer.r.rsrc.bin)
+add_custom_command(
+    OUTPUT ${INST_RSRC}
+    COMMAND ${REZ} -I${REZ_INCLUDE_PATH} ${MT_REZ_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/installer.r -o ${INST_RSRC}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/installer.r)
+
 # "MoofTCP Installer" (type APPL, creator mtin, hasBundle). `scripts/build-mac.sh MoofInstaller` builds
-# build-mac/installer/MoofTCP Installer.bin.
-add_application(MoofInstallerApp installer_main.c inst_exec_mac.c installer.r
+# build-mac/installer/MoofTCP Installer.bin (MT_LITE=1: build-mac-lite/installer/, the Lite installer).
+add_application(MoofInstallerApp installer_main.c inst_exec_mac.c ${INST_RSRC}
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
 target_link_libraries(MoofInstallerApp mtinst68k)
 target_compile_options(MoofInstallerApp PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=c99 -O2 -Wall -Wextra -Werror>)
@@ -36,7 +44,7 @@ add_custom_target(MoofInstaller_APPL ALL DEPENDS "MoofTCP Installer.bin")
 # ":MoofTCP Installer Debug" at the root of the startup disk (the interruption test, "[I|R]N").
 # build-mac/installer/Installer Dbg.bin.
 add_application(MoofInstallerDbgApp installer_main.c inst_exec_mac.c
-                ${CMAKE_CURRENT_BINARY_DIR}/installer.r.rsrc.bin
+                ${INST_RSRC}
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
 target_link_libraries(MoofInstallerDbgApp mtinst68k)
 target_compile_definitions(MoofInstallerDbgApp PRIVATE MT_INST_DEBUG=1)

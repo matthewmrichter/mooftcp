@@ -8,6 +8,13 @@ if(MT_TEST_HOOKS)
   add_compile_definitions(MT_TEST_HOOKS)
 endif()
 
+# MoofTCP Lite (docs/dev/RELEASE.md "Variants"): no DHCP client. core/mt_dhcp.c and the DHCP-only
+# tests are left out, MT_NO_DHCP compiles the hooks away. Use a separate build dir (build-lite).
+option(MT_NO_DHCP "Build MoofTCP Lite: without the DHCP client" OFF)
+if(MT_NO_DHCP)
+  add_compile_definitions(MT_NO_DHCP)
+endif()
+
 add_compile_options(-std=c99 -Wall -Wextra -Werror -g)
 if(MT_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
@@ -15,6 +22,9 @@ if(MT_SANITIZE)
 endif()
 
 file(GLOB MT_CORE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/core/*.c)
+if(MT_NO_DHCP)
+  list(FILTER MT_CORE_SRC EXCLUDE REGEX "/mt_dhcp\\.c$")
+endif()
 add_library(mtcore STATIC ${MT_CORE_SRC})
 target_include_directories(mtcore PUBLIC ${CMAKE_SOURCE_DIR}/core)
 
@@ -54,6 +64,9 @@ set(MT_TEST_LIBS mtinst)
 
 enable_testing()
 file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
+if(MT_NO_DHCP)   # the client and the driver's DHCP mode do not exist in Lite
+  list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_dhcp.c ${CMAKE_SOURCE_DIR}/tests/test_pb_dhcp.c)
+endif()
 foreach(src ${MT_TEST_SRC})
   get_filename_component(name ${src} NAME_WE)
   add_executable(${name} ${src})

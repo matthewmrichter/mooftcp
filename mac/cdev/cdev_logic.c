@@ -132,7 +132,7 @@ uint32_t cdl_draft_encode(const CfeFields *f, uint8_t *out, uint32_t cap) {
     }
     if (n + 2 > cap) return 0;
     out[n++] = f->log ? 1 : 0;                          /* version 2: the log flag */
-    out[n++] = f->dhcp ? 1 : 0;                         /* version 3: the DHCP flag */
+    out[n++] = CFE_HAS_DHCP && f->dhcp ? 1 : 0;         /* version 3: the DHCP flag (Lite: 0) */
     return n;
 }
 
@@ -164,7 +164,7 @@ int cdl_draft_decode(const uint8_t *p, uint32_t n, CfeFields *f, int default_log
         f->log = p[off++];
         if (p[0] == 3) {                                /* version 3: the DHCP byte, 0 or 1 */
             if (off >= n || p[off] > 1) goto bad;
-            f->dhcp = p[off];
+            f->dhcp = (uint8_t)(CFE_HAS_DHCP ? p[off] : 0);   /* Lite: no DHCP box */
         }
     } else {
         f->log = (uint8_t)(default_log ? 1 : 0);        /* version 1 drafts had no flag */
@@ -193,17 +193,22 @@ static void pcat_ip(unsigned char *ps, uint32_t a) {
 }
 
 void cdl_status_text(int unit, const MtStatusView *v, uint32_t now_ticks, unsigned char *ps) {
+    (void)now_ticks;                                    /* unused in MoofTCP Lite */
     ps[0] = 0;
     if (unit == CDL_UNIT_NONE) { cdl_pcat(ps, "Not loaded: restart after saving."); return; }
     if (unit == CDL_UNIT_MACTCP) { cdl_pcat(ps, "MacTCP is loaded; MoofTCP is off."); return; }
     if (!v) { cdl_pcat(ps, "MoofTCP is loaded."); return; }
-    if (!v->mode) {
+#ifndef MT_NO_DHCP
+    if (!v->mode)
+#endif
+    {                                                   /* manual (MoofTCP Lite: always) */
         if (!v->addr) { cdl_pcat(ps, "MoofTCP is loaded, not configured."); return; }
         cdl_pcat(ps, v->linked ? "MoofTCP is running at " : "MoofTCP is loaded: ");
         pcat_ip(ps, v->addr);
         cdl_pcat(ps, ".");
         return;
     }
+#ifndef MT_NO_DHCP
     if (!v->linked || v->state == MT_DHCP_OFF) {
         cdl_pcat(ps, "DHCP: starts with the first network app.");
         return;
@@ -226,4 +231,5 @@ void cdl_status_text(int unit, const MtStatusView *v, uint32_t now_ticks, unsign
         }
         cdl_pcat(ps, ")");
     }
+#endif
 }

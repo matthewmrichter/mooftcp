@@ -56,9 +56,17 @@ resource 'DRVR' (22, ".ipp", sysheap, locked) {
  * the resident block (gate, Ethernet slots, MtDrv, core arena), the DCE, plus
  * the .ENET0 driver the first open loads (about 16.5K); 0x24000 booted but left too little (-23000).
  * Derivation: docs/dev/MACTCP-INTERFACE.md "MoofTCP driver (Task 10)". */
+#ifdef MT_NO_DHCP
+/* MoofTCP Lite (no DHCP client, about 5.3 KB less resident): the RC2 value 0x34000, decided from the
+ * RC1 hardware HeapInfo numbers before DHCP existed (above). */
+data 'sysz' (0) {
+    $"0003 4000"
+};
+#else
 data 'sysz' (0) {
     $"0003 8000"
 };
+#endif
 
 /* Startup icon "Moof Stamp" (Moof icon concepts, round 2): 128 bytes of image, then 128 bytes of mask. */
 data 'ICN#' (128) {

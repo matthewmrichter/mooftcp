@@ -21,7 +21,7 @@ target_link_options(MoofDrvr PRIVATE -Wl,--mac-flat)
 add_custom_command(
     OUTPUT MoofTCP.bin MoofTCP.dsk
     COMMAND ${REZ} -I${REZ_INCLUDE_PATH} -I${CMAKE_CURRENT_SOURCE_DIR}
-            -I${CMAKE_CURRENT_SOURCE_DIR}/../cdev
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../cdev ${MT_REZ_DEFS}
             ${CMAKE_CURRENT_SOURCE_DIR}/moof.r
             -o MoofTCP.bin --cc MoofTCP.dsk
             -t cdev -c ztcp

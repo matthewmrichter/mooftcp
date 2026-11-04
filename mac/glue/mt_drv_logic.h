@@ -22,6 +22,22 @@
 
 #include <stdint.h>
 #include "mt_gate.h"
+#include "mt_cfg.h"
+
+/* Boot: how the prefs record runs (mt_drv.c boot). cfg_ok: mt_cfg_load gave MT_CFG_OK; mode: its mode
+ * word; addr: its (loader-checked) address. DHCP mode (Plan 4) needs mode word 1 and a build with the
+ * client. MoofTCP Lite (MT_NO_DHCP) ignores the mode word: every record runs as a manual configuration,
+ * so a prefs file saved in DHCP mode by the full version keeps working there if it holds a usable
+ * address, and is unconfigured (open -23004) if it holds none; Lite never waits for a lease. */
+enum { MT_DRV_CFG_NONE = 0, MT_DRV_CFG_MANUAL, MT_DRV_CFG_DHCP };
+static inline int mt_drv_cfg_kind(int cfg_ok, uint8_t mode, uint32_t addr) {
+#ifndef MT_NO_DHCP
+    if (cfg_ok && mode == MT_CFG_MODE_DHCP) return MT_DRV_CFG_DHCP;
+#else
+    (void)mode;
+#endif
+    return cfg_ok && addr ? MT_DRV_CFG_MANUAL : MT_DRV_CFG_NONE;
+}
 
 #define MT_DRV_REFUSED (-23009)  /* insufficientResources */
 

@@ -258,7 +258,9 @@ struct MtDrv {
     uint8_t   dead_n;           /* a lone byte before the buffers above made them odd (Task 12) */
     uint8_t   co_gen;           /* bumped by every abandonment: a routine that resumes after one skips its depth-- */
     uint8_t   pad_co;
+#ifndef MT_NO_DHCP
     struct MtStatusView *view;  /* DHCP mode: the status mirror the event callback updates (NULL: none) */
+#endif
 };
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
@@ -275,6 +277,7 @@ MtDrv   *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link
 /* Set the interface configuration; an address of 0 makes the driver unconfigured (every
  * call returns notOpenErr -28, as an unopened .IPP does, matrix "Unconfigured run"). */
 void     mt_pb_set_config(MtDrv *d, const mt_ifconfig *c);
+#ifndef MT_NO_DHCP   /* MoofTCP Lite has no DHCP mode */
 /* DHCP mode (Plan 4, docs/dev/DHCP-DESIGN.md section 4): apply c with the address forced to 0 (its
  * mask/gateway/DNS/domain are the fallbacks for options the server does not send), install the event
  * callback (mt_pb_dhcp_event, user = d) and start the core's client with `hint` as the requested
@@ -285,6 +288,7 @@ void     mt_pb_set_config(MtDrv *d, const mt_ifconfig *c);
 int      mt_pb_dhcp_start(MtDrv *d, const mt_ifconfig *c, mt_ip4 hint, struct MtStatusView *view);
 /* The core's DHCP callback (exported for the host tests). */
 void     mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t lease_s);
+#endif
 
 int16_t  mt_pb_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
