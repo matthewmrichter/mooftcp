@@ -24,6 +24,8 @@
 #include "mt.h"
 #include "mt_drv.h"
 #include "diag_streams.h"
+#include "mt_units.h"
+#include <stddef.h>
 
 QDGlobals qd;
 
@@ -115,15 +117,26 @@ int main(void)
     P("system zone after open: size %ld free %ld occupied %ld (no-network baseline: size 162100, occupied 149248)\r",
       syszone, sysfree, syszone - sysfree);
     if (r == -23004) unconf = 1;
-    if (r == 0) {
+    if (r == 0 || unconf) {
         CntrlParam pb;
-        MtRes *m;
+        MtRes *m = NULL;
         memset(&pb, 0, sizeof pb);
-        pb.ioCRefNum = ref;
-        pb.csCode = MT_DRV_STATUS_RES;
-        r = PBStatusSync((ParmBlkPtr)&pb);
-        memcpy(&m, &pb.csParam[0], 4);
-        P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
+        if (r == 0) {
+            pb.ioCRefNum = ref;
+            pb.csCode = MT_DRV_STATUS_RES;
+            r = PBStatusSync((ParmBlkPtr)&pb);
+            memcpy(&m, &pb.csParam[0], 4);
+            P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
+        } else {
+            /* Plan 4: the open failed (no address yet, e.g. DHCP without a server): Status needs an open
+             * driver, so reach the block through the status view in the unit's dCtlStorage (mt_view.h) */
+            const uint8_t *dce = NULL, *drv = mt_units_find_ipp_dce(&dce);
+            const MtStatusView *v = drv && mt_units_is_moof(drv) ? mt_units_view_in(dce, MT_UNITS_MASK24) : NULL;
+            if (v) m = (MtRes *)(void *)((const char *)v - offsetof(MtRes, view));
+            pb.csParam[2] = MT_STATUS_VERSION;
+            r = m ? 0 : -1;
+            P("open failed: block %08lx from the unit's status view\r", (unsigned long)s24(m));
+        }
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
             /* another layout: do not read a single field of it */
             P("VERSION MISMATCH: the driver's Status layout is version %u (block says %u), this MoofDiag reads version %d. Rebuild MoofDiag and the driver from the same sources.\r",
@@ -149,6 +162,12 @@ int main(void)
                   di.state, a1, a2, a3, (unsigned long)di.lease_s, (unsigned long)di.left_s,
                   (unsigned long)di.tx, (unsigned long)di.offers, (unsigned long)di.acks,
                   (unsigned long)di.naks, (unsigned long)di.bad);
+                {
+                    mt_ifconfig cc;
+                    mt_get_config(ds, &cc);          /* what the core runs with (DHCP: the lease) */
+                    ip(a1, cc.addr); ip(a2, cc.mask); ip(a3, cc.gateway); ip(a4, cc.dns);
+                    P("core config: addr %s mask %s gateway %s dns %s domain '%s'\r", a1, a2, a3, a4, cc.domain);
+                }
             }
             P("entries: calls %lu refused %lu pending-run %lu queued %lu queue-full %lu goodbye %lu\r",
               (unsigned long)m->entry.n_calls, (unsigned long)m->entry.n_refused,

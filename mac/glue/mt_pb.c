@@ -51,10 +51,8 @@ void mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32_t l
 
 int mt_pb_dhcp_start(MtDrv *d, const mt_ifconfig *c, mt_ip4 hint, MtStatusView *view) {
     int sv = mt_os_irq_save(), r;
-    mt_ifconfig z = *c;
-    z.addr = 0;
     d->view = view;
-    mt_set_config(d->s, &z);
+    mt_set_config(d->s, c);                     /* mt_dhcp_start below drops any address in it */
     d->configured = 0;
     mt_dhcp_set_cb(d->s, mt_pb_dhcp_event, d);
     r = mt_dhcp_start(d->s, hint, mt_os_ms());

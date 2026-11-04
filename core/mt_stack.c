@@ -86,7 +86,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->dcache = (mt_dns_cent *)(void *)(base + lay.dcache);
     s->log = (mt_logrec *)(void *)(base + lay.log);
     s->dhcp = (mt_dhcp *)(void *)(base + lay.dhcp);
-    s->dhcp->rnd = (seed * 2654435761u ^ 0x6A09E667u) | 1u;
+    s->dhcp->rnd = (seed ^ 0x6A09E667u) | 1u;
     return s;
 }
 
@@ -221,7 +221,8 @@ void mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now) {
 int mt_eth_send(mt_stack *s, mt_ip4 nexthop, uint16_t ethertype, uint16_t payload_len,
                 uint32_t now) {
     uint8_t mac[6];
-    if (s->cfg.addr == 0 || payload_len > MT_TXBUF_SIZE - MT_ETH_HDR) return -1;
+    if ((s->cfg.addr == 0 && nexthop != MT_ETH_BCAST_IP) || payload_len > MT_TXBUF_SIZE - MT_ETH_HDR)
+        return -1;                                 /* unconfigured: only the DHCP broadcast gets here */
     if (nexthop == MT_ETH_BCAST_IP) {
         memset(mac, 0xFF, 6);
     } else if (!mt_arp_resolve(s, nexthop, mac, now)) {

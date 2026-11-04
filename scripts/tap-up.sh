@@ -3,7 +3,7 @@
 # emulated Mac directly (inbound connections, passive opens, NCSA Telnet's FTP server). See
 # docs/dev/EMULATOR.md "TAP mode".
 #
-#   sudo scripts/tap-up.sh [--dry-run] [--dev tap0] [--user NAME] [--no-nat]   # create
+#   sudo scripts/tap-up.sh [--dry-run] [--dev tap0] [--user NAME] [--no-nat] [--dhcp]   # create
 #   sudo scripts/tap-up.sh --down [--dry-run] [--dev tap0]                      # remove everything
 #   scripts/tap-up.sh --dry-run ...                                            # print, no root needed
 #
@@ -18,11 +18,16 @@
 # It also redirects guest -> 10.0.0.1 ports 21 (TCP) and 7 (TCP, UDP) to the unprivileged host test
 # servers on 17021 (FTP) and 17007 (testnet.py echo); see redirects() below.
 # Note: with NAT on, the guest can reach the owner's whole LAN, not only the internet.
+# --dhcp (Plan 4) also starts a DHCP server for the guest on <dev> only: dnsmasq (DHCP only, DNS off:
+# --port=0), pool 10.0.0.50-99/24, lease 2 minutes (dnsmasq's minimum: T1 60 s, T2 105 s, so renewal
+# and rebinding show within minutes), router 10.0.0.1, DNS 1.1.1.1, domain moof.test. Its pid, lease
+# file and log (every DISCOVER/OFFER/REQUEST/ACK, --log-dhcp) are /run/mooftcp-dnsmasq.<dev>.{pid,leases,log};
+# --down stops it. Needs the dnsmasq binary (package dnsmasq-base). EMULATOR.md "DHCP over TAP".
 # Rules are added only if absent (iptables -C) and removed wherever present, so re-running is safe.
 # Only one MoofTCP TAP device at a time (shared subnet and saved ip_forward): a second is refused.
 # Snow then runs with: MT_ETH_LINK=tap:<dev> scripts/snow.sh start
 set -euo pipefail
-dev="tap0"; user="${SUDO_USER:-${USER:-}}"; dry=""; down=""; nat=1
+dev="tap0"; user="${SUDO_USER:-${USER:-}}"; dry=""; down=""; nat=1; dhcp=""
 NET="10.0.0.0/24"; HOSTIP="10.0.0.1/24"; TAG="mooftcp-tap"
 die() { echo "tap-up.sh: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
@@ -32,12 +37,14 @@ while [ $# -gt 0 ]; do
     --dev) [ $# -ge 2 ] || die "--dev needs a name"; dev="$2"; shift 2;;
     --user) [ $# -ge 2 ] || die "--user needs a name"; user="$2"; shift 2;;
     --no-nat) nat=""; shift;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0;;
+    --dhcp) dhcp=1; shift;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0;;
     *) die "unknown argument $1 (see --help)";;
   esac
 done
 [[ "$dev" =~ ^(tap|snow)[A-Za-z0-9_]{0,10}$ ]] || die "device name must start with tap or snow (Snow's rule)"
 STATE="/run/mooftcp-tap.$dev"
+DNSM="/run/mooftcp-dnsmasq.$dev"
 run() { echo "+ $*"; [ -n "$dry" ] || "$@"; }
 try() { echo "+ $* || true"; [ -n "$dry" ] || "$@" 2>/dev/null || true; }
 if [ -z "$dry" ] && [ "$(id -u)" != 0 ]; then
@@ -97,7 +104,24 @@ redirects() {  # redirects <add|del>
   done
 }
 
+# The guest's DHCP server (--dhcp): bound to <dev> only, DHCP only (no DNS: --port=0).
+dhcp_up() {
+  command -v dnsmasq >/dev/null 2>&1 || [ -n "$dry" ] || die "--dhcp needs dnsmasq (apt install dnsmasq-base)"
+  run dnsmasq --conf-file=/dev/null --interface="$dev" --bind-dynamic --except-interface=lo --port=0 \
+    --dhcp-range=10.0.0.50,10.0.0.99,255.255.255.0,2m --dhcp-option=option:router,10.0.0.1 \
+    --dhcp-option=option:dns-server,1.1.1.1 --dhcp-option=option:domain-name,moof.test \
+    --dhcp-leasefile="$DNSM.leases" --pid-file="$DNSM.pid" --log-dhcp --log-facility="$DNSM.log"
+  echo "tap-up.sh: DHCP server on $dev (pool 10.0.0.50-99, lease 2 min), log $DNSM.log"
+}
+dhcp_down() {
+  if [ -f "$DNSM.pid" ]; then
+    try kill "$(cat "$DNSM.pid")"
+    run rm -f "$DNSM.pid"
+  fi
+}
+
 if [ -n "$down" ]; then
+  dhcp_down
   OP=del redirects
   fw_rules del
   if [ -f "$STATE" ] || [ -n "$dry" ]; then
@@ -138,5 +162,6 @@ if [ -n "$nat" ]; then
   fw_rules add
   echo "tap-up.sh: guest traffic to the internet leaves via $(uplink || echo '?') (MASQUERADE)"
 fi
+[ -z "$dhcp" ] || dhcp_up
 echo "tap-up.sh: $dev up, network 10.0.0.0/24, host 10.0.0.1 (guest 10.0.0.2, gateway 10.0.0.1; the guest prefs' /8 mask covers it)."
 echo "tap-up.sh: start Snow with: MT_ETH_LINK=tap:$dev scripts/snow.sh start"

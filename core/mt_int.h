@@ -272,8 +272,8 @@ typedef struct {
     uint32_t t_round;            /* ms: start of the exchange (the secs field) */
     uint32_t t_next;             /* ms: next send (INIT .. REQUESTING, RENEWING, REBINDING) */
     uint32_t t_sent;             /* ms: last REQUEST sent (a lease starts there, RFC 2131 4.4.1) */
-    uint32_t t_base;             /* ms: base of t1 / t2 / left */
-    uint32_t t1, t2, left;       /* seconds after t_base: renew, rebind, expiry */
+    uint32_t t_base;             /* ms: base of tm[] */
+    uint32_t tm[3];              /* seconds after t_base: T1 renew, T2 rebind, lease end (left) */
     uint32_t lease;              /* granted lease, s (MT_DHCP_INF infinite, 0 none) */
     mt_ip4 server, offer, hint;  /* server id; offered / leased address; requested address */
     uint32_t n_tx, n_offer, n_ack, n_nak, n_bad;
@@ -401,6 +401,9 @@ static inline uint8_t *mt_ip_payload(mt_stack *s) { return s->txbuf + MT_ETH_HDR
  * MT_OK (sent, held for ARP or dropped by the link), MT_ERR_NOROUTE,
  * MT_ERR_UNCONFIGURED, MT_ERR_INVAL. */
 int mt_ip_output(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t plen, uint32_t now);
+/* (mt_ip_output_hdr and the two above) While unconfigured the only datagram they send is the DHCP
+ * client's: UDP to 255.255.255.255 while it runs, from 0.0.0.0 to the Ethernet broadcast address;
+ * anything else is MT_ERR_UNCONFIGURED. */
 /* Same, with the payload in caller memory `pl` (any size up to 65515); the only way
  * to send datagrams larger than txbuf. pl may equal mt_ip_payload(). */
 int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, uint16_t plen,
@@ -409,10 +412,7 @@ int mt_ip_output_buf(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *pl, 
  * lets UDP send big datagrams without a contiguous copy. */
 int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr, uint16_t hlen,
                      const uint8_t *pl, uint16_t plen, uint32_t now);
-/* DHCP while unconfigured: the plen bytes at mt_ip_payload() as one datagram from our current
- * address (0.0.0.0) to 255.255.255.255, Ethernet broadcast, no ARP, no fragmenting (plen must fit
- * one frame: MT_ERR_INVAL otherwise). Counts ip_out; a refused frame sets tx_refused. */
-int mt_ip_output_bcast0(mt_stack *s, uint8_t proto, uint16_t plen);
+
 /* 127.0.0.0/8 (RFC 1122 3.2.1.3 (g)): never on the wire, looped back like our own address. */
 static inline int mt_ip_is_127(mt_ip4 a) { return (a >> 24) == 127u; }
 /* One of our own addresses (cfg.addr or 127/8); never true while unconfigured. Datagrams to a

@@ -232,7 +232,8 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     int lo;
     uint8_t *body = s->txbuf + MT_ETH_HDR + MT_IP_HDR;
 
-    if (s->cfg.addr == 0) return MT_ERR_UNCONFIGURED;
+    if (s->cfg.addr == 0 && !(proto == 17 && dst == MT_ETH_BCAST_IP && mt_dhcp_on(s)))
+        return MT_ERR_UNCONFIGURED;                    /* the DHCP client's broadcast passes (from 0.0.0.0) */
     lo = mt_ip_is_local(s, dst);
     if (lo) nexthop = dst;                                          /* loopback FIFO */
     else if (dst == MT_ETH_BCAST_IP || dst == (s->cfg.addr | ~s->cfg.mask)) nexthop = MT_ETH_BCAST_IP;
@@ -278,17 +279,6 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
         if (lo ? !lo_put(s, (uint16_t)(MT_IP_HDR + n))
                : mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + n), now) != 1) break;
     }
-    return MT_OK;
-}
-
-int mt_ip_output_bcast0(mt_stack *s, uint8_t proto, uint16_t plen) {
-    if (plen > MT_TXBUF_SIZE - MT_ETH_HDR - MT_IP_HDR) return MT_ERR_INVAL;
-    ip_hdr(s, MT_ETH_BCAST_IP, proto, s->ip_id++, 0, plen);   /* source: cfg.addr, i.e. 0.0.0.0 */
-    s->stats.ip_out++;
-    memset(s->txbuf, 0xFF, 6);
-    memcpy(s->txbuf + 6, s->cfg.mac, 6);
-    mt_wr16(s->txbuf + 12, 0x0800);
-    if (mt_eth_tx(s, s->txbuf, (uint16_t)(MT_ETH_HDR + MT_IP_HDR + plen)) != 0) s->tx_refused = 1;
     return MT_OK;
 }
 

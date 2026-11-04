@@ -4,7 +4,8 @@
 # -m68000 -Werror (the host tests are tests/test_cfg_edit.c).
 add_library(mtcdev68k STATIC cfg_edit.c cdev_logic.c)
 target_include_directories(mtcdev68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/../glue ${CMAKE_CURRENT_SOURCE_DIR}/../../core)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../glue ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../core)
 target_compile_options(mtcdev68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
 
