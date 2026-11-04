@@ -697,7 +697,40 @@ static void dhcp_log_records_state_changes(void) {
     T_EQ(seen, 4);                                  /* INIT, SELECTING, REQUESTING, BOUND */
 }
 
-T_MAIN(dhcp_discover_on_start, dhcp_start_needs_mac_and_drops_address, dhcp_full_exchange,
+/* A link that refuses frames (busy DaynaPORT): nothing is counted as sent, the client's own
+ * retransmissions recover (DISCOVER, then REQUEST), and the exchange completes. */
+static void dhcp_refusing_link_recovers(void) {
+    fake_link fl; evrec ev; dmsg d, m; drep r; uint32_t now = 0;
+    mt_stack *s = tstack_new(&fl, 0);
+    memset(&ev, 0, sizeof ev);
+    mt_dhcp_set_cb(s, ev_cb, &ev);
+    mt_dhcp_start(s, 0, now);
+    fl.refuse = 1;                                  /* the first DISCOVER is refused */
+    mt_tick(s, now);
+    T_EQ(fl.n, 0);
+    T_EQ(mt_get_stats(s)->eth_tx_err, 1);
+    T_EQ(mt_get_stats(s)->eth_out, 0);
+    T_EQ(state_of(s, now), MT_DHCP_SELECTING);
+    advance(s, &now, mt_next_deadline(s, now));     /* ~4 s: the retransmission goes out */
+    T_CHECK(nth_dhcp(&fl, 0, &d));
+    T_EQ(d.type, 1);
+    fake_clear(&fl);
+    rep_init(&r, 2, d.xid);
+    fl.refuse = 1;                                  /* the REQUEST answering the OFFER is refused */
+    deliver(s, &r, OFFERED, now);
+    T_EQ(fl.n, 0);
+    T_EQ(state_of(s, now), MT_DHCP_REQUESTING);
+    advance(s, &now, mt_next_deadline(s, now));
+    T_CHECK(nth_dhcp(&fl, 0, &m));
+    T_EQ(m.type, 3);
+    rep_init(&r, 5, m.xid);
+    deliver(s, &r, OFFERED, now);
+    T_EQ(state_of(s, now), MT_DHCP_BOUND);
+    T_EQ(addr_of(s), OFFERED);
+    T_EQ(mt_get_stats(s)->eth_tx_err, 2);
+}
+
+T_MAIN(dhcp_discover_on_start, dhcp_refusing_link_recovers, dhcp_start_needs_mac_and_drops_address, dhcp_full_exchange,
        dhcp_broadcast_replies_accepted, dhcp_foreign_replies_ignored, dhcp_malformed_never_crash,
        dhcp_selecting_backoff, dhcp_requesting_gives_up, dhcp_nak_while_requesting,
        dhcp_nak_from_other_server_ignored, dhcp_renew_rebind_expire, dhcp_renew_ack_extends,
