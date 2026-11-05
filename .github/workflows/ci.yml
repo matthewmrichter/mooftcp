@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        config: [full, lite]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Configure
+        run: |
+          if [ "${{ matrix.config }}" = lite ]; then extra=-DMT_NO_DHCP=ON; else extra=; fi
+          cmake -S . -B build $extra
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)"

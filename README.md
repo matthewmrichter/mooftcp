@@ -145,7 +145,8 @@ tools/     pinned tool versions; tools/sit is a small StuffIt-format writer
 ## Contributing
 
 Bug reports, compatibility reports ("program X does/doesn't work") and pull requests are welcome. For code
-changes, please run the host tests first (see above). `CLAUDE.md` is a detailed map of the code and its rules.
+changes, please read [CONTRIBUTING.md](CONTRIBUTING.md) and run the host tests first (see above). `CLAUDE.md` is a
+detailed map of the code and its rules. Security problems: see [SECURITY.md](SECURITY.md).
 
 ## Credits
 

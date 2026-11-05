@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work with MoofTCP
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: MoofTCP version
+      description: "For example: 1.0, full or Lite"
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and RAM
+      placeholder: "Mac Classic, 4 MB"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System version and Finder mode
+      placeholder: "System 6.0.8, single Finder or MultiFinder"
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Ethernet adapter and driver
+      placeholder: "BlueSCSI v2 WiFi, DaynaPORT 7.5.3"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Include the program you were using and what you did.
+    validations:
+      required: true
+  - type: textarea
+    id: diag
+    attributes:
+      label: MoofDiag output
+      description: Run MoofDiag right after the problem and paste (or attach) MoofDiag.out. Turn on "Keep a diagnostic log" in the control panel first if you can reproduce it.
+      render: text
