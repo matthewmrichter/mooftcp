@@ -14,5 +14,6 @@ dist/
 *.zip
 *.pcap
 *.png
+!docs/images/*.png
 build-gate.log
 __pycache__/
