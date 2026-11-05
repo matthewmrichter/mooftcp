@@ -17,3 +17,4 @@ dist/
 !docs/images/*.png
 build-gate.log
 __pycache__/
+docs/superpowers/
