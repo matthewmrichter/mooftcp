@@ -76,6 +76,10 @@ enum { AL_STOP = -4048, AL_ASK = -4047 };
 typedef struct {
     CfeFields saved;      /* what MCFG 128 holds (Revert puts it back; "unchanged" means equal) */
     CfeFields draft;      /* the draft read at initDev or written since (valid if has_draft) */
+    CfeFields cur;        /* the fields as last read while the items existed: the Control Panel removes
+                           * our items BEFORE it sends closeDev when another panel is picked (Snow:
+                           * GetControlValue on item 19 of a 2-item list = address error), so close
+                           * must never touch the dialog */
     short has_draft;
     short check_pending;  /* a key or edit happened: re-check in the next nulDev */
     short shown_key;      /* cdl_check_key of what the check line shows; -1 = force a redraw */
@@ -137,6 +141,12 @@ static ControlHandle box(DialogPtr d, short base, short it) {
     Rect r;
     GetDialogItem(d, (short)(base + it), &type, &h, &r);
     return (ControlHandle)h;
+}
+
+/* The dialog still holds our items (count word of the item list = items - 1). */
+static int items_present(DialogPtr d, short base) {
+    Handle il = ((DialogPeek)d)->items;
+    return il && *il && (**(short **)il) + 1 >= base + IT_DHCP;
 }
 
 static void read_fields(DialogPtr d, short base, CfeFields *f) {
@@ -477,13 +487,13 @@ static int save_now(const CdevArgs *a, CdevState *st) {
     return 1;
 }
 
-static void close_panel(const CdevArgs *a, CdevState *st) {
+static void close_panel(CdevState *st) {
     CfeFields f;
     CfeError e;
     Str255 ps;
     const char *why;
     int rc;
-    read_fields((DialogPtr)a->dlg, a->num_items, &f);
+    f = st->cur;                                            /* not read_fields: the items are gone */
     rc = cfe_validate(&f, &e);
     switch (cdl_close_action(&f, &st->saved, st->has_draft ? &st->draft : NULL, rc)) {
     case CDL_CLOSE_DROP_DRAFT:
@@ -582,6 +592,7 @@ static long dispatch(const CdevArgs *a) {
         show_status(d, base, st, 1);
         update_check(d, base, st);
         SelectDialogItemText(d, (short)(base + IT_IP), 0, 32767);
+        read_fields(d, base, &st->cur);
         HUnlock(sh);
         return (long)sh;
     }
@@ -634,13 +645,14 @@ static long dispatch(const CdevArgs *a) {
         st->check_pending = 1;
         break;
     case closeDev:
-        close_panel(a, st);
+        close_panel(st);
         HUnlock(sh);
         DisposeHandle(sh);
         return r;
     default:                                                /* updateDev, activDev, deactivDev */
         break;
     }
+    if (items_present(d, base)) read_fields(d, base, &st->cur);
     HUnlock(sh);
     return r;
 }
