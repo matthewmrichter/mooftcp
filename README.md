@@ -19,7 +19,7 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 
 1. **Reliability.** No hangs, no leaks, no surprises when apps quit.
 2. **Low latency** for interactive use, like typing in a telnet session.
-3. **Throughput.**
+3. **Throughput**, for handling quasi-modern use cases.
 
 ...all while using **no more resident memory than MacTCP does**.
 
@@ -27,7 +27,7 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 
 - **Drop-in compatible.** Implements the MacTCP `.IPP` driver interface (TCP, UDP, ICMP echo) and the `dnrp`
   name resolver. Your existing MacTCP programs just work.
-- **DHCP or a fixed address.** Pick either in the control panel.
+- **DHCP or a fixed address.** Pick either in the control panel. Don't need to manage static IP anymore.
 - **MoofTCP Lite.** A build without DHCP that saves about 5 KB of system memory, for tight machines. One
   installer holds both; a checkbox picks which one.
 - **A friendly installer.** It moves MacTCP's files aside, installs MoofTCP, and its Remove button puts
@@ -39,8 +39,8 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 
 ## Screenshots
 
-| Installer | MoofTCP Lite panel |
-|---|---|
+| Installer                                   | MoofTCP Lite panel                            |
+| ------------------------------------------- | --------------------------------------------- |
 | ![The installer](docs/images/installer.png) | ![The Lite panel](docs/images/panel-lite.png) |
 
 ## Quick start
@@ -56,9 +56,11 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 To go back to MacTCP, run the installer and click **Remove**. The `Read Me` file in the release has the
 details, including how to switch between MoofTCP and MoofTCP Lite.
 
+StuffIt Lite 3.6 is tested as working for expanding the `.hqx` packages.
+
 ### What you need
 
-- A 68k Mac with **System 6.0.8** (the version it was tested on).
+- A 68k Mac with **System 6.0.8** (the version it was tested on). Please report back if it works on other versions!
 - An Ethernet adapter that provides the `.ENET0` driver, such as a **BlueSCSI v2 WiFi with DaynaPORT**. MoofTCP
   does not include an Ethernet driver.
 
@@ -67,24 +69,24 @@ details, including how to switch between MoofTCP and MoofTCP Lite.
 Tested on a real **Mac Classic** (System 6.0.8, 4 MB, BlueSCSI v2 WiFi with DaynaPORT) and in the
 [Snow](https://github.com/twvd/snow) emulator.
 
-| Program | Result |
-|---|---|
+| Program                 | Result                       |
+| ----------------------- | ---------------------------- |
 | Flynn (telnet terminal) | Works, real Mac and emulator |
-| Wikipedia Reader | Works in the emulator |
-| MacTCP Watcher | Works in the emulator |
-| NCSA Telnet | Works in the emulator |
-| Fetch (FTP) | Works in the emulator |
-| TurboGopher | Works in the emulator |
-| Eudora | Starts; mail was not tried |
+| Wikipedia Reader        | Works, real Mac and emulator |
+| MacTCP Watcher          | Works in the emulator        |
+| NCSA Telnet             | Works in the emulator        |
+| Fetch (FTP)             | Works in the emulator        |
+| TurboGopher             | Works in the emulator        |
+| Eudora                  | Starts; mail was not tried   |
 
 Have a program that doesn't work? Please open an issue (see below).
 
 ## Memory
 
-| | MoofTCP | MoofTCP Lite |
-|---|---|---|
-| Driver code | 95,623 bytes | 90,722 bytes |
-| Free system heap after first open (real Mac Classic, single Finder, full build) | about 30.7 KB | n/a |
+|                                                                                 | MoofTCP       | MoofTCP Lite |
+| ------------------------------------------------------------------------------- | ------------- | ------------ |
+| Driver code                                                                     | 95,623 bytes  | 90,722 bytes |
+| Free system heap after first open (real Mac Classic, single Finder, full build) | about 30.7 KB | n/a          |
 
 MultiFinder grows the system heap on demand, so free memory varies more there.
 
@@ -92,7 +94,8 @@ MultiFinder grows the system heap on demand, so free memory varies more there.
 
 MoofTCP keeps a small diagnostic log in memory. If a program misbehaves but the Mac keeps running, run
 **MoofDiag** right away (it is in the release's diagnostic tools download), and open an issue with the
-`MoofDiag.out` file it writes next to itself, plus a note about what you were doing.
+`MoofDiag.out` file it writes next to itself, plus a note about what you were doing. Feel free to ask your LLM
+to analyze the codebase and the diagnostic output as well and to submit fix PRs.
 
 ## Known limitations
 
@@ -152,7 +155,14 @@ and `CLAUDE.md` is a detailed map of the code and its rules.
 - [Retro68](https://github.com/autc04/Retro68) for the 68k cross-compiler.
 - [Snow](https://github.com/twvd/snow) for the Mac emulator the tests run in.
 - [BlueSCSI](https://bluescsi.com) and DaynaPORT for the network hardware this was built around.
-- [SitStill](tools/sit/NOTICE) for the StuffIt archive writer used to make the `.sit` release.
+- [Claude Code](https://claude.ai) was used to develop this project, with human planning and testing.
+
+## TODO
+
+- More comprehensive bake-in testing on real hardware as we use it
+- Remake Daynaport similarly (stay tuned for _MoofPort_)
+- Review the BlueSCSI codebase for opportunities to integrate more tightly for better performance
+- There is potential for further algorithm optimization for added performance on smaller or older systems.
 
 ## License
 
