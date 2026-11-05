@@ -18,3 +18,4 @@ dist/
 build-gate.log
 __pycache__/
 docs/superpowers/
+docs/dev/

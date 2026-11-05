@@ -103,7 +103,6 @@ to analyze the codebase and the diagnostic output as well and to submit fix PRs.
 - Tested only with the DaynaPORT Ethernet driver on System 6.0.8.
 - DHCP is basic: no lease RELEASE, no INIT-REBOOT and no address-conflict probe. While it runs, programs cannot
   use UDP port 68. With no DHCP server, the first open waits about 10 seconds and then fails.
-  See [`docs/dev/DHCP-DESIGN.md`](docs/dev/DHCP-DESIGN.md).
 
 ## Building from source
 
@@ -130,8 +129,8 @@ cmake -S . -B build-lite -DMT_NO_DHCP=ON   # the Lite configuration
 ```
 
 The emulator tests (Snow) need Apple system software and the BlueSCSI DaynaPORT image. Those are not in this
-repository and you must supply them yourself; see [`docs/dev/EMULATOR.md`](docs/dev/EMULATOR.md) and
-[`docs/dev/GOLDEN-IMAGE.md`](docs/dev/GOLDEN-IMAGE.md).
+repository and you must supply them yourself; the scripts in `scripts/` (`setup-home.sh`, `golden-stage.sh`) show
+what is expected.
 
 ## Project layout
 
@@ -140,15 +139,13 @@ core/      portable TCP/IP stack (no malloc, no globals), host-tested
 mac/       Mac glue: .IPP driver, INIT, resolver, control panel, installer, diagnostic apps
 tests/     host tests (ctest), including fuzzers
 scripts/   build, release, emulator and hardware-session scripts
-docs/dev/  design notes, Mac interface notes, hardware test specs, the DHCP design
 tools/     pinned tool versions; tools/sit is a small StuffIt-format writer
 ```
 
 ## Contributing
 
 Bug reports, compatibility reports ("program X does/doesn't work") and pull requests are welcome. For code
-changes, please run the host tests first (see above). The developer docs in `docs/dev/` describe the design,
-and `CLAUDE.md` is a detailed map of the code and its rules.
+changes, please run the host tests first (see above). `CLAUDE.md` is a detailed map of the code and its rules.
 
 ## Credits
 

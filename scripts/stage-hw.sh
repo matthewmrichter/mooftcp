@@ -4,7 +4,7 @@
 #   stage-hw.sh --verify <session-name>
 # Stage: writes dist/hw/<session-name>/ with each file as MacBinary (.bin) and BinHex
 # (.hqx, via macutils binhex), a README.txt (ASCII, CR line endings, for TeachText) and
-# CHECKLIST.md rendered from docs/dev/hw-checklist-template.md. A failed run removes the
+# CHECKLIST.md rendered from scripts/hw-checklist-template.md. A failed run removes the
 # half-made session directory. The staged session is verified automatically.
 # --release <version> (Plan 3 Task 11) adds dist/MoofTCP-<version>.{dsk,hqx,sit} (scripts/release.sh; copied
 # as they are, the .hqx is only decode-checked with hexbin) and the diagnostic apps from build-mac/ (HeapInfo,
@@ -167,7 +167,7 @@ readme_lf="$(mktemp)"
 tr '\n' '\r' < "$readme_lf" > "$out/README.txt"
 
 # CHECKLIST.md from template + optional spec.
-tpl="$ROOT/docs/dev/hw-checklist-template.md"
+tpl="$ROOT/scripts/hw-checklist-template.md"
 [ -f "$tpl" ] || die "missing template $tpl"
 [ -n "$spec" ] || echo "stage-hw.sh: warning: no --spec; Install/Try/Undo will say no steps were given" >&2
 list=""

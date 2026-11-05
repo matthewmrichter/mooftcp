@@ -8,7 +8,7 @@
 # With --snow (needs Snow, the golden image and the owner media; about 10 minutes):
 # 3. scripts/mem-check.sh                       resident-memory cap rules 1-3 and the stack rule 4
 # 4. scripts/moofdiag-run.sh                    MoofDiag RESULT PASS
-# 5. scripts/probe-run.sh --moof --unconfigured ApiProbe unconfigured suite == docs/dev/probe/moof-unconfigured.out
+# 5. scripts/probe-run.sh --moof --unconfigured ApiProbe unconfigured suite == tests/data/moof-unconfigured.out
 # 6. MT_LITE=1 mem-check.sh and moofdiag-run.sh  the same for MoofTCP Lite (build-mac-lite/)
 # Prints one PASS/FAIL line per step and RESULT PASS only when every step passed; exit 0 then.
 set -uo pipefail
@@ -36,7 +36,7 @@ host_tests() {  # host_tests <dir> [cmake options...]
   return $rc
 }
 unconf_probe() {   # MoofTCP unconfigured: same rows as the recorded run (timing values =@N ignored)
-  local got=build-mac/probe/check-unconf.out ref=docs/dev/probe/moof-unconfigured.out
+  local got=build-mac/probe/check-unconf.out ref=tests/data/moof-unconfigured.out
   scripts/probe-run.sh --moof --unconfigured check-unconf || return 1
   diff <(sed 's/=@[0-9-]*/=@N/g' "$ref") <(sed 's/=@[0-9-]*/=@N/g' "$got") >/dev/null ||
     { echo "$got differs from $ref:"; diff <(sed 's/=@[0-9-]*/=@N/g' "$ref") <(sed 's/=@[0-9-]*/=@N/g' "$got") | head -20; return 1; }

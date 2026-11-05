@@ -1,0 +1,90 @@
+# 0 ApiProbe 1: format id name S|A cs= res= extras | events (A=ASR C=completion P=poll)
+# 0 1
+# 0 values written =@N are tick counts (timing dependent)
+100 driver_open_first S cs=0 res=-23004 refnum=0 second=-23004 secondRef=0 |
+# U unconfigured suite: no usable IP address
+U01 getmyip S cs=15 res=-28 addr=0.0.0.0 |
+U02 tcp_create S cs=30 res=-28 create=-28 |
+U03 tcp_active_open S cs=32 res=-28 dt=@0 |
+U04 tcp_passive_open S cs=31 res=-28 |
+U05 tcp_status S cs=40 res=0 st.res=-28 |
+U06 tcp_send S cs=34 res=-28 |
+U07 tcp_release S cs=42 res=0 |
+U08 udp_create S cs=20 res=-28 lport=0 |
+U09 udp_write S cs=23 res=-28 |
+U10 udp_release S cs=24 res=0 |
+U11 icmp_echo S cs=17 res=-28 |
+U12 udp_max_mtu S cs=25 res=-28 mtu=0 |
+U01 getmyip A cs=15 res=-28 addr=0.0.0.0 | P:k0:r-28@0
+U02 tcp_create A cs=30 res=-28 create=-28 |
+U03 tcp_active_open A cs=32 res=-28 dt=@0 | P:k0:r-28@0
+U04 tcp_passive_open A cs=31 res=-28 | P:k0:r-28@0
+U05 tcp_status A cs=40 res=0 st.res=-28 |
+U06 tcp_send A cs=34 res=-28 | P:k0:r-28@0
+U07 tcp_release A cs=42 res=0 |
+U08 udp_create A cs=20 res=-28 lport=0 | P:k0:r-28@0
+U09 udp_write A cs=23 res=-28 | P:k0:r-28@0
+U10 udp_release A cs=24 res=0 |
+U11 icmp_echo A cs=17 res=-28 | P:k0:r-28@0
+U12 udp_max_mtu A cs=25 res=-28 mtu=0 | P:k0:r-28@0
+800 tcp_globalinfo S cs=43 res=-28 paramPtrIsOurs=1 statsPtrIsOurs=1 cdbIsOurs=1 maxConn=0 ourTblNonzero=0 |
+160 lapstats S cs=19 res=-28 ptrIsOurs=1 |
+120.0 sweep_stream0 S cs=0 res=-28 |
+120.1 sweep_stream0 S cs=1 res=-28 |
+120.2 sweep_stream0 S cs=2 res=-28 |
+120.3 sweep_stream0 S cs=3 res=-28 |
+120.4 sweep_stream0 S cs=4 res=-28 |
+120.5 sweep_stream0 S cs=5 res=-28 |
+120.6 sweep_stream0 S cs=6 res=-28 |
+120.7 sweep_stream0 S cs=7 res=-28 |
+120.8 sweep_stream0 S cs=8 res=-28 |
+120.9 sweep_stream0 S cs=9 res=-28 |
+120.10 sweep_stream0 S cs=10 res=-28 |
+120.11 sweep_stream0 S cs=11 res=-28 |
+120.12 sweep_stream0 S cs=12 res=-28 |
+120.13 sweep_stream0 S cs=13 res=-28 |
+120.14 sweep_stream0 S cs=14 res=-28 |
+120.15 sweep_stream0 S cs=15 res=-28 |
+120.16 sweep_stream0 S cs=16 res=-28 |
+120.18 sweep_stream0 S cs=18 res=-28 |
+120.20 sweep_stream0 S cs=20 res=-28 |
+120.21 sweep_stream0 S cs=21 res=-28 |
+120.22 sweep_stream0 S cs=22 res=-28 |
+120.23 sweep_stream0 S cs=23 res=-28 |
+120.24 sweep_stream0 S cs=24 res=-28 |
+120.25 sweep_stream0 S cs=25 res=-28 |
+120.26 sweep_stream0 S cs=26 res=-28 |
+120.27 sweep_stream0 S cs=27 res=-28 |
+120.28 sweep_stream0 S cs=28 res=-28 |
+120.29 sweep_stream0 S cs=29 res=-28 |
+120.30 sweep_stream0 S cs=30 res=-28 |
+120.31 sweep_stream0 S cs=31 res=-28 |
+120.32 sweep_stream0 S cs=32 res=-28 |
+120.33 sweep_stream0 S cs=33 res=-28 |
+120.34 sweep_stream0 S cs=34 res=-28 |
+120.35 sweep_stream0 S cs=35 res=-28 |
+120.36 sweep_stream0 S cs=36 res=-28 |
+120.37 sweep_stream0 S cs=37 res=-28 |
+120.38 sweep_stream0 S cs=38 res=-28 |
+120.39 sweep_stream0 S cs=39 res=-28 |
+120.40 sweep_stream0 S cs=40 res=-28 |
+120.41 sweep_stream0 S cs=41 res=-28 |
+120.42 sweep_stream0 S cs=42 res=-28 |
+120.44 sweep_stream0 S cs=44 res=-28 |
+120.45 sweep_stream0 S cs=45 res=-28 |
+120.46 sweep_stream0 S cs=46 res=-28 |
+120.47 sweep_stream0 S cs=47 res=-28 |
+120.48 sweep_stream0 S cs=48 res=-28 |
+120.49 sweep_stream0 S cs=49 res=-28 |
+120.50 sweep_stream0 S cs=50 res=-28 |
+120.51 sweep_stream0 S cs=51 res=-28 |
+120.52 sweep_stream0 S cs=52 res=-28 |
+120.53 sweep_stream0 S cs=53 res=-28 |
+120.54 sweep_stream0 S cs=54 res=-28 |
+120.55 sweep_stream0 S cs=55 res=-28 |
+120.56 sweep_stream0 S cs=56 res=-28 |
+120.57 sweep_stream0 S cs=57 res=-28 |
+120.58 sweep_stream0 S cs=58 res=-28 |
+120.59 sweep_stream0 S cs=59 res=-28 |
+120.60 sweep_stream0 S cs=60 res=-28 |
+999 driver_close_reopen S cs=0 res=0 closeRef=-49 reopen=-23004 reopenRef=0 getaddrAfter=-28 addr=0.0.0.0 |
