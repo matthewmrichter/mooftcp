@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Fetch the DaynaPORT 7.5.3 installer (and the MacTCP "2.1" cdev) from the BlueSCSI
-# project's documented distribution, verify, and unpack into $MT_HOME/media/daynaport753/.
-# Idempotent: if the verified outputs exist, does nothing. Source + hashes: tools/daynaport753.sha256.
-# Offline copy: if $DP753_LOCAL (default: the owner's "Mac Images/BlueSCSI-DaynaPORT-7.5.3")
-# holds the zip, it is copied instead of downloading (hash-checked the same way).
+# Unpack the DaynaPORT 7.5.3 installer and the MacTCP "2.1" cdev out of the BlueSCSI project's
+# "HD1 BlueSCSI Bootstrap" image, verify, into $MT_HOME/media/daynaport753/. This is only for the
+# Snow test environment (building and releasing MoofTCP does not need it). The image contains Apple
+# software: you supply it. Hashes: tools/daynaport753.sha256; where BlueSCSI documents the image:
+# https://bluescsi.com/docs/WiFi-DaynaPORT ("Macintosh" section).
+# Idempotent: if the verified outputs exist, does nothing.
+# Source of the zip, in this order:
+#   1. $DP753_LOCAL (default "$MT_SRC_IMGS or ~/projects/Mac Images" + /BlueSCSI-DaynaPORT-7.5.3)
+#      holding the zip: copied, hash-checked the same way.
+#   2. $DP753_URL, a public https://mega.nz/file/<handle>#<key> link you give (scripts/mega-get.py).
+# With neither, the script stops and says so; no download link is pinned in this repository.
 # The download is untrusted data: nothing in it is executed on the host; hfsutils only
 # reads files out of the bundled HFS disk image.
 set -euo pipefail
@@ -11,7 +17,7 @@ MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUMS="$ROOT/tools/daynaport753.sha256"
 DEST="$MT_HOME/media/daynaport753"
-URL="$(sed -n 's/^# url: //p' "$SUMS")"
+URL="${DP753_URL:-}"
 ZIP="HD1 BlueSCSI Bootstrap.hda.zip"
 HDA="HD1 BlueSCSI Bootstrap.hda"
 DP="DaynaPORT 7.5.3-DiskCopy4.img"
@@ -41,6 +47,7 @@ if [ ! -f "$DEST/$ZIP" ]; then
   fi
 fi
 if [ ! -f "$DEST/$ZIP" ]; then
+  [ -n "$URL" ] || die "no '$ZIP' found. Put it in '$DP753_LOCAL' (set DP753_LOCAL or MT_SRC_IMGS to use another folder) or give a public MEGA link in DP753_URL. It is the BlueSCSI project's bootstrap image, see https://bluescsi.com/docs/WiFi-DaynaPORT; it contains Apple software, so this repository does not link to a copy."
   dl="$(mktemp -d "$DEST/.dl.XXXXXX")"
   trap 'rm -rf "$dl"' EXIT
   python3 -I "$ROOT/scripts/mega-get.py" "$URL" "$dl" >/dev/null

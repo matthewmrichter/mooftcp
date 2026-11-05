@@ -31,7 +31,7 @@ resource 'DITL' (128) {
         {260, 374, 280, 464}, Button { enabled, "Quit" };
         {168, 16, 252, 464}, StaticText { disabled, "" };
         {8, 16, 72, 464}, StaticText { disabled,
-            "Install puts MoofTCP 1.0rc3 into the System Folder. If MacTCP is there, its files are moved "
+            "Install puts MoofTCP 1.0 into the System Folder. If MacTCP is there, its files are moved "
             "into the folder \"MacTCP (Disabled)\" unchanged. Remove takes MoofTCP out and puts MacTCP "
             "back. MoofTCP needs an Ethernet driver (.ENET)." };
         {78, 14, 96, 300}, CheckBox { enabled, "Lite version (no DHCP)" };
@@ -83,22 +83,22 @@ resource 'DITL' (130) {
 };
 
 /* The short version string is the release version (scripts/relvers.py checks it, and the two embedded
- * MoofTCP files' long strings: "MoofTCP 1.0rc3 ..." in 128, "MoofTCP Lite 1.0rc3 ..." in 129). */
+ * MoofTCP files' long strings: "MoofTCP 1.0 ..." in 128, "MoofTCP Lite 1.0 ..." in 129). */
 resource 'vers' (1) {
-    0x01, 0x00, beta, 0x03, verUS,
-    "1.0rc3",
-    "MoofTCP Installer 1.0rc3 (release candidate)"
+    0x01, 0x00, release, 0x00, verUS,
+    "1.0",
+    "MoofTCP Installer 1.0"
 };
 
 resource 'vers' (2) {
-    0x01, 0x00, beta, 0x03, verUS,
-    "1.0rc3",
-    "MoofTCP 1.0rc3"
+    0x01, 0x00, release, 0x00, verUS,
+    "1.0",
+    "MoofTCP 1.0"
 };
 
 /* The owner (signature) resource of creator 'mtin'. */
 data 'mtin' (0) {
-    $"18" "MoofTCP Installer 1.0rc3"
+    $"15" "MoofTCP Installer 1.0"
 };
 
 resource 'BNDL' (128) {

@@ -54,7 +54,7 @@ resource 'DITL' (-4064) {
         {152, 95, 168, 316}, StaticText { disabled, "" };
         {168, 95, 200, 316}, StaticText { disabled, "" };
         {202, 95, 218, 320}, StaticText { disabled, "Changes take effect after you restart." };
-        {228, 250, 244, 320}, StaticText { disabled, "v1.0rc3" };
+        {228, 250, 244, 320}, StaticText { disabled, "v1.0" };
         {224, 170, 244, 235}, Button { enabled, "Save" };
         {133, 93, 151, 316}, CheckBox { enabled, "Keep a diagnostic log" };
 #ifdef MT_NO_DHCP
@@ -120,31 +120,31 @@ resource 'BNDL' (-4064) {
 /* The owner (signature) resource of creator 'ztcp': a version string, as is customary. */
 #ifdef MT_NO_DHCP
 data 'ztcp' (0) {
-    $"13" "MoofTCP Lite 1.0rc3"
+    $"10" "MoofTCP Lite 1.0"
 };
 #else
 data 'ztcp' (0) {
-    $"0E" "MoofTCP 1.0rc3"
+    $"0B" "MoofTCP 1.0"
 };
 #endif
 
 #include "icons.r"
 
 /* Short string = the release version in both variants (scripts/relvers.py); the long strings name
- * the variant: "MoofTCP Lite 1.0rc3 ..." in Lite (Get Info shows them). */
+ * the variant: "MoofTCP Lite 1.0 ..." in Lite (Get Info shows them). */
 #ifdef MT_NO_DHCP
 #define MT_NAME "MoofTCP Lite"
 #else
 #define MT_NAME "MoofTCP"
 #endif
 resource 'vers' (1) {
-    0x01, 0x00, beta, 0x03, verUS,
-    "1.0rc3",
-    MT_NAME " 1.0rc3 (release candidate)"
+    0x01, 0x00, release, 0x00, verUS,
+    "1.0",
+    MT_NAME " 1.0"
 };
 
 resource 'vers' (2) {
-    0x01, 0x00, beta, 0x03, verUS,
-    "1.0rc3",
-    MT_NAME " 1.0rc3"
+    0x01, 0x00, release, 0x00, verUS,
+    "1.0",
+    MT_NAME " 1.0"
 };

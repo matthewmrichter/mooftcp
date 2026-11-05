@@ -1,13 +1,14 @@
-MoofTCP 1.0rc3
-==============
+MoofTCP 1.0
+===========
 
 MoofTCP is a replacement for MacTCP. Programs that use MacTCP
 should work with it unchanged. It keeps its settings in its own
 file and does not need MacTCP's.
 
-This is a release candidate. It was developed and tested in an
-emulator of a Mac Classic with 4 MB; testing on real hardware
-is in progress. Please report problems.
+It was developed in an emulator of a Mac Classic with 4 MB and
+tested on a real Mac Classic (System 6.0.8, 4 MB, a BlueSCSI
+with DaynaPORT). Other Macs and adapters were not tried. Please
+report problems.
 
 Tested with MoofTCP in the emulator: Flynn, Wikipedia Reader,
 MacTCP Watcher, NCSA Telnet, Fetch and TurboGopher (they
