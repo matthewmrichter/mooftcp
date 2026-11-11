@@ -12,6 +12,11 @@
 #                     NAT has no DHCP server, so the open waits 10 s and fails -23004 (RESULT UNCONFIGURED, accepted);
 #                     MoofDiag then reads the block through the status view and shows the client's state, DISCOVER
 #                     count and DHCP log records. Over TAP with a host server (EMULATOR.md "DHCP over TAP") it binds.
+#     --run-id <id>   unattended run: put the run file "Agent Run" = "!!<id>" beside MoofDiag (mac/common/runid.c);
+#                     MoofDiag then writes MoofDiag-<id>.out, shows no closing alert and quits. The script checks the
+#                     app quit by itself (the Finder is back, no alert seen) and fetches MoofDiag-<id>.out
+#     --stale         (with --run-id) leave a 6000-byte filler file as the output file instead of deleting it:
+#                     checks that MoofDiag truncates (SetEOF) and the result has no stale tail
 #     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
 #                     is then not fetched
 # MT_LITE=1 runs the MoofTCP Lite build (build-mac-lite/; --dhcp then shows Lite running the DHCP-mode prefs
@@ -27,7 +32,7 @@ TIMEOUT="${MOOFDIAG_TIMEOUT:-300}"
 die() { echo "moofdiag-run.sh: $*" >&2; exit 1; }
 . "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite and its MoofDiag, output in build-mac-lite/moofdiag/
 
-keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""; dhcp=""
+stale=""; runid=""; keepdisk=""; install=1; prefs=""; keeprun=""; logp=""; installed=""; dhcp=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
@@ -37,7 +42,9 @@ while [ $# -gt 0 ]; do
     --keep-running) keeprun=1; shift;;
     --log) logp=1; shift;;
     --dhcp) dhcp=1; shift;;
-    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--log] [--dhcp] [--keep-running]" >&2; exit 2;;
+    --stale) stale=1; shift;;
+    --run-id) [ $# -ge 2 ] || { echo "--run-id needs an id" >&2; exit 2; }; runid="$2"; shift 2;;
+    *) echo "usage: moofdiag-run.sh [--keep-disk] [--no-install] [--installed] [--no-prefs] [--log] [--dhcp] [--run-id <id> [--stale]] [--keep-running]" >&2; exit 2;;
   esac
 done
 
@@ -48,7 +55,8 @@ scripts/build-mac.sh MoofDiag >/dev/null
 [ -z "$install" ] || scripts/build-mac.sh MoofTCP >/dev/null
 bin="$out_dir/MoofDiag.bin"
 [ -f "$bin" ] || die "build did not produce $bin"
-out="$out_dir/MoofDiag.out"
+outname="MoofDiag.out"; [ -z "$runid" ] || outname="MoofDiag-$runid.out"
+out="$out_dir/$outname"
 shot="$out_dir/MoofDiag.png"
 rm -f "$out" "$shot"
 snow_stop() { scripts/snow.sh stop >/dev/null 2>&1 || true; }
@@ -77,9 +85,11 @@ with_volume() {  # with_volume <cmd...>: mount work.hda (Snow stopped), run, unm
   humount "$vol:" >/dev/null 2>&1 || true
   return $rc
 }
-fetch_out() { hcopy -t ":MoofTCP Test:MoofDiag.out" "$1"; }
+fetch_out() { hcopy -t ":MoofTCP Test:$outname" "$1"; }
+put_stale() { head -c 6000 /dev/zero | tr '\0' 'X' > "$1" && hcopy -t "$1" ":MoofTCP Test:$outname"; }
+put_runfile() { printf '!!%s' "$runid" > "$1" && hcopy -t "$1" ":MoofTCP Test:Agent Run"; }
 has_moof() { hls -l ":System Folder:" | grep -E "^f +cdev/ztcp .* MoofTCP$" >/dev/null; }
-del_out() { hdel ":MoofTCP Test:MoofDiag.out" 2>/dev/null || true; }
+del_out() { hdel ":MoofTCP Test:$outname" 2>/dev/null || true; hdel ":MoofTCP Test:Agent Run" 2>/dev/null || true; }
 
 click() {  # click x y [dbl]
   local x=$1 y=$2 w i
@@ -111,12 +121,14 @@ else:
 PY
 }
 launch_app() {
-  local n
+  local n ix=238
+  [ -z "$runid" ] || ix=361         # "Agent Run" sorts first, so MoofDiag is the second icon
   for n in 1 2 3 4 5 6; do
     click 914 180 dbl; sleep 3     # open the MoofHD window
     click 341 290 dbl; sleep 3     # open the "MoofTCP Test" folder
-    click 238 322 dbl; sleep 4     # launch MoofDiag (the first double click may only select)
-    click 238 322 dbl; sleep 3
+    click $ix 322 dbl; sleep 4     # launch MoofDiag (the first double click may only select)
+    click $ix 322 dbl; sleep 3
+    [ -z "$runid" ] || return 0    # unattended: the app may already have quit, so the Finder proves nothing
     [ "$(screen_state)" != finder ] && return 0
     echo "launch attempt $n did not start the app; retrying"
   done
@@ -139,6 +151,11 @@ fi
 if [ -n "$installed" ]; then with_volume has_moof || die "--installed: no cdev/ztcp MoofTCP in the System Folder"; fi
 scripts/deploy.sh "$bin" --to ":MoofTCP Test:" >/dev/null
 with_volume del_out
+if [ -n "$runid" ]; then
+  rf="$(mktemp)"; with_volume put_runfile "$rf" || die "could not write the run file"
+  [ -z "$stale" ] || with_volume put_stale "$rf" || die "could not write the stale file"
+  rm -f "$rf"
+fi
 
 export DISPLAY="$DISPLAY_NUM"; unset WAYLAND_DISPLAY
 echo "== run"
@@ -149,6 +166,26 @@ if ! launch_app; then
   die "could not launch MoofDiag from the Finder (screenshot $shot)"
 fi
 t=0; st=""
+if [ -n "$runid" ]; then
+  # unattended: MoofDiag quits by itself, so the Finder comes back; an alert ("done") means the "!!" was ignored
+  sleep 5; t=5; seen=0
+  while [ "$t" -lt "$TIMEOUT" ]; do
+    sleep 5; t=$((t+5))
+    scripts/snow.sh status >/dev/null 2>&1 || die "Snow died"
+    st="$(screen_state)"
+    [ "$st" = done ] && die "MoofDiag showed its closing alert (the run file was not honoured)"
+    [ "$st" = crash ] && { scripts/snow.sh shot "$shot" >/dev/null 2>&1 || true; die "a system error dialog was on the screen (screenshot $shot)"; }
+    if [ "$st" = finder ]; then seen=$((seen+1)); else seen=0; fi
+    [ "$seen" -ge 2 ] && break
+  done
+  [ "$seen" -ge 2 ] || die "MoofDiag did not quit within ${TIMEOUT}s (screenshot $shot)"
+  echo "app quit unattended after about ${t}s"
+  snow_stop
+  with_volume fetch_out "$out" || die "$outname missing on the image"
+  tr '\r' '\n' < "$out"
+  tr '\r' '\n' < "$out" | grep -q '^RESULT \(PASS\|UNCONFIGURED\)$' || die "MoofDiag reported FAIL"
+  echo "wrote $out"; exit 0
+fi
 while [ "$t" -lt "$TIMEOUT" ]; do
   sleep 5; t=$((t+5))
   scripts/snow.sh status >/dev/null 2>&1 || die "Snow died"

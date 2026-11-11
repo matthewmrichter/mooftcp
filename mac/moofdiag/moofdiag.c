@@ -24,6 +24,7 @@
 #include "mt.h"
 #include "mt_drv.h"
 #include "diag_streams.h"
+#include "runid.h"
 #include "mt_units.h"
 #include <stddef.h>
 
@@ -33,6 +34,25 @@ QDGlobals qd;
 #define UTABLE_BASE (*(uint8_t ***volatile *)0x11C)
 #define UNIT_COUNT  (*(volatile int16_t *)0x1D2)
 #define SYS_ZONE    (*(THz *)0x2A6)
+
+/* 1 if a run file (mac/common/runid.h) exists and starts with '!'. Only then is runid_name called: it would
+ * otherwise ask for an id in a dialog (DLOG 200), which MoofDiag has no resource for and which the unattended
+ * Snow runners (no run file) could not answer. */
+static int has_run_file(void)
+{
+    static const char *const names[2] = { RUNID_FILE, RUNID_FILE_OLD };
+    int k;
+    for (k = 0; k < 2; k++) {
+        short r;
+        long len = 1;
+        char c = 0;
+        if (FSOpen((ConstStr255Param)names[k], 0, &r) != noErr) continue;
+        if (FSRead(r, &len, &c) != noErr && len <= 0) c = 0;
+        FSClose(r);
+        return c == '!';
+    }
+    return 0;
+}
 
 static short outref = -1;
 static void P(const char *fmt, ...)
@@ -85,6 +105,7 @@ int main(void)
 {
     char line[160], a1[20], a2[20], a3[20], a4[20];
     Str255 ps;
+    unsigned char oname[40];
     size_t n;
     short ref = 0;
     OSErr r;
@@ -95,9 +116,12 @@ int main(void)
     MaxApplZone();
     InitGraf(&qd.thePort); InitFonts(); InitWindows(); InitMenus(); TEInit(); InitDialogs(0);
     InitCursor();
-    Create((ConstStringPtr)"\pMoofDiag.out", 0, 'ttxt', 'TEXT');
-    if (FSOpen((ConstStringPtr)"\pMoofDiag.out", 0, &outref)) outref = -1;
-    else SetFPos(outref, fsFromLEOF, 0);   /* append: the soak runs MoofDiag several times; moofdiag-run.sh deletes the file first */
+    /* "MoofDiag-<id>.out" when the run file ("Agent Run", mac/common/runid.c) is "!<id>" or "!!<id>", else "MoofDiag.out" */
+    if (has_run_file()) runid_name("MoofDiag", ".out", oname);
+    else memcpy(oname, "\x0cMoofDiag.out", 13);
+    Create((ConstStringPtr)oname, 0, 'ttxt', 'TEXT');
+    if (FSOpen((ConstStringPtr)oname, 0, &outref)) outref = -1;
+    else SetEOF(outref, 0);                /* each run replaces the file: no stale tail from a longer earlier run */
     P("MoofDiag at tick %lu\r", (unsigned long)TickCount());
 
     save = GetZone();
@@ -110,6 +134,7 @@ int main(void)
     units();
     r = OpenDriver((ConstStringPtr)"\p.IPP", &ref);
     P("OpenDriver(.IPP) = %d refnum %d\r", r, ref);
+    if (r != 0 && r != -23004) P("stack: none (OpenDriver %d)\r", r);
     save = GetZone();
     SetZone(SYS_ZONE);
     sysfree = FreeMem();
@@ -126,6 +151,7 @@ int main(void)
             pb.csCode = MT_DRV_STATUS_RES;
             r = PBStatusSync((ParmBlkPtr)&pb);
             memcpy(&m, &pb.csParam[0], 4);
+            if (r != 0) P("stack: MacTCP (no MoofTCP status)\r");   /* the harness reads this line to learn which stack is live */
             P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
         } else {
             /* Plan 4: the open failed (no address yet, e.g. DHCP without a server): Status needs an open
@@ -135,8 +161,13 @@ int main(void)
             if (v) m = (MtRes *)(void *)((const char *)v - offsetof(MtRes, view));
             pb.csParam[2] = MT_STATUS_VERSION;
             r = m ? 0 : -1;
+            if (!m) P("stack: MoofTCP unconfigured (status view not found)\r");
             P("open failed: block %08lx from the unit's status view\r", (unsigned long)s24(m));
         }
+        if (r == 0 && m && pb.csParam[2] != MT_STATUS_VERSION)
+            P("stack: MoofTCP status%u unknown\r", (unsigned)pb.csParam[2]);
+        else if (r == 0 && m)   /* <vers> is the Status layout version: no release string exists at run time */
+            P("stack: MoofTCP status%u %s\r", (unsigned)pb.csParam[2], m->variant == MT_RES_VARIANT_LITE ? "lite" : "full");
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
             /* another layout: do not read a single field of it */
             P("VERSION MISMATCH: the driver's Status layout is version %u (block says %u), this MoofDiag reads version %d. Rebuild MoofDiag and the driver from the same sources.\r",
@@ -249,7 +280,8 @@ int main(void)
     P("RESULT %s\r", pass ? "PASS" : unconf ? "UNCONFIGURED" : "FAIL");
     if (outref >= 0) { FSClose(outref); outref = -1; }
     FlushVol(0, 0);
-    sprintf(line, "MoofDiag %s. Results are in MoofDiag.out", pass ? "finished" : "FAIL");
+    if (runid_unattended()) return 0;      /* "!!" run file: nothing waits for a click */
+    sprintf(line, "MoofDiag %s. Results are in %.*s", pass ? "finished" : "FAIL", (int)oname[0], (char *)oname + 1);
     n = strlen(line);
     ps[0] = (unsigned char)n;
     memcpy(ps + 1, line, n);
