@@ -34,6 +34,10 @@
 # 8 switches through the GUI by Install alone (no Remove): full -> Lite -> full -> Lite, checking the file after
 # each and running the matching MoofDiag after the last two (RESULT PASS; the wrong variant prints VARIANT
 # MISMATCH); look: screenshots of the window (box off, then on).
+# trial <A|B|C>: MoofAgent's trial-boot rollback (moofagent docs/REMOTE-HARNESS.md "Trial-boot rollback") with the
+# unattended installer as the step ("MoofTCPInstall MoofTCPInstall.cfg remove"), same kit as auto: A MoofTCP with no
+# prefs (OpenDriver fails at once, rollback well before the 300 s), B MoofTCP with prefs, 60 s trial, nobody answers
+# (expiry), C the PC answers at once (disarm, MoofTCP stays). Each ends with MoofDiag's stack: line.
 #   installer-test.sh interrupt <name> <I|R><N> <remove|install>   one interruption case of scenario 4
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
@@ -681,8 +685,9 @@ MOOFCTL="${MOOFCTL:-$MOOFAGENT_DIR/scripts/moofctl.py}"
 MOOFAGENT_BIN="${MOOFAGENT_BIN:-$MOOFAGENT_DIR/build-mac/MoofAgent.bin}"
 MOOFBATCH_BIN="${MOOFBATCH_BIN:-$HOME/projects/moofport/build-mac/MoofBatch.bin}"
 MT_FINDER_STARTUP="${MT_FINDER_STARTUP:-}"
+AUTO_OUT="$OUT/auto"        # moofctl results of the running scenario (the trial scenarios use auto-trial-<A|B|C>)
 # moofctl on Snow's agent: never the resident server (--control ''), port 17150
-mctl() { python3 -I "$MOOFCTL" --port "$AUTO_PORT" --control '' --connect-timeout 300 --out "$OUT/auto" --plugins "$ROOT/scripts/moofctl-plugins" "$@"; }
+mctl() { python3 -I "$MOOFCTL" --port "$AUTO_PORT" --control '' --connect-timeout 300 --out "$AUTO_OUT" --plugins "$ROOT/scripts/moofctl-plugins" "$@"; }
 
 auto_kit_body() {  # the MoofAgent folder and the Finder Startup file that opens it
   local mf="$1"
@@ -709,17 +714,17 @@ auto_step() {
 }
 # the first "stack:" line of MoofDiag-sw-<target>.out must match
 auto_stack() {
-  local f="$OUT/auto/MoofDiag-sw-$1.out" line
+  local f="$AUTO_OUT/MoofDiag-sw-$1.out" line
   line="$(tr '\r' '\n' < "$f" | grep -m1 -E '^stack: (MoofTCP|MacTCP|none)')" || { echo "STACK $1: FAIL no stack: line"; return 1; }
   if echo "$line" | grep -Eq -- "$2"; then echo "STACK $1: PASS ($line)"; else echo "STACK $1: FAIL ($line)"; return 1; fi
 }
 
-scenario_auto() {
-  local rc=0 mf="$OUT/finder-startup.bin"
+auto_prepare() {  # image + kit + boot, as every auto scenario starts
+  local mf="$OUT/finder-startup.bin"
   [ -f "$MOOFCTL" ] && [ -f "$MOOFAGENT_BIN" ] || die "auto: needs the moofagent repo (MOOFCTL=$MOOFCTL, MOOFAGENT_BIN=$MOOFAGENT_BIN)"
   scripts/build-mac.sh MoofDiag >/dev/null
   [ -f "$APP" ] && [ -f "$ROOT/$BM/moofdiag/MoofDiag.bin" ] || die "build first: scripts/build-mac.sh MoofInstaller; scripts/build-mac.sh MoofDiag"
-  mkdir -p "$OUT/auto"; rm -f "$OUT"/auto/*
+  mkdir -p "$AUTO_OUT"; rm -f "$AUTO_OUT"/*
   if [ -n "$MT_FINDER_STARTUP" ]; then cp "$MT_FINDER_STARTUP" "$mf"
   else
     local base="$HOME/.local/share/moofport/disks/trial.hda" vol
@@ -735,6 +740,11 @@ scenario_auto() {
   python3 -I scripts/mf-startup.py "$IMG" multifinder
   with_volume auto_kit_body "$mf"
   boot
+}
+
+scenario_auto() {
+  local rc=0
+  auto_prepare
   mctl ping | sed 's/^/    /' || { echo "auto: the agent did not call"; return 1; }
   auto_step switch-mooftcp 0 'switch mooftcp: done' -- mooftcp switch mooftcp --prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin" || rc=1
   auto_stack mooftcp '^stack: MoofTCP [^ ]+ full$' || rc=1
@@ -749,15 +759,118 @@ scenario_auto() {
   result $rc auto
 }
 
+# ---- trial: MoofAgent's trial-boot rollback against the unattended installer (checks A, B, C) ----
+TRIAL_STEP="MoofTCPInstall MoofTCPInstall.cfg remove"
+tlog() { echo "[$(date +%T)] $*"; }
+trial_get_log() { mctl get -o "$AUTO_OUT/MoofAgent-$1.log" MoofAgent.log >/dev/null 2>&1 || echo "(MoofAgent.log not readable: $1)"; }
+trial_diag() {  # trial_diag <id> <regex for the first stack: line>
+  mctl run MoofDiag "$1" > "$AUTO_OUT/diag-$1.txt" 2>&1 || true
+  sed 's/^/    /' "$AUTO_OUT/diag-$1.txt"
+  auto_stack_file "$AUTO_OUT/MoofDiag-$1.out" "$2"
+}
+auto_stack_file() {
+  local line
+  line="$(tr '\r' '\n' < "$1" 2>/dev/null | grep -m1 -E '^stack: ')" || { echo "STACK: FAIL no stack: line in $1"; return 1; }
+  if echo "$line" | grep -Eq -- "$2"; then echo "STACK: PASS ($line)"; else echo "STACK: FAIL ($line)"; return 1; fi
+}
+trial_expect_gone() {  # an agent file that must not be there / must be (`trial_have`)
+  if mctl get -o "$AUTO_OUT/probe.tmp" "$1" >/dev/null 2>&1; then echo "FILE $1: FAIL (present)"; return 1; else echo "FILE $1: PASS (absent)"; fi
+}
+trial_status_none() {
+  local rc=0
+  mctl trial status > "$AUTO_OUT/trial-status.txt" 2>&1 || rc=$?
+  sed 's/^/    /' "$AUTO_OUT/trial-status.txt"
+  if [ "$rc" -eq 0 ] && grep -qx 'none' "$AUTO_OUT/trial-status.txt"; then echo "TRIAL.cfg: PASS (none)"; else echo "TRIAL.cfg: FAIL (exit $rc)"; return 1; fi
+}
+trial_install_moof() {  # trial_install_moof <prefs|noprefs>
+  if [ "$1" = prefs ]; then
+    auto_step install 0 'switch mooftcp: done' -- mooftcp switch mooftcp --prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin"
+  else  # no MoofTCP Prefs: the first .IPP open fails; the plain `switch` would wait for an agent that cannot come back
+    printf 'reinstall\r' > "$AUTO_OUT/cfg.tmp"
+    mctl put MoofTCPInstall.cfg "$AUTO_OUT/cfg.tmp" || return 1
+    mctl run MoofTCPInstall setup > "$AUTO_OUT/run-setup.txt" 2>&1; sed 's/^/    /' "$AUTO_OUT/run-setup.txt"
+    grep -aq 'RESULT MoofTCP .* is installed\.' <(tr '\r' '\n' < "$AUTO_OUT/MoofTCPInstall-setup.out") && echo "STEP install: PASS" || { echo "STEP install: FAIL"; return 1; }
+  fi
+}
+trial_arm() {  # trial_arm <seconds>: arm, show it, restart without waiting for the HELLO
+  mctl trial arm --seconds "$1" --step "$TRIAL_STEP" | sed 's/^/    /'
+  mctl trial status | sed 's/^/    /'
+  tlog "restart (trial $1 s)"
+  mctl restart --timeout 1 2>&1 | sed 's/^/    /' || true
+  T0=$(date +%s)
+}
+trial_rollback_out() {  # the rollback's .out must end with the Remove RESULT
+  local f="$AUTO_OUT/MoofTCPInstall-rollback.out"
+  mctl get -o "$f" MoofTCPInstall-rollback.out >/dev/null 2>&1 || { echo "ROLLBACK.out: FAIL (not there)"; return 1; }
+  if tr '\r' '\n' < "$f" | grep -a '^RESULT ' | tail -1 | tee "$AUTO_OUT/rollback-result.txt" | grep -Eq '^RESULT MoofTCP was removed and MacTCP was put back'; then
+    echo "ROLLBACK.out: PASS"; else echo "ROLLBACK.out: FAIL"; return 1; fi
+}
+trial_wait_call() {  # trial_wait_call <label>: the agent's next call (listen), with the PC-clock seconds since T0
+  mctl ping | sed 's/^/    /' || { echo "$1: the agent did not call"; return 1; }
+  tlog "agent called $(( $(date +%s) - T0 )) s after the restart"
+}
+
+trial_A() {
+  local rc=0
+  auto_prepare; mctl ping | sed 's/^/    /' || return 1
+  trial_install_moof noprefs || return 1
+  trial_arm 300
+  trial_wait_call A || return 1
+  ELAPSED=$(( $(date +%s) - T0 )); [ "$ELAPSED" -lt 280 ] && echo "TIMING A: PASS (${ELAPSED} s < 300)" || { echo "TIMING A: FAIL ${ELAPSED} s"; rc=1; }
+  trial_get_log A; grep -a -n -i 'trial\|OpenDriver\|rollback\|restart' "$AUTO_OUT/MoofAgent-A.log" | sed 's/^/LOG /'
+  trial_status_none || rc=1
+  trial_rollback_out || rc=1
+  trial_diag A-after '^stack: MacTCP \(no MoofTCP status\)' || rc=1
+  sleep 20; mctl ping | sed 's/^/    /' || rc=1   # still dialing, no second rollback
+  trial_get_log A2; echo "rollback lines in the log: $(grep -a -c -i 'rollback' "$AUTO_OUT/MoofAgent-A2.log")"
+  return $rc
+}
+trial_B() {
+  local rc=0
+  auto_prepare; mctl ping | sed 's/^/    /' || return 1
+  trial_install_moof prefs || return 1
+  trial_arm 60
+  tlog "nobody answers for 180 s"; sleep 180
+  trial_wait_call B || return 1
+  trial_get_log B; grep -a -n -i 'trial\|stream\|release\|step\|rollback\|restart\|OpenDriver' "$AUTO_OUT/MoofAgent-B.log" | sed 's/^/LOG /'
+  trial_status_none || rc=1
+  trial_rollback_out || rc=1
+  trial_diag B-after '^stack: MacTCP' || rc=1
+  sleep 20; mctl ping | sed 's/^/    /' || rc=1
+  trial_get_log B2; echo "rollback lines in the log: $(grep -a -c -i 'rollback' "$AUTO_OUT/MoofAgent-B2.log")"
+  return $rc
+}
+trial_C() {
+  local rc=0
+  auto_prepare; mctl ping | sed 's/^/    /' || return 1
+  trial_install_moof prefs || return 1
+  trial_arm 60
+  trial_wait_call C || return 1
+  trial_get_log C; grep -a -n -i 'trial\|rollback\|step' "$AUTO_OUT/MoofAgent-C.log" | sed 's/^/LOG /'
+  trial_status_none || rc=1
+  tlog "waiting 100 s past the trial time"; sleep 100
+  mctl ping | sed 's/^/    /' || rc=1
+  trial_expect_gone MoofTCPInstall-rollback.out || rc=1
+  trial_diag C-after '^stack: MoofTCP [^ ]+ full$' || rc=1
+  return $rc
+}
+scenario_trial() {  # scenario trial <A|B|C>
+  local rc=0
+  AUTO_OUT="$OUT/auto-trial-$1"
+  case "$1" in A|B|C) trial_$1 || rc=1;; *) die "scenario trial <A|B|C>";; esac
+  stop
+  result $rc "trial $1"
+}
+
 case "${1:-}" in
   snap) [ $# -eq 2 ] || die "snap <label>"; cmd_snap "$2";;
   compare) [ $# -ge 3 ] && [ $# -le 5 ] || die "compare <a> <b> [full|nofolder|attrs] [name]"; shift; cmd_compare "$@";;
   prep) shift; cmd_prep "$@";;
   scenario)
-    [ $# -eq 2 ] || die "scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|auto|look>"
+    [ $# -eq 2 ] || { [ "${2:-}" = trial ] && [ $# -eq 3 ]; } || die "scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|auto|look|trial A|B|C>"
     trap stop EXIT
     case "$2" in 1) scenario1;; 2) scenario2;; 3) scenario3;; 4) scenario4;; 5a) scenario5a;; 5b) scenario5b;; 7) scenario7;;
-      5a-lite) scenario5a lite;; 5b-lite) scenario5b lite;; 8) scenario8;; auto) scenario_auto;; look) scenario_look;;
+      5a-lite) scenario5a lite;; 5b-lite) scenario5b lite;; 8) scenario8;; auto) scenario_auto;; trial) scenario_trial "${3:-}";; look) scenario_look;;
       *) die "unknown scenario $2";; esac;;
   interrupt) [ $# -eq 4 ] || die "interrupt <name> <I|R><N> <remove|install>"; trap stop EXIT; interrupt1 "$2" "$3" "$4";;
   *) sed -n '2,30p' "$0"; exit 2;;
