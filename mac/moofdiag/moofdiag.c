@@ -15,6 +15,7 @@
 #include <Menus.h>
 #include <TextEdit.h>
 #include <Memory.h>
+#include <Resources.h>
 #include <Files.h>
 #include <Devices.h>
 #include <stdio.h>
@@ -52,6 +53,59 @@ static int has_run_file(void)
         return c == '!';
     }
     return 0;
+}
+
+/* The MoofTCP release version for the stack: line: the short string of 'vers' 1 in the "MoofTCP" file of the
+ * System Folder (the resident block carries none). "?" when the file or the resource cannot be read. The
+ * resource fork is opened read-only and closed again only if it was not open already (found by walking the
+ * FCB table: a second OpenResFile of an open fork returns the same refnum). */
+static void release_vers(char *out, size_t cap)
+{
+    static const unsigned char fname[] = "\pMoofTCP";
+    HParamBlockRec vp;
+    FCBPBRec fp;
+    Str255 nm, path;
+    short vref, res;
+    long dir;
+    int was_open = 0, idx;
+    Handle h;
+    short save = CurResFile();
+
+    strcpy(out, "?");
+    memset(&vp, 0, sizeof vp);
+    path[0] = 0;
+    vp.volumeParam.ioNamePtr = path;                         /* the boot volume's name */
+    vp.volumeParam.ioVRefNum = *(volatile short *)0x210;     /* BootDrive */
+    if (PBHGetVInfoSync(&vp) != noErr) return;
+    vref = vp.volumeParam.ioVRefNum;
+    dir = vp.volumeParam.ioVFndrInfo[0];                     /* the System Folder */
+    if (dir == 0) return;
+    for (idx = 1; idx < 64; idx++) {
+        memset(&fp, 0, sizeof fp);
+        nm[0] = 0;
+        fp.ioNamePtr = nm;
+        fp.ioVRefNum = vref;
+        fp.ioFCBIndx = idx;
+        if (PBGetFCBInfoSync(&fp) != noErr) break;
+        if (fp.ioFCBParID == dir && (fp.ioFCBFlags & 0x0200) && nm[0] == fname[0] && memcmp(nm + 1, fname + 1, nm[0]) == 0)
+            was_open = 1;
+    }
+    if (path[0] == 0 || path[0] > 27 + 1) return;
+    memcpy(path + 1 + path[0], ":System Folder:MoofTCP", 22);   /* OpenResFile: no OpenRFPerm trap before System 7 */
+    path[0] = (unsigned char)(path[0] + 22);
+    res = OpenResFile(path);
+    if (res < 0) return;
+    h = Get1Resource('vers', 1);
+    if (h && GetHandleSize(h) > 8) {
+        unsigned char *d = (unsigned char *)*h;
+        unsigned n = d[6];                                   /* 4 bytes number, region word, short string */
+        if (n > 0 && n < cap && 7 + n <= (unsigned)GetHandleSize(h)) {
+            memcpy(out, d + 7, n);
+            out[n] = 0;
+        }
+    }
+    if (!was_open) CloseResFile(res);
+    UseResFile(save);
 }
 
 static short outref = -1;
@@ -166,8 +220,11 @@ int main(void)
         }
         if (r == 0 && m && pb.csParam[2] != MT_STATUS_VERSION)
             P("stack: MoofTCP status%u unknown\r", (unsigned)pb.csParam[2]);
-        else if (r == 0 && m)   /* <vers> is the Status layout version: no release string exists at run time */
-            P("stack: MoofTCP status%u %s\r", (unsigned)pb.csParam[2], m->variant == MT_RES_VARIANT_LITE ? "lite" : "full");
+        else if (r == 0 && m) {
+            char rv[40];
+            release_vers(rv, sizeof rv);
+            P("stack: MoofTCP %s %s\r", rv, m->variant == MT_RES_VARIANT_LITE ? "lite" : "full");
+        }
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
             /* another layout: do not read a single field of it */
             P("VERSION MISMATCH: the driver's Status layout is version %u (block says %u), this MoofDiag reads version %d. Rebuild MoofDiag and the driver from the same sources.\r",

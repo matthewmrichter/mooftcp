@@ -62,6 +62,12 @@ target_include_directories(mtinst PUBLIC ${CMAKE_SOURCE_DIR}/mac/installer)
 target_link_libraries(mtinst PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtinst)
 
+# The run file parser shared with the Phase 0 tools (mac/common/runid_parse.c, no Toolbox), host-built.
+add_library(mtrunid STATIC ${CMAKE_SOURCE_DIR}/mac/common/runid_parse.c)
+target_include_directories(mtrunid PUBLIC ${CMAKE_SOURCE_DIR}/mac/common)
+target_link_libraries(mtrunid PUBLIC ${MT_TEST_LIBS})
+set(MT_TEST_LIBS mtrunid)
+
 enable_testing()
 file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
 if(MT_NO_DHCP)   # the client and the driver's DHCP mode do not exist in Lite

@@ -17,7 +17,7 @@
 #                     app quit by itself (the Finder is back, no alert seen) and fetches MoofDiag-<id>.out
 #     --stale         (with --run-id) leave a 6000-byte filler file as the output file instead of deleting it:
 #                     checks that MoofDiag truncates (SetEOF) and the result has no stale tail
-#     --keep-running  leave Snow running after MoofDiag finished (for more GUI work); the output file
+#     --keep-running  (not with --run-id: refused) leave Snow running after MoofDiag finished (for more GUI work); the output file
 #                     is then not fetched
 # MT_LITE=1 runs the MoofTCP Lite build (build-mac-lite/; --dhcp then shows Lite running the DHCP-mode prefs
 # as a manual configuration: no address in them, so RESULT UNCONFIGURED at once, no 10 s wait).
@@ -48,6 +48,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[ -z "$runid" ] || [ -z "$keeprun" ] || die "--keep-running does not work with --run-id (the app quits by itself)"
 cd "$ROOT"
 out_dir="$ROOT/$BM/moofdiag"
 echo "== build"
@@ -181,7 +182,7 @@ if [ -n "$runid" ]; then
   [ "$seen" -ge 2 ] || die "MoofDiag did not quit within ${TIMEOUT}s (screenshot $shot)"
   echo "app quit unattended after about ${t}s"
   snow_stop
-  with_volume fetch_out "$out" || die "$outname missing on the image"
+  with_volume fetch_out "$out" || die "launch failed: MoofDiag did not run (no $outname on the image; the launch click did not start the app)"
   tr '\r' '\n' < "$out"
   tr '\r' '\n' < "$out" | grep -q '^RESULT \(PASS\|UNCONFIGURED\)$' || die "MoofDiag reported FAIL"
   echo "wrote $out"; exit 0
