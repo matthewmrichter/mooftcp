@@ -375,6 +375,23 @@ int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
  * inside mt_tick, and each hop of a self connection costs one tick. A full FIFO is a refusal
  * (ip_lo_drops; TCP stalls and retries as for a refused link.tx). 127/8 traffic carries the
  * 127 address as its source. Unconfigured stacks queue nothing. */
+#ifdef MT_TUNE
+/* Perf builds only (compile option MT_TUNE; release builds do not have this): run-time TCP timing levers for
+ * unattended parameter sweeps. Defaults equal the release constants (RTO min/initial 1000 ms, delayed ACK
+ * 100 ms, link-busy retry 10 ms, 4 quick ACKs). */
+typedef struct {
+    uint16_t rto_min, rto_init;   /* ms: RTO floor; RTO before any RTT sample */
+    uint16_t delack_ms;           /* delayed-ACK time; 0 = ACK at once */
+    uint16_t stall_ms;            /* retry delay after the link refused a data/FIN segment */
+    uint8_t  quickack;            /* the first n data segments of a connection are ACKed at once; 255 = all */
+} mt_tune;
+/* Bounds: rto_min 100..5000, rto_init rto_min..10000, delack 0..500, stall 1..100, quickack 0..255.
+ * MT_ERR_INVAL (nothing changed) when out of range. Applies to timers armed from now on; running timers keep
+ * their deadline, and a connection's RTO already computed is not rewritten. */
+int       mt_tune_set(mt_stack *s, const mt_tune *t);
+void      mt_tune_get(const mt_stack *s, mt_tune *t);
+#endif
+
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);
 uint32_t  mt_next_deadline(const mt_stack *s, uint32_t now);   /* ms from now, or MT_NO_DEADLINE */

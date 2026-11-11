@@ -7,3 +7,11 @@ case "${MT_LITE:-0}" in
   1) BM=build-mac-lite; MT_NO_DHCP_OPT=ON;;
   *) echo "MT_LITE must be 0 or 1 (got '$MT_LITE')" >&2; exit 2;;
 esac
+#   MT_TUNE=1           the perf configuration (compile option MT_TUNE: run-time TCP timing levers, Control 0x4D55,
+#                       MoofTCPTune; never a release): its own tree, build-mac-tune/ (build-mac-lite-tune/ with MT_LITE=1),
+#                       so MT_TUNE=1 builds never mix with the release objects. The installer is not built there.
+case "${MT_TUNE:-0}" in
+  0) ;;
+  1) BM="$BM-tune"; MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS:-} -DMT_TUNE=1"; export MT_EXTRA_CFLAGS;;
+  *) echo "MT_TUNE must be 0 or 1 (got '$MT_TUNE')" >&2; exit 2;;
+esac

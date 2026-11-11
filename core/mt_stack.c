@@ -93,7 +93,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->dhcp = (mt_dhcp *)(void *)(base + lay.dhcp);
     s->dhcp->rnd = (seed ^ 0x6A09E667u) | 1u;
 #endif
-    return s;
+    return mt_tune_init(s);                    /* release: s itself */
 }
 
 void mt_set_entropy(mt_stack *s, uint32_t a, uint32_t b) {
@@ -277,3 +277,17 @@ uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     d = mt_dl_min(d, mt_dhcp_deadline(s, now));
     return d;
 }
+
+#ifdef MT_TUNE
+int mt_tune_set(mt_stack *s, const mt_tune *t) {
+    if (!s || !t) return MT_ERR_INVAL;
+    if (t->rto_min < 100u || t->rto_min > 5000u) return MT_ERR_INVAL;
+    if (t->rto_init < t->rto_min || t->rto_init > 10000u) return MT_ERR_INVAL;
+    if (t->delack_ms > 500u) return MT_ERR_INVAL;
+    if (t->stall_ms < 1u || t->stall_ms > 100u) return MT_ERR_INVAL;
+    s->tune = *t;
+    return MT_OK;
+}
+
+void mt_tune_get(const mt_stack *s, mt_tune *t) { *t = s->tune; }
+#endif

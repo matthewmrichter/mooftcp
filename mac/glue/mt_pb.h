@@ -372,6 +372,9 @@ void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
 uint32_t mt_pb_udp_deadline(MtDrv *d);
 int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
 int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
+#ifdef MT_TUNE
+int16_t  mt_pb_tune_control(MtDrv *d, MtAnyPb *pb);  /* csCode MT_CS_TUNE (mt_pb.c; perf builds only) */
+#endif
 void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m, uint16_t m_born);   /* cancel the lookups of the
                                                  * application in m (m_born as mt_pb_in_gone) */
 /* Nonzero if p lies in a recorded MultiFinder owner whose partition is gone (counts n_dead_calls): the

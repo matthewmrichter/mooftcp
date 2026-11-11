@@ -122,7 +122,7 @@ static void conn_reset(mt_tcp *t) {
     t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
     t->snd_wl1 = t->snd_wl2 = t->iss = t->irs = 0;
     t->tmask = 0;
-    t->rto = MT_TCP_RTO_INIT;
+    t->rto = MT_RTO_INIT(t->st);
     t->srtt8 = t->rttvar4 = 0;
     t->dupacks = 0;
     t->flags &= MT_TF_ULPABORT;
@@ -179,7 +179,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     t->used = 1;
     t->ulp_ms = TCP_ULP_DEFAULT_S * 1000u;
     t->flags = MT_TF_ULPABORT;
-    t->rto = MT_TCP_RTO_INIT;
+    t->rto = MT_RTO_INIT(t->st);
     t->mss = TCP_MSS_DEFAULT;
     t->state = MT_TCP_CLOSED;       /* creation is not logged */
     return t;
@@ -284,7 +284,7 @@ static void back_to_listen(mt_tcp *t) {
     t->tmask = 0;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
-    t->rto = MT_TCP_RTO_INIT;                              /* not the backed-off value of the dead half-open */
+    t->rto = MT_RTO_INIT(t->st);                              /* not the backed-off value of the dead half-open */
     mt_tcp_set_state(t, MT_TCP_LISTEN);
     t->rip = 0;
     t->rport = 0;
@@ -505,13 +505,13 @@ static void ulp_expired(mt_tcp *t, uint32_t now) {
  * (rto 1, 2, 4 s, doubling per timeout); when the 4th one times out (rto has reached 8 s) it
  * gives up and the TCB listens again, rather than holding the listener for the 120 s ULP
  * timeout. An actively opened SYN_SENT is not affected (it keeps the ULP connect timeout). */
-#define SYNRCVD_GIVEUP_RTO (8u * MT_TCP_RTO_INIT)
+#define SYNRCVD_GIVEUP_RTO(t) (8u * MT_RTO_INIT((t)->st) < MT_TCP_RTO_MAX ? 8u * MT_RTO_INIT((t)->st) : MT_TCP_RTO_MAX)
 
 /* Retransmission timeout. Data states: back to Loss Window (cwnd = 1 MSS, ssthresh halved) and
  * go-back-N from snd_una; SYN states resend the SYN / SYN-ACK. */
 static void rto_fire(mt_tcp *t, uint32_t now) {
     if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE) &&
-        t->rto >= SYNRCVD_GIVEUP_RTO) {
+        t->rto >= SYNRCVD_GIVEUP_RTO(t)) {
         back_to_listen(t);          /* 4 SYN-ACKs sent and the 4th timed out: free the listener */
         return;
     }
@@ -722,7 +722,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->snd_wl1 = g->seq;
     t->snd_wl2 = t->iss;
     t->flags |= MT_TF_PASSIVE;
-    t->rto = MT_TCP_RTO_INIT;
+    t->rto = MT_RTO_INIT(t->st);
     mt_tcp_set_state(t, MT_TCP_SYN_RCVD);
     s->stats.tcp_passive_opens++;
     mt_tcp_output(t, now);                 /* SYN-ACK */
@@ -832,7 +832,7 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
     if (ackok) {                                           /* SYN-ACK */
         t->snd_una = g->ack;
         tmr_clr(t, MT_TT_RTO);
-        t->rto = MT_TCP_RTO_INIT;
+        t->rto = MT_RTO_INIT(t->st);
         established(t);
         t->flags |= MT_TF_ACKNOW;
         mt_tcp_output(t, now);                             /* ACK (plus queued data) */
@@ -906,7 +906,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             t->snd_wl1 = seq;
             t->snd_wl2 = g->ack;
             tmr_clr(t, MT_TT_RTO);
-            t->rto = MT_TCP_RTO_INIT;
+            t->rto = MT_RTO_INIT(t->st);
             established(t);
             t->flags |= MT_TF_ACKNOW;
             mt_tcp_output(t, now);
@@ -948,7 +948,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         t->snd_wl1 = seq;
         t->snd_wl2 = g->ack;
         tmr_clr(t, MT_TT_RTO);
-        t->rto = MT_TCP_RTO_INIT;
+        t->rto = MT_RTO_INIT(t->st);
         established(t);
         ev |= EV_EST;
     }
@@ -1032,14 +1032,14 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                     uint16_t lm = mt_tcp_local_mss_to(t->st, t->rip);
                     t->rcv_mss = g->acc_n < lm ? (uint16_t)g->acc_n : lm;
                 }
-                if (t->qack < MT_TCP_QUICKACK) {
-                    t->qack++;
+                if (t->qack < MT_QUICKACK(t->st)) {
+                    MT_QACK_INC(t);
                     t->flags |= MT_TF_ACKNOW;
-                } else if (g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
+                } else if (MT_DELACK_ON(t->st) && g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
                            !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
                     t->flags2 |= MT_T2_ACKHALF;
                     if (!(t->tmask & (1u << MT_TT_DELACK)))
-                        tmr_set(t, MT_TT_DELACK, now + MT_TCP_DELACK_MS);
+                        tmr_set(t, MT_TT_DELACK, now + MT_DELACK(t->st));
                 } else {
                     t->flags |= MT_TF_ACKNOW;
                 }

@@ -184,7 +184,7 @@ static void stall(mt_tcp *t, int idle, int again, uint32_t now) {
     if (idle) t->flags |= MT_TF_STALLIDLE;
     if (!s->stall_on) {
         s->stall_on = 1;
-        s->stall_at = now + MT_TCP_STALL_MS;
+        s->stall_at = now + MT_STALL(s);
     }
 }
 

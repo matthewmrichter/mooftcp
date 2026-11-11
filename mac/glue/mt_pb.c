@@ -2,6 +2,9 @@
  * TCP calls live in mt_pb_tcp.c. See mt_pb.h for the contract. */
 #include <string.h>
 #include "mt_pb.h"
+#ifdef MT_TUNE
+#include "mt_tune_abi.h"
+#endif
 
 #if defined(__GNUC__)
 #define OWN_BARRIER() __asm__ volatile("" ::: "memory")
@@ -182,6 +185,41 @@ static int answers_zero(int16_t cs) {
            cs == 44;
 }
 
+#ifdef MT_TUNE
+/* Private Control MT_CS_TUNE (mt_tune_abi.h): get or set the core's timing levers; perf builds only. Runs in
+ * mt_pb_control's critical section (interrupts masked, the core not entered: in_core is only set inside it). */
+int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
+    uint16_t w[MT_TW_N];
+    MacPtr32 a;
+    uint8_t *p;
+    mt_tune t;
+    memcpy(&a, (const uint8_t *)pb + 28, 4);
+    p = (uint8_t *)mt_os_ptr(a);
+    if (!p) return MT_TUNE_PARAMERR;
+    memcpy(w, p, MT_TUNE_BLOCK_BYTES);
+    if (w[MT_TW_VERSION] != MT_TUNE_ABI_VERSION) return MT_TUNE_PARAMERR;
+    if (w[MT_TW_OP] == MT_TUNE_OP_SET) {
+        if (w[MT_TW_QUICKACK] > 255u) return MT_TUNE_PARAMERR;
+        t.rto_min = w[MT_TW_RTO_MIN];
+        t.rto_init = w[MT_TW_RTO_INIT];
+        t.delack_ms = w[MT_TW_DELACK];
+        t.stall_ms = w[MT_TW_STALL];
+        t.quickack = (uint8_t)w[MT_TW_QUICKACK];
+        return mt_tune_set(d->s, &t) == MT_OK ? 0 : MT_TUNE_PARAMERR;
+    }
+    if (w[MT_TW_OP] != MT_TUNE_OP_GET) return MT_TUNE_PARAMERR;
+    mt_tune_get(d->s, &t);
+    w[MT_TW_RTO_MIN] = t.rto_min;
+    w[MT_TW_RTO_INIT] = t.rto_init;
+    w[MT_TW_DELACK] = t.delack_ms;
+    w[MT_TW_STALL] = t.stall_ms;
+    w[MT_TW_QUICKACK] = t.quickack;
+    w[MT_TW_RSVD] = 0;
+    memcpy(p, w, MT_TUNE_BLOCK_BYTES);
+    return 0;
+}
+#endif
+
 int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
     int16_t cs = pb->hdr.csCode, r;
     int sv;
@@ -199,6 +237,10 @@ int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
         r = mt_pb_ip_control(d, pb);
     else if (cs == MT_CS_DNR)
         r = mt_pb_dns_control(d, pb);           /* private: dnrp's lookups (not a MacTCP code) */
+#ifdef MT_TUNE
+    else if (cs == MT_CS_TUNE)
+        r = mt_pb_tune_control(d, pb);          /* private: timing levers (perf builds only) */
+#endif
     else if (answers_zero(cs))
         r = 0;
     else

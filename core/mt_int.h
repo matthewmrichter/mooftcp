@@ -179,6 +179,25 @@ enum { MT_TT_RTO, MT_TT_DELACK, MT_TT_PERSIST, MT_TT_TW, MT_TT_N };   /* tmr[] s
 #define MT_TCP_RTO_INIT 1000u
 #define MT_TCP_RTO_MAX  60000u
 #define MT_TCP_RTO_MIN  1000u  /* RFC 6298 2.4; RC2 hardware: the DaynaPORT link holds frames up to ~500 ms, 200 fired spuriously */
+/* Timing constants read through these macros. Release builds: exactly the #defines above (the code is
+ * byte-identical). Perf builds (MT_TUNE): a small block in the stack that mt_tune_set changes at run time. */
+#ifdef MT_TUNE
+#define MT_RTO_MIN(s)   ((uint32_t)(s)->tune.rto_min)
+#define MT_RTO_INIT(s)  ((uint32_t)(s)->tune.rto_init)
+#define MT_DELACK(s)    ((uint32_t)(s)->tune.delack_ms)
+#define MT_STALL(s)     ((uint32_t)(s)->tune.stall_ms)
+#define MT_QUICKACK(s)  ((uint8_t)(s)->tune.quickack)
+#define MT_QACK_INC(t)  do { if ((t)->st->tune.quickack != 255u) (t)->qack++; } while (0)   /* 255 = all ACKed at once */
+#define MT_DELACK_ON(s) ((s)->tune.delack_ms != 0)       /* delack 0: no delay, ACK at once */
+#else
+#define MT_RTO_MIN(s)   MT_TCP_RTO_MIN
+#define MT_RTO_INIT(s)  MT_TCP_RTO_INIT
+#define MT_DELACK(s)    MT_TCP_DELACK_MS
+#define MT_STALL(s)     MT_TCP_STALL_MS
+#define MT_QUICKACK(s)  MT_TCP_QUICKACK
+#define MT_QACK_INC(t)  ((t)->qack++)
+#define MT_DELACK_ON(s) 1
+#endif
 /* FIN_WAIT_2 backstop: 600 s of silence from the peer (any acceptable segment refreshes it).
  * At expiry it acts like the ULP timeout: ULP_TIMEOUT event, abort only if the abort flag is set. */
 #define MT_TCP_FW2_MS   600000u
@@ -350,10 +369,27 @@ struct mt_stack {
     void (*log_put_spy)(mt_stack *s);   /* called inside mt_log_put after the time is stored,
                                          * before the rest of the record and before log_wr moves */
 #endif
+#ifdef MT_TUNE
+    mt_tune tune;            /* run-time timing levers (perf builds only; defaults = the MT_TCP_* defines) */
+#endif
     /* scratch */
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
 };
+
+/* mt_stack_init's last step: the tune block gets the release constants (perf builds); release: nothing. */
+#ifdef MT_TUNE
+static inline mt_stack *mt_tune_init(mt_stack *s) {
+    s->tune.rto_min = MT_TCP_RTO_MIN;
+    s->tune.rto_init = MT_TCP_RTO_INIT;
+    s->tune.delack_ms = MT_TCP_DELACK_MS;
+    s->tune.stall_ms = MT_TCP_STALL_MS;
+    s->tune.quickack = MT_TCP_QUICKACK;
+    return s;
+}
+#else
+#define mt_tune_init(s) (s)
+#endif
 
 #ifndef MT_NO_DHCP
 static inline int mt_dhcp_on(const mt_stack *s) { return s->dhcp->state != MT_DHCP_OFF; }
@@ -505,9 +541,9 @@ void mt_tcp_probe(mt_tcp *t, uint32_t now);
 /* RTO from the RFC 6298 state (srtt + 4*rttvar, clamped), INIT while nothing is measured. */
 static inline uint32_t mt_tcp_rto_base(const mt_tcp *t) {
     uint32_t r;
-    if (t->srtt8 == 0) return MT_TCP_RTO_INIT;
+    if (t->srtt8 == 0) return MT_RTO_INIT(t->st);
     r = (t->srtt8 >> 3) + t->rttvar4;
-    return r < MT_TCP_RTO_MIN ? MT_TCP_RTO_MIN : r > MT_TCP_RTO_MAX ? MT_TCP_RTO_MAX : r;
+    return r < MT_RTO_MIN(t->st) ? MT_RTO_MIN(t->st) : r > MT_TCP_RTO_MAX ? MT_TCP_RTO_MAX : r;
 }
 /* Segment without a TCB (reset replies) or with explicit fields. */
 void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,

@@ -26,6 +26,7 @@
 #include "mt_drv.h"
 #include "diag_streams.h"
 #include "runid.h"
+#include "mt_tune_abi.h"
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* before mt_units.h: its low-memory reads are inlined into main */
 #include "mt_units.h"
 #include <stddef.h>
@@ -163,7 +164,7 @@ int main(void)
     size_t n;
     short ref = 0;
     OSErr r;
-    int pass = 0, unconf = 0;
+    int pass = 0, unconf = 0, opened = 0;
     THz save;
     long sysfree, syszone;
 
@@ -196,6 +197,7 @@ int main(void)
     P("system zone after open: size %ld free %ld occupied %ld (no-network baseline: size 162100, occupied 149248)\r",
       syszone, sysfree, syszone - sysfree);
     if (r == -23004) unconf = 1;
+    opened = r == 0;
     if (r == 0 || unconf) {
         CntrlParam pb;
         MtRes *m = NULL;
@@ -231,6 +233,23 @@ int main(void)
             char rv[40];
             release_vers(rv, sizeof rv);
             P("stack: MoofTCP %s %s\r", rv, m->variant == MT_RES_VARIANT_LITE ? "lite" : "full");
+            if (opened) {
+                /* a perf build (MT_TUNE) answers the private tune Control (mt_tune_abi.h) with its levers; a release
+                 * driver refuses it (-4), and then there is no tune: line. Only MoofTCP's own driver gets here. */
+                static uint16_t tb[MT_TW_N];
+                CntrlParam tp;
+                void *tbp = tb;
+                memset(&tp, 0, sizeof tp);
+                tb[MT_TW_VERSION] = MT_TUNE_ABI_VERSION;
+                tb[MT_TW_OP] = MT_TUNE_OP_GET;
+                tp.ioCRefNum = ref;
+                tp.csCode = MT_CS_TUNE;
+                memcpy(&tp.csParam[0], &tbp, 4);
+                if (PBControlSync((ParmBlkPtr)&tp) == 0)
+                    P("tune: rto_min=%u rto_init=%u delack=%u stall=%u quickack=%u\r", (unsigned)tb[MT_TW_RTO_MIN],
+                      (unsigned)tb[MT_TW_RTO_INIT], (unsigned)tb[MT_TW_DELACK], (unsigned)tb[MT_TW_STALL],
+                      (unsigned)tb[MT_TW_QUICKACK]);
+            }
         }
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
             /* another layout: do not read a single field of it */

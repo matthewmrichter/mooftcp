@@ -4,7 +4,8 @@
 # 1. Every Mac target (mac/, which includes the core as mtcore68k) must build with
 #    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint,lite}/ (build-mac/ is not touched): the
 #    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, MARK=1 + -DMT_STACK_PAINT=4096, and
-#    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants").
+#    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants"),
+#    and the perf configuration -DMT_TUNE=1 (run-time timing levers + MoofTCPTune; never shipped).
 #    Lite is built first: the installer of the other trees embeds its MoofTCP file (MT_LITE_MOOF_BIN).
 #    Any warning or error fails the gate (exit 1). Log: build-gate.log.
 # 2. Probe: core/*.c compiled alone with -mshort (16-bit int). Hazards (warnings) are listed;
@@ -17,9 +18,9 @@ R68_TOOLCHAIN=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.
 FLAGS="-m68000 -O2 -Wall -Wextra -Werror"
 log="$ROOT/build-gate.log"
 
-# Four configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
-# and MoofTCP Lite (what ships as the Lite variant).
-for cfg in "lite:" "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096"; do
+# Five configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
+# MoofTCP Lite (what ships as the Lite variant) and the perf build (MT_TUNE).
+for cfg in "lite:" "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096" "tune:-DMT_TUNE=1"; do
   name="${cfg%%:*}"; extra="${cfg#*:}"
   dir="build-gate-$name"
   lite=OFF; [ "$name" != lite ] || lite=ON

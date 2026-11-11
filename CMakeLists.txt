@@ -15,6 +15,12 @@ if(MT_NO_DHCP)
   add_compile_definitions(MT_NO_DHCP)
 endif()
 
+# Perf builds (task 14): run-time TCP timing levers (mt_tune_set, Control 0x4D55). Never in a release. Use build-tune.
+option(MT_TUNE "Build the perf configuration with run-time timing levers" OFF)
+if(MT_TUNE)
+  add_compile_definitions(MT_TUNE)
+endif()
+
 add_compile_options(-std=c99 -Wall -Wextra -Werror -g)
 if(MT_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
@@ -69,10 +75,19 @@ target_include_directories(mtrunid PUBLIC ${CMAKE_SOURCE_DIR}/mac/common)
 target_link_libraries(mtrunid PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtrunid)
 
+# MoofTCPTune's presets and cfg parser (mac/mooftcptune/tune_parse.c, portable), host-built.
+add_library(mttuneparse STATIC ${CMAKE_SOURCE_DIR}/mac/mooftcptune/tune_parse.c)
+target_include_directories(mttuneparse PUBLIC ${CMAKE_SOURCE_DIR}/mac/mooftcptune)
+target_link_libraries(mttuneparse PUBLIC ${MT_TEST_LIBS})
+set(MT_TEST_LIBS mttuneparse)
+
 enable_testing()
 file(GLOB MT_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/test_*.c)
 if(MT_NO_DHCP)   # the client and the driver's DHCP mode do not exist in Lite
   list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_dhcp.c ${CMAKE_SOURCE_DIR}/tests/test_pb_dhcp.c)
+endif()
+if(NOT MT_TUNE)   # the run-time levers exist only in the perf configuration (build-tune)
+  list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_tune.c)
 endif()
 foreach(src ${MT_TEST_SRC})
   get_filename_component(name ${src} NAME_WE)

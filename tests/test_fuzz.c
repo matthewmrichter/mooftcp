@@ -3,6 +3,12 @@
 #include "mt_int.h"
 #include "mt_util.h"
 #include "pbfake.h"
+#ifdef MT_TUNE
+#include "mt_tune_abi.h"
+#define FZ_STALL_MAX 100u      /* the PB fuzzer moves the stall lever (largest allowed value) */
+#else
+#define FZ_STALL_MAX MT_TCP_STALL_MS
+#endif
 
 /* Stateful system fuzzer. One stack, one simulated peer that crafts frames from the stack's live
  * state (TCB sequence numbers, pending DNS ids, ...) and from raw mutations of those frames,
@@ -596,7 +602,7 @@ static void check_invariants(void) {
         if (t->flags2 & MT_T2_STALL) {
             g.stalls_seen++;
             if (!g.s->stall_on) bad("stalled TCB without the stall timer");
-            else if (mt_next_deadline(g.s, g.now) > MT_TCP_STALL_MS) bad("stall retry later than 10 ms");
+            else if (mt_next_deadline(g.s, g.now) > FZ_STALL_MAX) bad("stall retry later than 10 ms");
         }
         if (i < NT && g.rf_live[i]) {
             if (t->iss != g.rf_iss[i] || t->state < MT_TCP_ESTABLISHED || t->state == MT_TCP_TIME_WAIT) {
@@ -1773,6 +1779,48 @@ static void act_simple(int16_t cs) {
     if (!r->busy) pr_free(r);
 }
 
+#ifdef MT_TUNE
+/* The private tune Control call (perf builds): get, valid and out-of-range sets, bad versions and ops. The
+ * answer is 0 or -50, never anything else; a set that returns 0 reads back exactly. */
+static void act_tune(void) {
+    prec *r = pr_get();
+    uint16_t w[MT_TW_N], v[MT_TW_N];
+    uint8_t *blk;
+    MacPtr32 a;
+    int16_t res;
+    int want_ok;
+    if (!r) return;
+    blk = pr_buf(r);
+    w[MT_TW_VERSION] = rn(12) ? MT_TUNE_ABI_VERSION : (uint16_t)rn(4);
+    w[MT_TW_OP] = rn(10) ? (uint16_t)rn(2) : (uint16_t)rn(5);
+    w[MT_TW_RTO_MIN] = (uint16_t)(rn(8) ? 100 + rn(4901) : rn(6000));
+    w[MT_TW_RTO_INIT] = (uint16_t)(rn(8) ? w[MT_TW_RTO_MIN] + rn(10001u - w[MT_TW_RTO_MIN] > 0 ? 10001u - w[MT_TW_RTO_MIN] : 1) : rn(11000));
+    w[MT_TW_DELACK] = (uint16_t)(rn(8) ? rn(501) : rn(700));
+    w[MT_TW_STALL] = (uint16_t)(rn(8) ? 1 + rn(100) : rn(130));
+    w[MT_TW_QUICKACK] = (uint16_t)(rn(8) ? rn(256) : rn(300));
+    w[MT_TW_RSVD] = (uint16_t)rn(65536);
+    memcpy(blk, w, sizeof w);
+    a = pbf_a(blk);
+    memcpy((uint8_t *)pr_pb(r) + 28, &a, 4);
+    res = issue_ex(r, MT_CS_TUNE, 0, -1, -1, 0);
+    want_ok = w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION && (w[MT_TW_OP] == MT_TUNE_OP_GET || w[MT_TW_OP] == MT_TUNE_OP_SET);
+    if (res != 0 && res != MT_TUNE_PARAMERR) bad("tune control: result not 0 or -50");
+    if (!want_ok && res == 0) bad("tune control: bad version or op accepted");
+    memcpy(v, blk, sizeof v);
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_SET) {
+        mt_tune t;
+        mt_tune_get(P.d->s, &t);
+        if (t.rto_min != w[MT_TW_RTO_MIN] || t.rto_init != w[MT_TW_RTO_INIT] || t.delack_ms != w[MT_TW_DELACK] ||
+            t.stall_ms != w[MT_TW_STALL] || t.quickack != w[MT_TW_QUICKACK]) bad("tune control: set did not read back");
+    }
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_GET &&
+        (v[MT_TW_RTO_MIN] < 100 || v[MT_TW_RTO_MIN] > 5000 || v[MT_TW_RTO_INIT] < v[MT_TW_RTO_MIN] ||
+         v[MT_TW_RTO_INIT] > 10000 || v[MT_TW_DELACK] > 500 || v[MT_TW_STALL] < 1 || v[MT_TW_STALL] > 100 ||
+         v[MT_TW_QUICKACK] > 255)) bad("tune control: get returned out-of-range values");
+    if (!r->busy) pr_free(r);
+}
+#endif
+
 static void pb_action(void) {
     switch (rn(30)) {
     case 16: act_ucreate(); break;
@@ -1783,6 +1831,9 @@ static void pb_action(void) {
     case 23: act_uother(); break;
     case 24: case 25: act_echo(); break;
     case 26: act_ipmisc(); break;
+#ifdef MT_TUNE
+    case 27: act_tune(); break;
+#endif
     case 0: act_create(); break;
     case 1: act_open(0); break;
     case 2: act_open(1); break;
