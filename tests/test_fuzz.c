@@ -602,7 +602,7 @@ static void check_invariants(void) {
         if (t->flags2 & MT_T2_STALL) {
             g.stalls_seen++;
             if (!g.s->stall_on) bad("stalled TCB without the stall timer");
-            else if (mt_next_deadline(g.s, g.now) > FZ_STALL_MAX) bad("stall retry later than 10 ms");
+            else if (mt_next_deadline(g.s, g.now) > FZ_STALL_MAX) bad("stall retry later than the stall lever (10 ms; 100 under MT_TUNE)");
         }
         if (i < NT && g.rf_live[i]) {
             if (t->iss != g.rf_iss[i] || t->state < MT_TCP_ESTABLISHED || t->state == MT_TCP_TIME_WAIT) {

@@ -3,6 +3,7 @@
 # MoofTCPTune and then MoofDiag in ONE boot, both unattended with the run file "!!<id>", and print both outputs.
 #   tune-run.sh [--keep-disk] [--cfg <MoofTCPTune.cfg>] [--release] <id>
 #     <id>        the run id: a preset (default delack0 delack20 delack50 qack16 qackall rto500 rto700 stall2 stall5),
+#                 or "a+b" (two presets in one boot, e.g. delack0+default: the restore check),
 #                 or any other id with --cfg
 #     --cfg f     also put f on the image as MoofTCPTune.cfg (read when the id is no preset)
 #     --release   use the RELEASE MoofTCP instead (build-mac/): MoofTCPTune must then end RESULT FAIL "not a tune
@@ -99,35 +100,6 @@ else:
     print("run")
 PY
 }
-click() {  # click x y [dbl]
-  local x=$1 y=$2 w i
-  w="$(xdotool search --name Snow | head -1)"
-  xdotool windowfocus "$w" 2>/dev/null || true
-  for i in 1 2 3; do xdotool mousemove $((x-20+i*5)) $((y-20+i*5)); sleep 0.1; done
-  xdotool mousemove "$x" "$y"; sleep 0.2
-  xdotool mousedown 1; sleep 0.05; xdotool mouseup 1
-  if [ "${3:-}" = dbl ]; then sleep 0.12; xdotool mousedown 1; sleep 0.05; xdotool mouseup 1; fi
-}
-screen_state() {  # finder | run | done | crash (see probe-run.sh)
-  scrot -o "$shot" >/dev/null 2>&1 || return 0
-  python3 -W ignore - "$shot" <<'PY'
-import sys
-from PIL import Image
-im = Image.open(sys.argv[1]).convert("L")
-def white(box):
-    px = list(im.crop(box).getdata())
-    return sum(1 for p in px if p > 230) / len(px)
-bar = list(im.crop((40, 85, 430, 112)).getdata())
-if sum(1 for p in bar if p < 100) > 20:
-    print("finder")
-elif white((130, 200, 300, 212)) > 0.95 and white((560, 330, 700, 390)) > 0.6:
-    print("done")
-elif white((330, 240, 690, 340)) > 0.35:
-    print("crash")
-else:
-    print("run")
-PY
-}
 # The folder ":MoofTCP Test:" lists (by name) Agent Run, MoofDiag, MoofTCPTune [, MoofTCPTune.cfg first]: icons 123 px apart.
 open_folder() { click 914 180 dbl; sleep 3; click 341 290 dbl; sleep 3; }
 wait_quit() {  # wait for the unattended app to end: the Finder is back twice in a row
@@ -177,7 +149,7 @@ if [ -n "$release" ]; then
 fi
 tr '\r' '\n' < "$out_tune" | grep -q '^RESULT OK$' || die "MoofTCPTune did not end RESULT OK"
 tr '\r' '\n' < "$out_diag" | grep -q '^RESULT PASS$' || die "MoofDiag did not end RESULT PASS"
-after="$(tr '\r' '\n' < "$out_tune" | sed -n 's/^after: //p')"
+after="$(tr '\r' '\n' < "$out_tune" | sed -n 's/^after: //p' | tail -1)"
 dtune="$(tr '\r' '\n' < "$out_diag" | sed -n 's/^tune: //p')"
 [ -n "$after" ] && [ "$after" = "$dtune" ] || die "MoofDiag tune line '$dtune' differs from MoofTCPTune after '$after'"
 echo "PASS: tune: $dtune"

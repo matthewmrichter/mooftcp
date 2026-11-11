@@ -1,5 +1,5 @@
 /* mt_tune_abi.h - the private Control call that reads and sets MoofTCP's run-time timing levers.
- * PERF BUILDS ONLY (compile option MT_TUNE, scripts/build-mac.sh with MT_EXTRA_CFLAGS=-DMT_TUNE=1): a release
+ * PERF BUILDS ONLY (compile option MT_TUNE, `MT_TUNE=1 scripts/build-mac.sh`, tree build-mac-tune/): a release
  * driver does not implement it and answers Control csCode 0x4D55 like any code it does not know (-4).
  *
  * PBControl on .IPP, csCode MT_CS_TUNE ('MU'), csParam (PB offset 28) = pointer to a 16-byte block of 16-bit

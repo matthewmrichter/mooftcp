@@ -187,7 +187,7 @@ static int answers_zero(int16_t cs) {
 
 #ifdef MT_TUNE
 /* Private Control MT_CS_TUNE (mt_tune_abi.h): get or set the core's timing levers; perf builds only. Runs in
- * mt_pb_control's critical section (interrupts masked, the core not entered: in_core is only set inside it). */
+ * mt_pb_control's critical section (under the core gate: mt_os_irq_save = MT_GATE_ENTER; the core is not entered, in_core is only set inside it). */
 int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
     uint16_t w[MT_TW_N];
     MacPtr32 a;

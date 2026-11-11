@@ -5,7 +5,7 @@
  *   source: preset <id> | MoofTCPTune.cfg | none (the run id is no preset and there is no cfg: nothing is set),
  *   last line "RESULT OK" or "RESULT FAIL <reason>" (for example "not a tune build").
  * The levers apply to timers armed from then until the next restart. A run id that names a preset
- * (tune_parse.h) selects it; otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
+ * (tune_parse.h) selects it (a run id "a+b" applies preset a, then b, in one run); otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
  * "quickack="; a missing key keeps the current value) is read if it exists.
  * A "!!<id>" run file (mac/common/runid.h) makes the run unattended: no alert, the app quits. */
 #include <Quickdraw.h>
@@ -152,29 +152,40 @@ int main(void)
         else put_vals("before", before);
     }
     if (!reason[0]) {
+        /* "a+b+c": presets applied in that order in this one run (a sweep step and its restore in one boot);
+         * otherwise one preset, or MoofTCPTune.cfg. Each step prints its source: and the values read back. */
+        const char *tok = id;
         from_block(before, &v);
-        if (id[0] && tn_preset(id, &v)) P("source: preset %s\r", id);
-        else if ((clen = read_cfg(cfg, 512)) >= 0) {
-            int k = tn_parse_cfg(cfg, clen, &v, err, (int)sizeof err);
-            if (k < 0) sprintf(reason, "MoofTCPTune.cfg: %s", err);
-            else P("source: MoofTCPTune.cfg (%d keys)\r", k);
-        } else P("source: none (run id '%s' is no preset, no MoofTCPTune.cfg)\r", id);
-    }
-    if (!reason[0]) {
-        memcpy(want, before, sizeof want);
-        to_block(&v, want);
-        r = tune_call(ref, want, MT_TUNE_OP_SET);
-        if (r != 0) sprintf(reason, "driver refused the values (Control %d)", (int)r);
-    }
-    if (!reason[0]) {
-        memset(after, 0, sizeof after);
-        r = tune_call(ref, after, MT_TUNE_OP_GET);
-        if (r != 0) sprintf(reason, "read back failed (Control %d)", (int)r);
-        else {
+        for (;;) {
+            char one[24];
+            const char *plus = strchr(tok, '+');
+            size_t tl = plus ? (size_t)(plus - tok) : strlen(tok);
+            int is_preset;
+            if (tl >= sizeof one) tl = sizeof one - 1;
+            memcpy(one, tok, tl);
+            one[tl] = 0;
+            is_preset = one[0] && tn_preset(one, &v);
+            if (is_preset) P("source: preset %s\r", one);
+            else if (plus) sprintf(reason, "unknown preset '%s' in the run id", one);
+            else if ((clen = read_cfg(cfg, 512)) >= 0) {
+                int k = tn_parse_cfg(cfg, clen, &v, err, (int)sizeof err);
+                if (k < 0) sprintf(reason, "MoofTCPTune.cfg: %s", err);
+                else P("source: MoofTCPTune.cfg (%d keys)\r", k);
+            } else P("source: none (run id '%s' is no preset, no MoofTCPTune.cfg)\r", id);
+            if (reason[0]) break;
+            memcpy(want, before, sizeof want);
+            to_block(&v, want);
+            r = tune_call(ref, want, MT_TUNE_OP_SET);
+            if (r != 0) { sprintf(reason, "driver refused the values (Control %d)", (int)r); break; }
+            memset(after, 0, sizeof after);
+            r = tune_call(ref, after, MT_TUNE_OP_GET);
+            if (r != 0) { sprintf(reason, "read back failed (Control %d)", (int)r); break; }
             put_vals("after", after);
             to_block(&v, want);
             for (i = MT_TW_RTO_MIN; i <= MT_TW_QUICKACK; i++)
                 if (after[i] != want[i]) strcpy(reason, "values read back differ from those set");
+            if (reason[0] || !plus) break;
+            tok = plus + 1;
         }
     }
     ok = reason[0] == 0;

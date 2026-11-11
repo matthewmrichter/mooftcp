@@ -12,9 +12,7 @@
  * the release configurations leave this file out (CMakeLists.txt). Each connection is established at now=0
  * (peer MSS 1460, window 8192; the whole buffer is the receive ring). */
 
-#ifndef MT_TUNE
-int main(void) { return 0; }
-#else
+#ifdef MT_TUNE
 
 static const uint8_t MSS1460[4] = {2, 4, 0x05, 0xB4};
 
@@ -148,11 +146,9 @@ static void test_quickack_255_never_arms_delack(void) {
     /* 300 small segments, past the 255 of the default counter width: each is ACKed before mt_input returns */
     for (i = 0; i < 300; i++) {
         uint32_t off = (uint32_t)i * 100u;
-        int before;
         fake_clear(&fl);
-        before = 0;
         inject(&c, c.ps + off, c.ms, TF_ACK, dat, 100, 10 + (uint32_t)i);
-        T_EQ(fl.n, before + 1);
+        T_EQ(fl.n, 1);
         T_CHECK(!(c.t->tmask & (1u << MT_TT_DELACK)));
         mt_tcp_consume(c.t, 100, 10 + (uint32_t)i);
     }
