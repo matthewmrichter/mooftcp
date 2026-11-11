@@ -13,7 +13,7 @@
 #                                         with --debug, "Installer Dbg" and ":MoofTCP Installer Debug" = SPEC,
 #                                         e.g. I4 / R2) into ":MoofTCP Test:"; --prefs: a "MoofTCP Prefs" for
 #                                         Snow's NAT into the System Folder; snapshot "before"
-#   installer-test.sh scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|look>   run a scenario end to end (Install/
+#   installer-test.sh scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|auto|look>   run a scenario end to end (Install/
 #                                         Remove through the GUI with xdotool, docs/dev/EMULATOR.md); screenshots
 #                                         and snapshots go to build-mac/installer-test/
 # Scenarios: 1 golden Install then Remove, byte-identical trio; 2 MacTCP absent; 3 Install twice, Remove
@@ -24,6 +24,13 @@
 # One installer for both variants (docs/dev/DHCP-DESIGN.md section 10): every scenario checks that the checkbox
 # "Lite version (no DHCP)" starts off and leaves it off (the full MoofTCP), except: 5a-lite / 5b-lite tick it
 # (MoofTCP Lite; 5a-lite ends with the Lite MoofDiag, 5b-lite checks the installed file before Remove);
+# auto: the unattended installer through MoofAgent (run it as `flock /tmp/mooftcp-snow.lock scripts/installer-test.sh
+# scenario auto`): MoofAgent 0.5 (port 17150, `--control ''`, never the resident server) starts at boot from a
+# MoofAgent folder with the installer renamed "MoofTCPInstall", MoofDiag and MoofBatch; moofctl's mooftcp plugin
+# (scripts/moofctl-plugins/mooftcp.py) then runs `switch mooftcp --prefs <mkprefs 10.0.0.2>` (MoofDiag must say
+# MoofTCP), `switch mactcp` (MacTCP), `switch mactcp` again (no restart) and `switch mooftcp` again (reinstall,
+# MoofTCP). Needs the moofagent repo (MOOFCTL, MOOFAGENT_BIN) and a "Finder Startup" file that opens MoofAgent at
+# boot (MT_FINDER_STARTUP, a MacBinary file; default: taken from MoofPort's trial.hda, where Set Startup was done).
 # 8 switches through the GUI by Install alone (no Remove): full -> Lite -> full -> Lite, checking the file after
 # each and running the matching MoofDiag after the last two (RESULT PASS; the wrong variant prints VARIANT
 # MISMATCH); look: screenshots of the window (box off, then on).
@@ -668,15 +675,89 @@ scenario7() {  # a locked MacTCP file: Install refuses with the planner's messag
   result $rc 7
 }
 
+AUTO_PORT=17150
+MOOFAGENT_DIR="${MOOFAGENT_DIR:-$HOME/projects/moofagent}"
+MOOFCTL="${MOOFCTL:-$MOOFAGENT_DIR/scripts/moofctl.py}"
+MOOFAGENT_BIN="${MOOFAGENT_BIN:-$MOOFAGENT_DIR/build-mac/MoofAgent.bin}"
+MOOFBATCH_BIN="${MOOFBATCH_BIN:-$HOME/projects/moofport/build-mac/MoofBatch.bin}"
+MT_FINDER_STARTUP="${MT_FINDER_STARTUP:-}"
+# moofctl on Snow's agent: never the resident server (--control ''), port 17150
+mctl() { python3 -I "$MOOFCTL" --port "$AUTO_PORT" --control '' --connect-timeout 300 --out "$OUT/auto" --plugins "$ROOT/scripts/moofctl-plugins" "$@"; }
+
+auto_kit_body() {  # the MoofAgent folder and the Finder Startup file that opens it
+  local mf="$1"
+  hmkdir ":MoofAgent"
+  hcopy -m "$MOOFAGENT_BIN" ":MoofAgent:"
+  hcopy -m "$APP" ":MoofAgent:"
+  hrename ":MoofAgent:MoofTCP Installer" ":MoofAgent:MoofTCPInstall"
+  hcopy -m "$ROOT/$BM/moofdiag/MoofDiag.bin" ":MoofAgent:"
+  [ ! -f "$MOOFBATCH_BIN" ] || hcopy -m "$MOOFBATCH_BIN" ":MoofAgent:"
+  printf '172.17.0.1 %s' "$AUTO_PORT" | hcopy -t - ":MoofAgent:MoofAgent.cfg"
+  hdel ":System Folder:Finder Startup" 2>/dev/null || true
+  hcopy -m "$mf" ":System Folder:"
+}
+extract_finder_startup_body() { hcopy -m ":System Folder:Finder Startup" "$1"; }
+
+# auto_step <label> <expected exit> <grep pattern in the moofctl output|-> -- <moofctl args...>
+auto_step() {
+  local label="$1" want="$2" pat="$3" rc=0 log="$OUT/auto-$1.log"; shift 4
+  mctl "$@" > "$log" 2>&1 || rc=$?
+  sed 's/^/    /' "$log"
+  if [ "$rc" -ne "$want" ]; then echo "STEP $label: FAIL exit $rc, wanted $want"; return 1; fi
+  if [ "$pat" != - ] && ! grep -Eq -- "$pat" "$log"; then echo "STEP $label: FAIL, no line matching '$pat'"; return 1; fi
+  echo "STEP $label: PASS"
+}
+# the first "stack:" line of MoofDiag-sw-<target>.out must match
+auto_stack() {
+  local f="$OUT/auto/MoofDiag-sw-$1.out" line
+  line="$(tr '\r' '\n' < "$f" | grep -m1 -E '^stack: (MoofTCP|MacTCP|none)')" || { echo "STACK $1: FAIL no stack: line"; return 1; }
+  if echo "$line" | grep -Eq -- "$2"; then echo "STACK $1: PASS ($line)"; else echo "STACK $1: FAIL ($line)"; return 1; fi
+}
+
+scenario_auto() {
+  local rc=0 mf="$OUT/finder-startup.bin"
+  [ -f "$MOOFCTL" ] && [ -f "$MOOFAGENT_BIN" ] || die "auto: needs the moofagent repo (MOOFCTL=$MOOFCTL, MOOFAGENT_BIN=$MOOFAGENT_BIN)"
+  scripts/build-mac.sh MoofDiag >/dev/null
+  [ -f "$APP" ] && [ -f "$ROOT/$BM/moofdiag/MoofDiag.bin" ] || die "build first: scripts/build-mac.sh MoofInstaller; scripts/build-mac.sh MoofDiag"
+  mkdir -p "$OUT/auto"; rm -f "$OUT"/auto/*
+  if [ -n "$MT_FINDER_STARTUP" ]; then cp "$MT_FINDER_STARTUP" "$mf"
+  else
+    local base="$HOME/.local/share/moofport/disks/trial.hda" vol
+    [ -f "$base" ] || die "auto: set MT_FINDER_STARTUP to a Finder Startup file (MacBinary) that opens MoofAgent"
+    cp "$base" "$OUT/trial-copy.hda"
+    vol="$(hmount "$OUT/trial-copy.hda" | sed -n 's/^Volume name is "\(.*\)"$/\1/p')"
+    extract_finder_startup_body "$mf"; humount "$vol:" >/dev/null 2>&1 || true
+    rm -f "$OUT/trial-copy.hda"
+  fi
+  scripts/mkprefs.sh --ip 10.0.0.2 --mask 255.0.0.0 --gw 10.0.0.1 --dns 1.1.1.1 >/dev/null
+  need_stopped
+  scripts/fresh-disk.sh >/dev/null
+  python3 -I scripts/mf-startup.py "$IMG" multifinder
+  with_volume auto_kit_body "$mf"
+  boot
+  mctl ping | sed 's/^/    /' || { echo "auto: the agent did not call"; return 1; }
+  auto_step switch-mooftcp 0 'switch mooftcp: done' -- mooftcp switch mooftcp --prefs "$ROOT/build-mac/prefs/MoofTCP Prefs.bin" || rc=1
+  auto_stack mooftcp '^stack: MoofTCP [^ ]+ full$' || rc=1
+  auto_step switch-mactcp 0 'switch mactcp: done' -- mooftcp switch mactcp || rc=1
+  auto_stack mactcp '^stack: MacTCP' || rc=1
+  auto_step switch-mactcp-again 0 'nothing changed: no restart' -- mooftcp switch mactcp || rc=1
+  auto_stack mactcp '^stack: MacTCP' || rc=1
+  auto_step switch-mooftcp-again 0 'switch mooftcp: done' -- mooftcp switch mooftcp || rc=1
+  auto_stack mooftcp '^stack: MoofTCP [^ ]+ full$' || rc=1
+  grep -q '^RESULT MoofTCP .* is installed\.' <(tr '\r' '\n' < "$OUT/auto/MoofTCPInstall-sw-mooftcp.out") || { echo "RESULT line of the last install missing"; rc=1; }
+  stop
+  result $rc auto
+}
+
 case "${1:-}" in
   snap) [ $# -eq 2 ] || die "snap <label>"; cmd_snap "$2";;
   compare) [ $# -ge 3 ] && [ $# -le 5 ] || die "compare <a> <b> [full|nofolder|attrs] [name]"; shift; cmd_compare "$@";;
   prep) shift; cmd_prep "$@";;
   scenario)
-    [ $# -eq 2 ] || die "scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|look>"
+    [ $# -eq 2 ] || die "scenario <1|2|3|4|5a|5a-lite|5b|5b-lite|7|8|auto|look>"
     trap stop EXIT
     case "$2" in 1) scenario1;; 2) scenario2;; 3) scenario3;; 4) scenario4;; 5a) scenario5a;; 5b) scenario5b;; 7) scenario7;;
-      5a-lite) scenario5a lite;; 5b-lite) scenario5b lite;; 8) scenario8;; look) scenario_look;;
+      5a-lite) scenario5a lite;; 5b-lite) scenario5b lite;; 8) scenario8;; auto) scenario_auto;; look) scenario_look;;
       *) die "unknown scenario $2";; esac;;
   interrupt) [ $# -eq 4 ] || die "interrupt <name> <I|R><N> <remove|install>"; trap stop EXIT; interrupt1 "$2" "$3" "$4";;
   *) sed -n '2,30p' "$0"; exit 2;;

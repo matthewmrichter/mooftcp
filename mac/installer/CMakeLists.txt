@@ -3,7 +3,7 @@
 #
 # mtinst68k: the portable planner and executor (inst_plan.c, inst_exec.c), built so the Retro68 gate
 # compiles them with -m68000 -Werror (host tests: tests/test_inst_plan.c, tests/test_inst_exec.c).
-add_library(mtinst68k STATIC inst_plan.c inst_exec.c)
+add_library(mtinst68k STATIC inst_plan.c inst_exec.c inst_auto.c)
 target_include_directories(mtinst68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(mtinst68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
@@ -39,9 +39,10 @@ add_custom_command(
 
 # "MoofTCP Installer" (type APPL, creator mtin, hasBundle). `scripts/build-mac.sh MoofInstaller` builds
 # build-mac/installer/MoofTCP Installer.bin.
-add_application(MoofInstallerApp installer_main.c inst_exec_mac.c ${INST_RSRC}
+add_application(MoofInstallerApp installer_main.c inst_exec_mac.c ../common/runid.c ../common/runid_parse.c ${INST_RSRC}
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
 target_link_libraries(MoofInstallerApp mtinst68k)
+target_include_directories(MoofInstallerApp PRIVATE ../common)
 target_compile_options(MoofInstallerApp PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=c99 -O2 -Wall -Wextra -Werror>)
 add_dependencies(MoofInstallerApp_APPL MoofTCP_APPL)
 add_custom_command(
@@ -54,10 +55,11 @@ add_custom_target(MoofInstaller_APPL ALL DEPENDS "MoofTCP Installer.bin")
 # Debug variant (never shipped): MT_INST_DEBUG=1 reads a stop-after-N-changes count from the file
 # ":MoofTCP Installer Debug" at the root of the startup disk (the interruption test, "[I|R]N").
 # build-mac/installer/Installer Dbg.bin.
-add_application(MoofInstallerDbgApp installer_main.c inst_exec_mac.c
+add_application(MoofInstallerDbgApp installer_main.c inst_exec_mac.c ../common/runid.c ../common/runid_parse.c
                 ${INST_RSRC}
                 ${CMAKE_CURRENT_BINARY_DIR}/embed.rsrc.bin CREATOR "mtin")
 target_link_libraries(MoofInstallerDbgApp mtinst68k)
+target_include_directories(MoofInstallerDbgApp PRIVATE ../common)
 target_compile_definitions(MoofInstallerDbgApp PRIVATE MT_INST_DEBUG=1)
 target_compile_options(MoofInstallerDbgApp PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=c99 -O2 -Wall -Wextra -Werror>)
 add_dependencies(MoofInstallerDbgApp_APPL MoofInstallerApp_APPL)

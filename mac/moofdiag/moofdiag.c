@@ -26,6 +26,7 @@
 #include "mt_drv.h"
 #include "diag_streams.h"
 #include "runid.h"
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* before mt_units.h: its low-memory reads are inlined into main */
 #include "mt_units.h"
 #include <stddef.h>
 
@@ -200,7 +201,14 @@ int main(void)
         CntrlParam pb;
         MtRes *m = NULL;
         memset(&pb, 0, sizeof pb);
-        if (r == 0) {
+        const uint8_t *dce0 = NULL, *drv0 = r == 0 ? mt_units_find_ipp_dce(&dce0) : NULL;
+        if (r == 0 && drv0 && !mt_units_is_moof(drv0)) {
+            /* MacTCP's own driver is open: never send it our private Status code (the unit table says whose driver it
+             * is, as in the control panel). Under real MacTCP in Snow that call never returned and hung the run. */
+            P("stack: MacTCP (no MoofTCP status)\r");           /* the harness reads this line to learn which stack is live */
+            P("Status('MT') not sent: the unit's driver is not MoofTCP\r");
+            r = -1;
+        } else if (r == 0) {
             pb.ioCRefNum = ref;
             pb.csCode = MT_DRV_STATUS_RES;
             r = PBStatusSync((ParmBlkPtr)&pb);

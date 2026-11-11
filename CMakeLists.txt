@@ -57,7 +57,8 @@ target_link_libraries(mtcdev PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtcdev)
 
 # Installer planner and executor (mac/installer/inst_plan.c, inst_exec.c, portable), host-built.
-add_library(mtinst STATIC ${CMAKE_SOURCE_DIR}/mac/installer/inst_plan.c ${CMAKE_SOURCE_DIR}/mac/installer/inst_exec.c)
+add_library(mtinst STATIC ${CMAKE_SOURCE_DIR}/mac/installer/inst_plan.c ${CMAKE_SOURCE_DIR}/mac/installer/inst_exec.c
+            ${CMAKE_SOURCE_DIR}/mac/installer/inst_auto.c)
 target_include_directories(mtinst PUBLIC ${CMAKE_SOURCE_DIR}/mac/installer)
 target_link_libraries(mtinst PUBLIC ${MT_TEST_LIBS})
 set(MT_TEST_LIBS mtinst)
@@ -87,4 +88,6 @@ endforeach()
 find_program(MT_PYTHON3 python3)
 if(MT_PYTHON3)
   add_test(NAME test_keylat_py COMMAND ${MT_PYTHON3} ${CMAKE_SOURCE_DIR}/tests/test_keylat.py)
+  # the moofctl plugin (scripts/moofctl-plugins/mooftcp.py); skipped when moofagent's moofctl.py is not found
+  add_test(NAME test_mooftcp_plugin COMMAND ${MT_PYTHON3} -I ${CMAKE_SOURCE_DIR}/scripts/moofctl-plugins/test_mooftcp_plugin.py)
 endif()

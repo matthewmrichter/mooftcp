@@ -15,6 +15,15 @@
  * and releases it. The checkbox starts ticked only when MoofTCP Lite is what is installed now, so a
  * plain Install never swaps the variant by accident; otherwise it starts off (full is the default).
  *
+ * Unattended (MoofAgent's runs; the run file "Agent Run" starts with "!!", runid_unattended): no window, no alert,
+ * no restart question. The installer reads and deletes "MoofTCPInstall.cfg" beside itself (one line,
+ * inst_auto.h: install | remove | reinstall, with lite and prefs), does what it says with the same
+ * inst_do_install / inst_do_remove the buttons use, and writes "MoofTCPInstall-<id>.out": line 1 names the
+ * installer and the variant it was asked for, then one line per step, last "RESULT <message>" (the
+ * inst_message text). scripts/moofctl-plugins/mooftcp.py reads it. A run without a valid cfg changes nothing.
+ * Without a "!" run file the installer behaves as before: runid_name would open a dialog (DLOG 200) that this
+ * application has no resource for, so it is called only when the run file starts with '!'.
+ *
  * Debug builds (MT_INST_DEBUG=1, target MoofInstallerDbg, never shipped) read "[I|R]N" (N decimal)
  * from the data fork of the file "MoofTCP Installer Debug" at the root of the startup disk and stop
  * every run (I: only Install, R: only Remove) after N file system changes (the interruption test,
@@ -37,6 +46,8 @@
 #include <string.h>
 #include "inst_exec.h"
 #include "inst_exec_mac.h"
+#include "inst_auto.h"
+#include "runid.h"
 
 #pragma GCC diagnostic ignored "-Warray-bounds"
 #define LM_BOOTDRIVE (*(volatile short *)0x210)
@@ -131,12 +142,64 @@ static void ask_restart(void) {
     note("Choose Restart from the Special menu in the Finder to use the change.");
 }
 
+/* Remove on *fs: the message into buf (at most 255 characters), the result into *r; returns 1 when the
+ * disk changed and a restart is due (inst_message). Shared by the window and the unattended run. */
+static int remove_now(const InstFs *fs, char *buf, InstResult *r) {
+    (void)inst_do_remove(fs, g_stop_only == 'I' ? 0 : g_stop, r);
+    return inst_message(r, VERS_STR, buf, 256);
+}
+
+/* Install on *fs with the embedded MoofTCP of the variant `lite` (RID_FULL / RID_LITE): as remove_now. */
+static int install_now(const InstFs *fs, int lite, char *buf, InstResult *r) {
+    InstPayload pl;
+    Handle hr = NULL, hd = NULL, hi = NULL;
+    InstVers v;
+    short id = lite ? RID_LITE : RID_FULL;
+    int restart = 0;
+
+    memset(&pl, 0, sizeof pl);
+    memset(r, 0, sizeof *r);
+    hr = GetResource('MTCP', id);
+    hi = GetResource('MTCI', id);
+    SetResLoad(false);
+    hd = GetResource('MTCD', id);                           /* optional: look up without loading */
+    SetResLoad(true);
+    if (hd) LoadResource(hd);
+    if (!hr || !hi || GetHandleSize(hi) < 10 || (hd && !*hd)) {
+        strcpy(buf, "There is not enough memory to install MoofTCP (or this copy of the installer is damaged). Nothing was changed.");
+    } else {
+        HLock(hr); HLock(hi);
+        if (hd) HLock(hd);
+        if (inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != lite) {
+            /* the file under this id must be the variant the box names (scripts/mkembed.py checks it at build time too) */
+            strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
+        } else {
+            pl.rsrc = (const uint8_t *)*hr; pl.rlen = GetHandleSize(hr);
+            pl.data = hd ? (const uint8_t *)*hd : NULL; pl.dlen = hd ? GetHandleSize(hd) : 0;
+            pl.type = be32((const unsigned char *)*hi);
+            pl.creator = be32((const unsigned char *)*hi + 4);
+            pl.flags = (uint16_t)((((const unsigned char *)*hi)[8] << 8) | ((const unsigned char *)*hi)[9]);
+            (void)inst_do_install(fs, &pl, g_stop_only == 'R' ? 0 : g_stop, r);
+            restart = inst_message(r, VERS_STR, buf, 256);
+        }
+    }
+    if (hr) { HUnlock(hr); ReleaseResource(hr); }
+    if (hd) { HUnlock(hd); ReleaseResource(hd); }
+    if (hi) { HUnlock(hi); ReleaseResource(hi); }
+    return restart;
+}
+
+/* The text for a failed inst_mac_fs (rc). */
+static const char *no_fs_text(int rc) {
+    return rc == INST_MAC_NOT_HFS ? "The startup disk is not an HFS disk. Nothing was changed."
+           : rc == INST_MAC_NO_SYSFOLDER ? "The startup disk has no System Folder. Nothing was changed."
+           : "The startup disk could not be read. Nothing was changed.";
+}
+
 static void run(int remove) {
     InstFs fs;
     InstMacCtx mc;
-    InstPayload pl;
     InstResult r;
-    Handle hr = NULL, hd = NULL, hi = NULL;
     char buf[256];
     int rc, restart = 0;
 
@@ -144,51 +207,188 @@ static void run(int remove) {
     DrawDialog(g_dlg);                      /* now: the run is synchronous, no update event comes before it ends */
     SetCursor(*GetCursor(watchCursor));
     rc = inst_mac_fs(&fs, &mc);
-    if (rc) {
-        strcpy(buf, rc == INST_MAC_NOT_HFS ? "The startup disk is not an HFS disk. Nothing was changed."
-                    : rc == INST_MAC_NO_SYSFOLDER ? "The startup disk has no System Folder. Nothing was changed."
-                    : "The startup disk could not be read. Nothing was changed.");
-    } else if (remove) {
-        (void)inst_do_remove(&fs, g_stop_only == 'I' ? 0 : g_stop, &r);
-        restart = inst_message(&r, VERS_STR, buf, sizeof buf);
-    } else {
-        memset(&pl, 0, sizeof pl);
-        short id = g_lite ? RID_LITE : RID_FULL;
-        InstVers v;
-        hr = GetResource('MTCP', id);
-        hi = GetResource('MTCI', id);
-        SetResLoad(false);
-        hd = GetResource('MTCD', id);                           /* optional: look up without loading */
-        SetResLoad(true);
-        if (hd) LoadResource(hd);
-        if (!hr || !hi || GetHandleSize(hi) < 10 || (hd && !*hd)) {
-            strcpy(buf, "There is not enough memory to install MoofTCP (or this copy of the installer is damaged). Nothing was changed.");
-        } else {
-            HLock(hr); HLock(hi);
-            if (hd) HLock(hd);
-            if (inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != g_lite) {
-                /* the file under this id must be the variant the box names (scripts/mkembed.py checks it at build time too) */
-                strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
-            } else {
-                pl.rsrc = (const uint8_t *)*hr; pl.rlen = GetHandleSize(hr);
-                pl.data = hd ? (const uint8_t *)*hd : NULL; pl.dlen = hd ? GetHandleSize(hd) : 0;
-                pl.type = be32((const unsigned char *)*hi);
-                pl.creator = be32((const unsigned char *)*hi + 4);
-                pl.flags = (uint16_t)((((const unsigned char *)*hi)[8] << 8) | ((const unsigned char *)*hi)[9]);
-                (void)inst_do_install(&fs, &pl, g_stop_only == 'R' ? 0 : g_stop, &r);
-                restart = inst_message(&r, VERS_STR, buf, sizeof buf);
-            }
-        }
-        if (hr) { HUnlock(hr); ReleaseResource(hr); }
-        if (hd) { HUnlock(hd); ReleaseResource(hd); }
-        if (hi) { HUnlock(hi); ReleaseResource(hi); }
-    }
+    if (rc) strcpy(buf, no_fs_text(rc));
+    else if (remove) restart = remove_now(&fs, buf, &r);
+    else restart = install_now(&fs, g_lite, buf, &r);
     InitCursor();
     set_item_text(IT_MSG, buf);
     if (restart) {
         DrawDialog(g_dlg);                                      /* the result stays visible behind the alert */
         ask_restart();
     }
+}
+
+/* ---- unattended run ---- */
+
+#define CFG_NAME "\pMoofTCPInstall.cfg"
+#define PREFS_NAME "MoofTCP Prefs"
+
+static short g_outref = -1;
+
+static void wr(const char *s) {
+    long n = (long)strlen(s);
+    if (g_outref >= 0) (void)FSWrite(g_outref, &n, (Ptr)s);
+}
+
+static void wrn(long v) {
+    char b[16];
+    int i = 15;
+    int neg = v < 0;
+    unsigned long u = neg ? (unsigned long)(-v) : (unsigned long)v;
+    b[i] = 0;
+    do { b[--i] = (char)('0' + u % 10); u /= 10; } while (u && i > 1);
+    if (neg) b[--i] = '-';
+    wr(b + i);
+}
+
+/* 1 if the run file ("Agent Run", else "MoofPort Run") exists and starts with '!' (see the top comment). */
+static int has_run_file(void) {
+    static const char *const names[2] = { RUNID_FILE, RUNID_FILE_OLD };
+    int k;
+    for (k = 0; k < 2; k++) {
+        short r;
+        long len = 1;
+        char c = 0;
+        if (FSOpen((ConstStr255Param)names[k], 0, &r) != noErr) continue;
+        if (FSRead(r, &len, &c) != noErr && len <= 0) c = 0;
+        FSClose(r);
+        return c == '!';
+    }
+    return 0;
+}
+
+/* Read and delete MoofTCPInstall.cfg beside the installer. 0 = valid (*a filled), -1 = missing or bad. */
+static int read_cfg(InstAuto *a) {
+    short r;
+    long len = 63;
+    char buf[64];
+    int rc;
+    a->action = IA_NONE; a->lite = a->prefs = 0;
+    if (FSOpen((ConstStr255Param)CFG_NAME, 0, &r) != noErr) return -1;
+    if (FSRead(r, &len, (Ptr)buf) != noErr && len <= 0) len = 0;
+    FSClose(r);
+    (void)FSDelete((ConstStr255Param)CFG_NAME, 0);
+    rc = inst_auto_parse(buf, len, a);
+    return rc;
+}
+
+/* One fork of the file "MoofTCP Prefs" beside the installer into a new block (*p, *len); 0 or an OSErr. */
+static int read_own_fork(int rsrc, Ptr *p, long *len) {
+    short r;
+    int rc;
+    *p = NULL; *len = 0;
+    rc = rsrc ? OpenRF((ConstStr255Param)"\pMoofTCP Prefs", 0, &r) : FSOpen((ConstStr255Param)"\pMoofTCP Prefs", 0, &r);
+    if (rc) return rc;
+    rc = GetEOF(r, len);
+    if (!rc && (*len < 0 || *len > 32000)) rc = -50;                /* far larger than any prefs file */
+    if (!rc && *len > 0) {
+        *p = NewPtr(*len);
+        if (!*p) rc = -108;
+        else {
+            long n = *len;
+            rc = FSRead(r, &n, *p);
+            if (rc == eofErr && n == *len) rc = 0;
+        }
+    }
+    FSClose(r);
+    if (rc && *p) { DisposePtr(*p); *p = NULL; }
+    return rc;
+}
+
+/* Copy "MoofTCP Prefs" (both forks, type and creator) from the installer's folder over the System Folder's.
+ * Logs what it did; returns 0, or fills why (the RESULT text) and returns 1. */
+static int copy_prefs(const InstFs *fs, char *why) {
+    FInfo fi;
+    InstInfo ii;
+    Ptr d = NULL, r = NULL;
+    long dl = 0, rl = 0;
+    int rc, existed;
+    if (GetFInfo((ConstStr255Param)"\pMoofTCP Prefs", 0, &fi) != noErr) {
+        strcpy(why, "The file \"MoofTCP Prefs\" is not in the installer's folder. Nothing was changed.");
+        return 1;
+    }
+    if ((rc = read_own_fork(0, &d, &dl)) != 0 || (rc = read_own_fork(1, &r, &rl)) != 0) {
+        strcpy(why, "The file \"MoofTCP Prefs\" in the installer's folder could not be read. Nothing was changed.");
+        wr("prefs: read error "); wrn(rc); wr("\r");
+        if (d) DisposePtr(d);
+        return 1;
+    }
+    existed = fs->info(fs->ctx, fs->sysdir, PREFS_NAME, &ii) == 0;
+    rc = existed ? 0 : fs->create(fs->ctx, fs->sysdir, PREFS_NAME);
+    if (!rc) rc = fs->write(fs->ctx, fs->sysdir, PREFS_NAME, 0, (const uint8_t *)d, dl);
+    if (!rc) rc = fs->write(fs->ctx, fs->sysdir, PREFS_NAME, 1, (const uint8_t *)r, rl);
+    if (!rc) rc = fs->setinfo(fs->ctx, fs->sysdir, PREFS_NAME, (uint32_t)fi.fdType, (uint32_t)fi.fdCreator, 0);
+    if (!rc) rc = fs->flush(fs->ctx);
+    if (d) DisposePtr(d);
+    if (r) DisposePtr(r);
+    if (rc) {
+        strcpy(why, "The file \"MoofTCP Prefs\" could not be copied into the System Folder (error ");
+        /* the number goes after the text */
+        {
+            char n[12];
+            int i = 11;
+            long v = rc < 0 ? -(long)rc : rc;
+            n[i] = 0;
+            do { n[--i] = (char)('0' + v % 10); v /= 10; } while (v && i > 1);
+            if (rc < 0) n[--i] = '-';
+            strcat(why, n + i);
+        }
+        strcat(why, "). The installer did not go on.");
+        wr("prefs: copy failed, error "); wrn(rc); wr("\r");
+        return 1;
+    }
+    wr("prefs: copied \"MoofTCP Prefs\" (data fork "); wrn(dl); wr(" bytes, resource fork "); wrn(rl);
+    wr(" bytes, type/creator kept) into the System Folder, ");
+    wr(existed ? "replacing the file there\r" : "no file was there before\r");
+    return 0;
+}
+
+/* The status and message of a finished Remove that lets a reinstall go on to the Install. */
+static int remove_cleared(const InstResult *r) {
+    return r->status == INST_X_OK &&
+           (r->msg == INST_REMOVED_RESTORED || r->msg == INST_REMOVED_NO_MACTCP || r->msg == INST_NOTHING_TO_REMOVE);
+}
+
+static void auto_run(const unsigned char *oname) {
+    static const char *const verb[] = { "none", "install", "remove", "reinstall" };
+    InstAuto a;
+    InstFs fs;
+    InstMacCtx mc;
+    InstResult r;
+    char buf[256];
+    int rc;
+
+    (void)FSDelete((ConstStringPtr)oname, 0);
+    Create((ConstStringPtr)oname, 0, 'ttxt', 'TEXT');
+    if (FSOpen((ConstStringPtr)oname, 0, &g_outref)) g_outref = -1;
+    else SetEOF(g_outref, 0);
+    rc = read_cfg(&a);
+    wr("MoofTCP Installer " VERS_STR " "); wr(a.lite ? "lite" : "full"); wr("\r");
+    if (rc) {
+        wr("cfg: MoofTCPInstall.cfg is missing or not valid (install|remove|reinstall [lite] [prefs])\r");
+        strcpy(buf, "Unattended run without a valid MoofTCPInstall.cfg. Nothing was changed.");
+    } else {
+        wr("cfg: "); wr(verb[a.action]); if (a.lite) wr(" lite"); if (a.prefs) wr(" prefs"); wr(" (read and deleted)\r");
+        rc = inst_mac_fs(&fs, &mc);
+        if (rc) {
+            strcpy(buf, no_fs_text(rc));
+        } else if (a.prefs && copy_prefs(&fs, buf)) {
+            /* buf says why */
+        } else {
+            if (a.action == IA_REMOVE || a.action == IA_REINSTALL) {
+                (void)remove_now(&fs, buf, &r);
+                wr("remove: "); wr(buf); wr("\r");
+                if (a.action == IA_REINSTALL && !remove_cleared(&r)) a.action = IA_REMOVE;   /* stop: buf is the result */
+            }
+            if (a.action == IA_INSTALL || a.action == IA_REINSTALL) {
+                (void)install_now(&fs, a.lite, buf, &r);
+                wr("install: "); wr(buf); wr("\r");
+            }
+        }
+    }
+    wr("RESULT "); wr(buf); wr("\r");
+    if (g_outref >= 0) { FSClose(g_outref); g_outref = -1; }
+    FlushVol(NULL, 0);
 }
 
 #if MT_INST_DEBUG
@@ -268,6 +468,11 @@ int main(void) {
 #if MT_INST_DEBUG
     g_stop = read_debug_count();
 #endif
+    if (has_run_file()) {
+        unsigned char oname[40];
+        runid_name("MoofTCPInstall", ".out", oname);        /* no dialog: the run file starts with '!' */
+        if (runid_unattended()) { auto_run(oname); return 0; }
+    }
     setup_menus();
     g_dlg = GetNewDialog(DLG_MAIN, NULL, (WindowPtr)-1);
     if (!g_dlg) { SysBeep(5); return 0; }
