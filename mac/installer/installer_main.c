@@ -189,6 +189,38 @@ static int install_now(const InstFs *fs, int lite, char *buf, InstResult *r) {
     return restart;
 }
 
+/* Is the embedded MoofTCP of this variant there and the right one? Looks at it and lets it go; changes nothing.
+ * 0 = ok, else 1 with the install_now text in buf. The unattended run asks this before it touches the disk. */
+static int payload_bad(int lite, char *buf) {
+    Handle hr = GetResource('MTCP', lite ? RID_LITE : RID_FULL);
+    Handle hi = GetResource('MTCI', lite ? RID_LITE : RID_FULL);
+    InstVers v;
+    int bad = 0;
+    if (!hr || !hi || GetHandleSize(hi) < 10) {
+        strcpy(buf, "There is not enough memory to install MoofTCP (or this copy of the installer is damaged). Nothing was changed.");
+        bad = 1;
+    } else {
+        HLock(hr);
+        if (inst_fork_vinfo((const uint8_t *)*hr, GetHandleSize(hr), &v) == 0 || v.variant != lite) {
+            strcpy(buf, "This copy of the installer is damaged: the MoofTCP file for this choice is not the right one. Nothing was changed.");
+            bad = 1;
+        }
+        HUnlock(hr);
+    }
+    if (hr) ReleaseResource(hr);
+    if (hi) ReleaseResource(hi);
+    return bad;
+}
+
+/* A failed step of an unattended run that says "Nothing was changed." although an earlier step of the same run did
+ * change the disk (the prefs copy, a Remove): say so instead (in place, when it fits). */
+static void say_earlier_changes(char *buf) {
+    static const char old[] = "Nothing was changed.";
+    static const char now[] = "Earlier steps of this run did change the disk.";
+    char *p = strstr(buf, old);
+    if (p && p[sizeof old - 1] == 0 && (p - buf) + (int)sizeof now <= 255) strcpy(p, now);
+}
+
 /* The text for a failed inst_mac_fs (rc). */
 static const char *no_fs_text(int rc) {
     return rc == INST_MAC_NOT_HFS ? "The startup disk is not an HFS disk. Nothing was changed."
@@ -260,7 +292,7 @@ static int has_run_file(void) {
 /* Read and delete MoofTCPInstall.cfg beside the installer. 0 = valid (*a filled), -1 = missing or bad. */
 static int read_cfg(InstAuto *a) {
     short r;
-    long len = 63;
+    long len = 64;
     char buf[64];
     int rc;
     a->action = IA_NONE; a->lite = a->prefs = 0;
@@ -268,6 +300,7 @@ static int read_cfg(InstAuto *a) {
     if (FSRead(r, &len, (Ptr)buf) != noErr && len <= 0) len = 0;
     FSClose(r);
     (void)FSDelete((ConstStr255Param)CFG_NAME, 0);
+    if (len >= (long)sizeof buf) return -1;          /* the buffer was filled: a longer file is not a cfg */
     rc = inst_auto_parse(buf, len, a);
     return rc;
 }
@@ -372,17 +405,23 @@ static void auto_run(const unsigned char *oname) {
         rc = inst_mac_fs(&fs, &mc);
         if (rc) {
             strcpy(buf, no_fs_text(rc));
+        } else if ((a.action == IA_INSTALL || a.action == IA_REINSTALL) && payload_bad(a.lite, buf)) {
+            wr("install: "); wr(buf); wr("\r");                /* checked first: nothing has been touched yet */
         } else if (a.prefs && copy_prefs(&fs, buf)) {
             /* buf says why */
         } else {
+            int changed = a.prefs;                              /* the prefs copy succeeded: the disk is different */
             if (a.action == IA_REMOVE || a.action == IA_REINSTALL) {
-                (void)remove_now(&fs, buf, &r);
+                int restart = remove_now(&fs, buf, &r);
                 wr("remove: "); wr(buf); wr("\r");
+                if (restart || r.committed > 0) changed = 1;
                 if (a.action == IA_REINSTALL && !remove_cleared(&r)) a.action = IA_REMOVE;   /* stop: buf is the result */
             }
             if (a.action == IA_INSTALL || a.action == IA_REINSTALL) {
-                (void)install_now(&fs, a.lite, buf, &r);
+                if (!install_now(&fs, a.lite, buf, &r) && changed) say_earlier_changes(buf);
                 wr("install: "); wr(buf); wr("\r");
+            } else if (a.action == IA_REMOVE && changed && !remove_cleared(&r)) {
+                say_earlier_changes(buf);
             }
         }
     }

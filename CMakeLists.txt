@@ -88,6 +88,7 @@ endforeach()
 find_program(MT_PYTHON3 python3)
 if(MT_PYTHON3)
   add_test(NAME test_keylat_py COMMAND ${MT_PYTHON3} ${CMAKE_SOURCE_DIR}/tests/test_keylat.py)
-  # the moofctl plugin (scripts/moofctl-plugins/mooftcp.py); skipped when moofagent's moofctl.py is not found
-  add_test(NAME test_mooftcp_plugin COMMAND ${MT_PYTHON3} -I ${CMAKE_SOURCE_DIR}/scripts/moofctl-plugins/test_mooftcp_plugin.py)
+  # the moofctl plugin (scripts/moofctl-plugins/mooftcp.py); exits 77 (ctest "Skipped") when moofagent's moofctl.py is not found
+  add_test(NAME test_mooftcp_plugin COMMAND ${MT_PYTHON3} -I ${CMAKE_SOURCE_DIR}/tests/test_mooftcp_plugin.py)
+  set_tests_properties(test_mooftcp_plugin PROPERTIES SKIP_RETURN_CODE 77)
 endif()

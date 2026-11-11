@@ -32,7 +32,6 @@
 
 QDGlobals qd;
 
-#pragma GCC diagnostic ignored "-Warray-bounds"
 #define UTABLE_BASE (*(uint8_t ***volatile *)0x11C)
 #define UNIT_COUNT  (*(volatile int16_t *)0x1D2)
 #define SYS_ZONE    (*(THz *)0x2A6)

@@ -7,11 +7,12 @@ import argparse
 import importlib.util
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+ROOT = os.path.normpath(os.path.join(HERE, ".."))
 CORE_PATH = os.environ.get("MOOFCTL_PY") or os.path.expanduser("~/projects/moofagent/scripts/moofctl.py")
 
 
@@ -22,7 +23,7 @@ def load(name, path):
     return m
 
 
-plug = load("mooftcp_plugin", os.path.join(HERE, "mooftcp.py"))
+plug = load("mooftcp_plugin", os.path.join(ROOT, "scripts", "moofctl-plugins", "mooftcp.py"))
 core = load("moofctl", CORE_PATH) if os.path.exists(CORE_PATH) else None
 plug.CORE = core
 
@@ -52,13 +53,17 @@ class Link:
 class Agent:
     """Records every call in `log`; answers RUN of the installer / MoofDiag from `script`."""
 
-    def __init__(self, log, installer_out, diag_stack, ran_result="done", hang=False):
+    def __init__(self, log, installer_out, diag_stack, ran_result="done", hang=False, stale=False, busy=False):
         self.log, self.installer_out, self.diag_stack = log, installer_out, diag_stack
-        self.ran_result, self.hang = ran_result, hang
+        self.ran_result, self.hang, self.busy = ran_result, hang, busy
         self.files = {}
+        self.stale = stale                  # DEL answers ERR and the old file stays
 
     def delete(self, name):
         self.log.append("delete %s" % name)
+        if self.stale:
+            self.files[name] = b"RESULT old\r"
+            raise core.AgentError("in use")
         if name not in self.files:
             raise core.AgentError("no such file")
         del self.files[name]
@@ -82,6 +87,8 @@ class Agent:
         self.log.append("run %s %s" % (tool, rid))
         if self.hang:
             raise core.Hung("no answer")
+        if self.busy:
+            raise core.AgentError("already running")
         pc = {"sent": 0.0, "answered": 1.0, "seconds": 1.0}
         if tool == "MoofDiag":
             return {"tool": tool, "id": rid, "result": "done"}, diag_text(self.diag_stack), pc
@@ -102,7 +109,8 @@ class SwitchTests(unittest.TestCase):
         self.msgs = []
 
     def switch(self, target, installer_out, stack, **kw):
-        agent = Agent(self.log, installer_out, stack, kw.pop("ran_result", "done"), kw.pop("hang", False))
+        agent = Agent(self.log, installer_out, stack, kw.pop("ran_result", "done"), kw.pop("hang", False),
+                      kw.pop("stale", False), kw.pop("busy", False))
         link = Link(self.log)
         link.agent = agent
         rc, a = plug.do_switch(core, link, agent, target, outdir=self.tmp, log=self.msgs.append, **kw)
@@ -121,7 +129,8 @@ class SwitchTests(unittest.TestCase):
     def test_mooftcp_happy_path(self):
         rc = self.switch("mooftcp", out_text(FULL_OK), "MoofTCP 1.0 full", prefs=self.prefs_file())
         self.assertEqual(rc, 0, self.msgs)
-        order = [self.log.index(self.calls(p)[0]) for p in ("push", "put", "run MoofTCPInstall", "get", "restart", "run MoofDiag")]
+        self.assertLess(self.log.index(self.calls("delete")[0]), self.log.index(self.calls("get")[0]))   # DEL, then the "gone?" check
+        order = [len(self.log) - 1 - self.log[::-1].index(self.calls(p)[-1]) for p in ("push", "put", "run MoofTCPInstall", "get", "restart", "run MoofDiag")]
         self.assertEqual(order, sorted(order))
         self.assertIn("push MoofTCP Prefs pref/ztcp", self.log)               # renamed on the way
         self.assertIn("put MoofTCPInstall.cfg 'reinstall prefs\\r'", self.log)
@@ -174,6 +183,21 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(plug.stack_line(["stack: marks 1 paint 2"]), (None, ""))
         self.assertFalse(plug.stack_ok("mooftcp", False, "MoofTCP", "unconfigured (status view not found)"))
 
+    def test_old_out_that_cannot_be_deleted_is_exit_2(self):
+        self.assertEqual(self.switch("mooftcp", out_text(FULL_OK), "MoofTCP 1.0 full", stale=True), 2)
+        self.assertEqual(self.calls("run"), [])
+        self.assertEqual(self.calls("put"), [])
+
+    def test_run_refused_is_exit_2(self):
+        self.assertEqual(self.switch("mooftcp", out_text(FULL_OK), "MoofTCP 1.0 full", busy=True), 2)
+        self.assertEqual(self.calls("restart"), [])
+
+    def test_moofdiag_version_must_match_the_installer(self):
+        self.assertEqual(self.switch("mooftcp", out_text(FULL_OK), "MoofTCP 0.9 full"), 2)
+        self.assertEqual(plug.installed_vers(FULL_OK), "1.0")
+        self.assertTrue(plug.stack_ok("mooftcp", False, "MoofTCP", "1.0 full", "1.0"))
+        self.assertFalse(plug.stack_ok("mooftcp", False, "MoofTCP", "1.0rc3 full", "1.0"))
+
     def test_hung_propagates(self):
         with self.assertRaises(core.Hung):
             self.switch("mooftcp", out_text(FULL_OK), "MoofTCP 1.0 full", hang=True)
@@ -225,14 +249,8 @@ class TableTests(unittest.TestCase):
         self.assertIn('static const char *vname', src)
 
 
-# moofctl loads every *.py in a plugin directory, this file too: it is a plugin that handles no command.
-def register(sub):
-    pass
-
-
-def dispatch(cmd, args, link, agent, log):
-    return None
-
-
 if __name__ == "__main__":
+    if core is None:           # ctest SKIP_RETURN_CODE 77: shown as "Skipped", not as a pass
+        print("SKIPPED: moofagent's moofctl.py not found at %s (set MOOFCTL_PY)" % CORE_PATH)
+        sys.exit(77)
     unittest.main()

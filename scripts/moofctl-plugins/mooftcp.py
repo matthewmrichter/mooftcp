@@ -13,8 +13,9 @@ Switches the Mac between MacTCP and MoofTCP by running MoofTCP's own installer u
   4. restart the Mac if the installer changed anything, and return only once the agent is back;
   5. RUN "MoofDiag sw-<target>" and check the first "stack:" line (MoofTCP <vers> full|lite, or MacTCP).
 Exit 0 ok, 2 a wrong result (installer or stack), 3 HUNG (from moofctl: no answer in time), 1 a bad call.
-"RAN nostart" counts as ran when a fresh RESULT line is there: the installer can finish before the agent
-looks for its .out. The core's names (do_restart, check_run_args, save_run, macbinary, parse_macbinary)
+"RAN nostart" counts as ran when a fresh RESULT line is there: the agent did not see the installer start within
+its START_WAIT, but the installer did launch later and finished; RESULT is the last line it writes, and the old
+.out was deleted first (and checked gone), so a RESULT line is proof of this run. The core's names (do_restart, check_run_args, save_run, macbinary, parse_macbinary)
 come from moofctl.py, which is __main__ under moofctl; tests set CORE.
 """
 import os
@@ -92,11 +93,19 @@ def stack_line(text_lines):
     return None, ""
 
 
-def stack_ok(target, lite, kind, rest):
+def stack_ok(target, lite, kind, rest, vers=None):
+    """vers: the version the installer reported; MoofDiag's must be the same (the file it read is the one installed)."""
     if target == "mactcp":
         return kind == "MacTCP"
     m = re.fullmatch(r"(\S+) (full|lite)", rest)
-    return kind == "MoofTCP" and m is not None and m.group(2) == ("lite" if lite else "full")
+    return (kind == "MoofTCP" and m is not None and m.group(2) == ("lite" if lite else "full")
+            and (vers is None or m.group(1) == vers))
+
+
+def installed_vers(result):
+    """The version in an "is installed" RESULT, or None."""
+    m = re.match(INSTALLED[0], result or "")
+    return m.group(2) if m else None
 
 
 def cfg_text(target, lite, prefs):
@@ -129,12 +138,22 @@ def do_switch(core, link, agent, target, lite=False, prefs=None, installer=DEFAU
     try:
         agent.delete(out_name)                      # never read a stale result
     except core.AgentError:
-        pass
+        pass                                        # fine if it was not there: what counts is the check below
+    try:
+        agent.get(out_name)
+        log("FAILED: the old %s is still there after DEL" % out_name)
+        return 2, agent
+    except core.AgentError:
+        pass                                        # gone
     if prefs:
         push_prefs(core, agent, prefs)
         log("pushed %s as %r" % (prefs, PREFS_NAME))
     agent.put(CFG_NAME, cfg_text(target, lite, prefs).encode("ascii"))
-    ran, _, pc = agent.run(installer, rid, max_s=int(timeout), timeout=timeout + 120)
+    try:
+        ran, _, pc = agent.run(installer, rid, max_s=int(timeout), timeout=timeout + 120)
+    except core.AgentError as e:
+        log("FAILED: RUN %s %s: %s" % (installer, rid, e))
+        return 2, agent
     log("%s %s: %s in %.1f s (PC clock)" % (installer, rid, ran["result"], pc["seconds"]))
     try:
         data = agent.get(out_name)
@@ -149,7 +168,7 @@ def do_switch(core, link, agent, target, lite=False, prefs=None, installer=DEFAU
     log("installer: %s" % (text[0] if text else ""))
     log("result:    %s" % (res or "(no RESULT line)"))
     ok, changed = verdict(target, lite, res)
-    # "nostart": see the module doc; the RESULT line read above is fresh (the old .out was deleted)
+    # "nostart": see the module doc; RESULT is written last and the old .out was checked gone, so it is this run's
     if ran["result"] not in ("done", "nostart") or not ok:
         log("FAILED: switch %s: the installer did not do it (see %s)" % (target, os.path.join(outdir, out_name)))
         return 2, agent
@@ -163,7 +182,7 @@ def do_switch(core, link, agent, target, lite=False, prefs=None, installer=DEFAU
         log("saved %s" % path)
     kind, rest = stack_line(lines_of(data or b""))
     log("MoofDiag: stack: %s" % ((kind + " " + rest) if kind else "(no stack: line)"))
-    if ran["result"] != "done" or not stack_ok(target, lite, kind, rest):
+    if ran["result"] != "done" or not stack_ok(target, lite, kind, rest, installed_vers(res) if target == "mooftcp" else None):
         log("FAILED: switch %s: MoofDiag says the stack is not %s" %
             (target, "MacTCP" if target == "mactcp" else "MoofTCP %s" % ("lite" if lite else "full")))
         return 2, agent
