@@ -138,5 +138,51 @@ static void unconfigured_through_driver_entry_no_completion(void) {
     T_EQ(pbf_nlog, 0);
 }
 
+/* 1.1d1 F2: tcp_hi / udp_hi are one past the highest slot in use (live or released with the core release deferred);
+ * the glue's per-call and per-tick stream loops stop there, and a stream in the top slot is still served. */
+static void stream_scans_bounded_by_highest_used_slot(void) {
+    pbt x;
+    StreamPtr a, b, c, u1, u2;
+    TCPiopb *r;
+    pbt_conn cc;
+    pbt_init(&x, 1);
+    T_EQ(x.d->tcp_hi, 0);
+    T_EQ(x.d->udp_hi, 0);
+    a = pbt_create(&x, 4096, 0, 0);
+    b = pbt_create(&x, 4096, 0, 0);
+    c = pbt_create(&x, 4096, 0, 0);
+    T_CHECK(a && b && c);
+    T_EQ(x.d->tcp_hi, 3);
+    T_EQ(pbt_simple(&x, TCPRelease, c), 0);
+    T_EQ(x.d->tcp_hi, 2);
+    T_EQ(pbt_simple(&x, TCPRelease, a), 0);
+    T_EQ(x.d->tcp_hi, 2);                                 /* b is still in slot 1 */
+    T_EQ(pbt_simple(&x, TCPRelease, b), 0);
+    T_EQ(x.d->tcp_hi, 0);
+    a = pbt_create(&x, 4096, 0, 0);                       /* the slots rotate: slot 3 now */
+    T_CHECK(a == mt_os_addr(&x.d->tcp[3]) + ((uint32_t)(x.d->tcp[3].gen & 7u) << 1));
+    T_EQ(x.d->tcp_hi, 4);
+    T_EQ(pbt_simple(&x, TCPRelease, a), 0);
+    T_EQ(x.d->tcp_hi, 0);
+    a = pbt_est(&x, 0, 0, &cc);                           /* slot 4, connected */
+    T_CHECK(a != 0);
+    T_EQ(x.d->tcp_hi, 5);
+    r = pbt_rcv(&x, a, 10, 1);                            /* a timed read in the top slot */
+    T_EQ(r->ioResult, inProgress);
+    T_CHECK(mt_pb_next_deadline_ms(x.d) <= 1000);         /* its deadline is seen */
+    pbf_now += 1000;
+    mt_pb_tick(x.d);
+    T_EQ(r->ioResult, commandTimeout);                    /* and it times out */
+    u1 = pbt_ucreate(&x, 0, 4096, 0, 0, NULL);
+    u2 = pbt_ucreate(&x, 0, 4096, 0, 0, NULL);
+    T_CHECK(u1 && u2);
+    T_EQ(x.d->udp_hi, 2);
+    T_EQ(pbt_simple(&x, UDPRelease, u2), 0);
+    T_EQ(x.d->udp_hi, 1);
+    T_EQ(pbt_simple(&x, UDPRelease, u1), 0);
+    T_EQ(x.d->udp_hi, 0);
+}
+
 T_MAIN(data_arrival_after_partial_read, pending_small_read_then_data_arrival,
-       small_reads_from_asr_drain_without_nesting, unconfigured_through_driver_entry_no_completion)
+       small_reads_from_asr_drain_without_nesting, unconfigured_through_driver_entry_no_completion,
+       stream_scans_bounded_by_highest_used_slot)

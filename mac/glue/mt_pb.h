@@ -206,6 +206,8 @@ struct MtDrv {
     uint8_t   rcv_kick;         /* a TCPRcv was queued instead of served inline: serve at the next tick */
     uint8_t   ntcp, next_slot;
     uint8_t   nudp, next_uslot;
+    uint8_t   tcp_hi;           /* one past the highest tcp[] slot in use (live or dying; 0: none), was a pad byte:
+                                 * the stream loops stop there (1.1d1; mt_pb_tcp_hi_lower) */
     uint16_t  echo_seq;
     uint16_t  rel_mask;         /* streams whose core release is deferred */
     uint32_t  now;
@@ -257,7 +259,7 @@ struct MtDrv {
     uint8_t   n_own;            /* used entries of own[] */
     uint8_t   dead_n;           /* a lone byte before the buffers above made them odd (Task 12) */
     uint8_t   co_gen;           /* bumped by every abandonment: a routine that resumes after one skips its depth-- */
-    uint8_t   pad_co;
+    uint8_t   udp_hi;           /* the same for udp[] (was pad_co) */
 #ifndef MT_NO_DHCP
     struct MtStatusView *view;  /* DHCP mode: the status mirror the event callback updates (NULL: none) */
 #endif
@@ -266,6 +268,14 @@ struct MtDrv {
                                  * driver at boot; NULL = no pump (Control 0x4D55 then refuses txpump 1) */
 #endif
 };
+
+/* After a slot was freed (used = 0): tcp_hi / udp_hi drop past every free slot at the top. A create raises them. */
+static inline void mt_pb_tcp_hi_lower(MtDrv *d) {
+    while (d->tcp_hi && !d->tcp[d->tcp_hi - 1u].used) d->tcp_hi--;
+}
+static inline void mt_pb_udp_hi_lower(MtDrv *d) {
+    while (d->udp_hi && !d->udp[d->udp_hi - 1u].used) d->udp_hi--;
+}
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
  * available from a completion routine nested this deep (MtDrv.depth) is queued and served from the

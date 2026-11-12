@@ -178,7 +178,7 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
 static void flush_deferred(MtDrv *d) {
     uint8_t i;
     if (d->depth || d->in_core || !d->rel_mask) return;
-    for (i = 0; i < d->ntcp; i++)
+    for (i = 0; i < d->tcp_hi; i++)
         if (d->rel_mask & (1u << i)) {
             d->rel_mask &= (uint16_t)~(1u << i);
             mt_pb_tcp_free(d, &d->tcp[i]);
@@ -415,7 +415,7 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
     g.d = d;
     g.m = m;
     g.m_born = m_born;
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         uint8_t gen = s->gen;
         uint16_t conn = (uint16_t)(s->conn + 1u);
@@ -426,7 +426,8 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         s->conn = conn;
         d->rel_mask &= (uint16_t)~(1u << i);
     }
-    for (i = 0; i < d->nudp; i++) {
+    mt_pb_tcp_hi_lower(d);
+    for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
         if (!u->used || !app_udp(&g, u)) continue;
@@ -434,6 +435,7 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         memset(u, 0, sizeof *u);
         u->gen = gen;
     }
+    mt_pb_udp_hi_lower(d);
     mt_pb_dns_goodbye(d, m, m_born);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];
@@ -477,11 +479,13 @@ void mt_pb_goodbye(MtDrv *d) {
  * 4) contains it too: a stale PB or routine of the dead one would point into the tenant's memory. The
  * tenant's own routines are withheld with them until the dead owner is swept (counted here as well). */
 int mt_pb_gone(MtDrv *d, MacPtr32 p) {
-    uint8_t i;
-    if (!d->n_own || !p) return 0;
-    for (i = 0; i < MT_PB_OWNERS; i++) {
+    uint8_t i, left = d->n_own;
+    if (!left || !p) return 0;
+    for (i = 0; left && i < MT_PB_OWNERS; i++) {   /* bounded by n_own, as quiet() (1.1d1) */
         const MtAppMem *o = &d->own[i];
-        if (o->lo && mt_pb_in_app(o, p) && !mt_os_app_alive(o)) {
+        if (!o->lo) continue;
+        left--;
+        if (mt_pb_in_app(o, p) && !mt_os_app_alive(o)) {
             d->n_dead_calls++;
             return 1;
         }

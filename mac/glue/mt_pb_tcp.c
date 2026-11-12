@@ -612,6 +612,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     d->next_slot = (uint8_t)((i + 1u) % d->ntcp);
     s->d = d;
     s->used = LIVE;
+    if (i >= d->tcp_hi) d->tcp_hi = (uint8_t)(i + 1u);
     s->born = d->own_ser;                                        /* owner serial at creation (mt_pb_in_gone) */
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->tcp.csParam.create.notifyProc;                  /* 0 is fine (matrix 202b) */
@@ -708,11 +709,11 @@ static int16_t do_abort(MtDrv *d, MtStream *s) {
 
 void mt_pb_tcp_free(MtDrv *d, MtStream *s) {
     uint8_t i;
-    (void)d;
     if (s->t) mt_tcp_release(s->t);       /* no callbacks; the core forgets our requests */
     s->t = NULL;
     for (i = 0; i < MT_SENDQ_MAX; i++) s->req[i].busy = 0;
     s->used = 0;
+    mt_pb_tcp_hi_lower(d);
 }
 
 static int16_t do_release(MtDrv *d, MtStream *s, MtAnyPb *pb) {
@@ -802,7 +803,7 @@ static int16_t do_global_info(MtDrv *d, MtAnyPb *pb) {
     {
         uint8_t open = mt_tcp_count_open(d->s), n = 0, pass;
         for (pass = 0; pass < 2; pass++)
-            for (i = 0; i < d->ntcp && (pass || n < open); i++) {   /* pass 0 stops at the last connection */
+            for (i = 0; i < d->tcp_hi && (pass || n < open); i++) {   /* pass 0 stops at the last connection */
                 const MtStream *s = &d->tcp[i];
                 if (s->used != LIVE) continue;
                 if ((state_of(s) > MT_TCP_LISTEN) == (pass == 0)) d->cdb[n++] = s->handle;
@@ -844,10 +845,10 @@ void mt_pb_tcp_after_core(MtDrv *d) {
     uint8_t i;
     if (d->rcv_kick && d->depth < MT_PB_INLINE_MAX) {      /* reads queued by the nesting limit */
         d->rcv_kick = 0;
-        for (i = 0; i < d->ntcp; i++)
+        for (i = 0; i < d->tcp_hi; i++)
             if (d->tcp[i].used == LIVE && d->tcp[i].rq_n) (void)serve_reads(&d->tcp[i], NULL);
     }
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->close_pb && !s->close_deferred) {                 /* our FIN ACKed (matrix 600) */
@@ -868,7 +869,7 @@ static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 
 void mt_pb_tcp_timers(MtDrv *d) {
     uint8_t i, k;
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->open_timed && due(s->open_dl, d->now)) {          /* passive open: matrix 700 */
@@ -896,7 +897,7 @@ uint32_t mt_pb_tcp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
     if (d->rcv_kick) return 0;                             /* serve the queued reads at once */
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         const MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->open_timed) {

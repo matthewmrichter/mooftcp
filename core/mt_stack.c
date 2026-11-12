@@ -132,7 +132,7 @@ void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t
     }
     if (s->cfg.mtu < omtu) {
         lm = mt_tcp_local_mss(s);
-        for (i = 0; i < s->lim.max_tcp; i++)
+        for (i = 0; i < s->tcp_hi; i++)
             if (s->tcp[i].used && s->tcp[i].mss > lm) s->tcp[i].mss = lm;
     }
 }
@@ -141,7 +141,7 @@ const mt_stats *mt_get_stats(const mt_stack *s) { return &s->stats; }
 
 uint8_t mt_tcp_count_open(const mt_stack *s) {
     uint8_t i, n = 0;
-    for (i = 0; i < s->lim.max_tcp; i++)
+    for (i = 0; i < s->tcp_hi; i++)
         if (s->tcp[i].used && s->tcp[i].state > MT_TCP_LISTEN) n++;
     return n;
 }

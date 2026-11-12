@@ -248,8 +248,45 @@ static void test_one_field_getters(void) {
     same_as_info(t);
 }
 
+/* 1.1d1 F2: tcp_hi is one past the highest used TCB, raised at create, lowered at release past every free slot
+ * below; the TCB scans (timers, deadline, input lookup) stop there and still see the highest connection. */
+static void test_tcp_hi_tracks_highest_used(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    static uint8_t b[4][2048];
+    mt_tcp *t[4];
+    rec r; uint32_t ps, ms;
+    mt_tcp *c;
+    int i;
+    memset(&r, 0, sizeof r);
+    T_EQ(s->tcp_hi, 0);
+    for (i = 0; i < 3; i++) t[i] = mt_tcp_create(s, b[i], sizeof b[i], rec_cb, &r);
+    T_CHECK(t[0] == &s->tcp[0] && t[1] == &s->tcp[1] && t[2] == &s->tcp[2]);
+    T_EQ(s->tcp_hi, 3);
+    mt_tcp_release(t[1]);
+    T_EQ(s->tcp_hi, 3);                                      /* a hole below the top */
+    mt_tcp_release(t[2]);
+    T_EQ(s->tcp_hi, 1);                                      /* down past the hole */
+    t[3] = mt_tcp_create(s, b[3], sizeof b[3], rec_cb, &r);
+    T_CHECK(t[3] == &s->tcp[1]);                             /* first free slot */
+    T_EQ(s->tcp_hi, 2);
+    mt_tcp_release(t[0]);
+    T_EQ(s->tcp_hi, 2);
+    mt_tcp_release(t[3]);
+    T_EQ(s->tcp_hi, 0);
+    mt_tcp_release(t[3]);                                    /* again: no-op */
+    T_EQ(s->tcp_hi, 0);
+    /* a connection in the top slot: its timers and segments are still found */
+    for (i = 0; i < 3; i++) t[i] = mt_tcp_create(s, b[i], sizeof b[i], rec_cb, &r);
+    c = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(c == &s->tcp[3]);
+    T_EQ(s->tcp_hi, 4);
+    T_EQ(tsend(c, (const uint8_t *)"x", 1, 1, 0, 10), 1);
+    T_CHECK(mt_next_deadline(s, 10) != MT_NO_DEADLINE);     /* its RTO */
+    T_EQ(mt_tcp_get_state(c), MT_TCP_ESTABLISHED);
+}
+
 T_MAIN(test_set_config_addr_change_flushes_arp, test_set_config_other_changes_keep_arp,
        test_set_config_mtu_shrink_reclamps_mss,
        test_set_config_dns_change_next_retry_uses_new_server,
        test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start,
-       test_info_after_fin_acked, test_one_field_getters)
+       test_info_after_fin_acked, test_one_field_getters, test_tcp_hi_tracks_highest_used)

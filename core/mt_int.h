@@ -348,6 +348,8 @@ struct mt_stack {
     uint8_t tx_refused;      /* set by mt_eth_send when the link refused the frame; senders that care
                               * (TCP) clear it before building a frame and read it afterwards */
     uint8_t stall_on;        /* stall_at is armed: some TCB has MT_T2_STALL */
+    uint8_t tcp_hi;          /* one past the highest used TCB (0: none); every TCB scan but the free-slot
+                              * search stops there (1.1d1). Raised by mt_tcp_create, lowered by mt_tcp_release */
     uint32_t stall_at;       /* absolute ms of the next stall retry (one timer for all TCBs) */
     uint32_t now;            /* last clock value seen by mt_input / mt_tick / mt_dns_query */
     uint16_t tcp_eph;        /* next ephemeral TCP port candidate */

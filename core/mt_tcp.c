@@ -182,6 +182,7 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     t->rto = MT_RTO_INIT(t->st);
     t->mss = TCP_MSS_DEFAULT;
     t->state = MT_TCP_CLOSED;       /* creation is not logged */
+    if (i >= s->tcp_hi) s->tcp_hi = (uint8_t)(i + 1u);
     return t;
 }
 
@@ -197,7 +198,7 @@ void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
 
 static int port_busy(const mt_stack *s, const mt_tcp *self, uint16_t p) {
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         const mt_tcp *o = &s->tcp[i];
         if (o != self && o->used && o->state != MT_TCP_CLOSED && o->lport == p) return 1;
     }
@@ -224,7 +225,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
         lport = p;
         s->tcp_eph = (uint16_t)(p == 65535u ? TCP_EPH_BASE : p + 1u);
     } else {
-        for (i = 0; i < s->lim.max_tcp; i++) {
+        for (i = 0; i < s->tcp_hi; i++) {
             const mt_tcp *o = &s->tcp[i];
             if (o != t && o->used && o->state != MT_TCP_CLOSED && o->state != MT_TCP_LISTEN &&
                 o->lport == lport && o->rport == rport && o->rip == rip)
@@ -329,14 +330,16 @@ void mt_tcp_abort(mt_tcp *t, uint32_t now) {
 }
 
 void mt_tcp_release(mt_tcp *t) {
+    mt_stack *s = t->st;
     if (!t->used) return;
     send_rst(t, t->tnow);
-    if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
+    if (t->flags & MT_TF_EST) s->stats.tcp_conns_open--;
     {
         uint8_t gen = (uint8_t)(t->gen + 1u);
         memset(t, 0, sizeof *t);           /* used = 0, cb = NULL: no further callbacks */
         t->gen = gen;
     }
+    while (s->tcp_hi && !s->tcp[s->tcp_hi - 1u].used) s->tcp_hi--;
 }
 
 mt_tcp_state mt_tcp_get_state(const mt_tcp *t) { return (mt_tcp_state)t->state; }
@@ -463,7 +466,7 @@ void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, 
 #ifdef MT_TEST_HOOKS
     if (s->icmp_err_spy) s->icmp_err_spy(s->icmp_err_ctx, 6, dst, lport, rport, type, code);
 #endif
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (t->used && t->state != MT_TCP_CLOSED && t->state != MT_TCP_LISTEN &&
             t->rip == dst && t->lport == lport && t->rport == rport)
@@ -542,7 +545,7 @@ static void rto_fire(mt_tcp *t, uint32_t now) {
 static void stall_retry(mt_stack *s, uint32_t now) {
     uint16_t i;
     s->stall_on = 0;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !(t->flags2 & MT_T2_STALL)) continue;
         t->tnow = now;
@@ -558,7 +561,7 @@ static void stall_retry(mt_stack *s, uint32_t now) {
 void mt_tcp_timers(mt_stack *s, uint32_t now) {
     uint16_t i;
     if (s->stall_on && !mt_time_before(now, s->stall_at)) stall_retry(s, now);
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !t->tmask) continue;
         t->tnow = now;
@@ -600,7 +603,7 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now) {
     uint32_t best = s->stall_on ? rel(s->stall_at, now) : MT_NO_DEADLINE;
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         const mt_tcp *t = &s->tcp[i];
         if (!t->used || !t->tmask) continue;
         if (t->tmask & (1u << MT_TT_TW)) best = mt_dl_min(best, rel(t->tmr[MT_TT_TW], now));
@@ -636,7 +639,7 @@ void mt_tcp_note_released(mt_stack *s, const uint8_t *ip) {
 
 void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now) {
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         uint32_t skip = 0;
         if (!t->used || t->state == MT_TCP_CLOSED || t->state == MT_TCP_LISTEN ||
@@ -686,7 +689,7 @@ static mt_tcp *lookup(mt_stack *s, mt_ip4 rip, uint16_t rport, uint16_t lport) {
     mt_tcp *best = NULL;
     int bestscore = -1;
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || t->state == MT_TCP_CLOSED) continue;
         if (t->state == MT_TCP_LISTEN) {

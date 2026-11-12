@@ -583,10 +583,18 @@ static int arp_unresolved(mt_ip4 rip) {
     return 1;
 }
 
+/* 1.1d1 F2: the high-water marks are exact (one past the highest used slot) after every step. */
+static void check_tcp_hi(const mt_stack *s) {
+    uint16_t i, hi = 0;
+    for (i = 0; i < s->lim.max_tcp; i++) if (s->tcp[i].used) hi = (uint16_t)(i + 1u);
+    if (s->tcp_hi != hi) bad("core tcp_hi is not one past the highest used TCB");
+}
+
 static void check_invariants(void) {
     const uint8_t rp = (1u << MT_TT_RTO) | (1u << MT_TT_PERSIST);
     uint16_t i;
     int k, n;
+    check_tcp_hi(g.s);
     for (i = 0; i < NT; i++) {                              /* every pending record is queued */
         for (k = 0, n = 0; k < RQ_PER; k++) n += g_rq[i][k].busy;
         if (g.t[i] && g.t[i]->used ? n != g.t[i]->sq_n : n != 0)
@@ -2097,7 +2105,12 @@ static void pb_action(void) {
 
 static void pb_invariants(void) {
     int i, k;
+    uint8_t thi = 0, uhi = 0, q;
     if (pbf_irq != 0) bad("interrupt mask not restored");
+    check_tcp_hi(P.d->s);
+    for (q = 0; q < P.d->ntcp; q++) if (P.d->tcp[q].used) thi = (uint8_t)(q + 1u);
+    for (q = 0; q < P.d->nudp; q++) if (P.d->udp[q].used) uhi = (uint8_t)(q + 1u);
+    if (P.d->tcp_hi != thi || P.d->udp_hi != uhi) bad("glue tcp_hi / udp_hi is not one past the highest used slot");
     if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
     if (P.d->rel_mask) bad("deferred release left over");
 #ifdef MT_TUNE

@@ -160,6 +160,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     d->next_uslot = (uint8_t)((i + 1u) % d->nudp);
     s->d = d;
     s->used = LIVE;
+    if (i >= d->udp_hi) d->udp_hi = (uint8_t)(i + 1u);
     s->born = d->own_ser;                        /* owner serial at creation (mt_pb_in_gone) */
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->udp.csParam.create.notifyProc;
@@ -181,6 +182,7 @@ static int16_t do_release(MtUdpStream *s, MtAnyPb *pb) {
     pb->udp.csParam.create.rcvBuff = s->rbuf;                    /* the buffer goes back to the app */
     pb->udp.csParam.create.rcvBuffLen = s->rlen;
     s->used = 0;
+    mt_pb_udp_hi_lower(s->d);
     return 0;
 }
 
@@ -274,7 +276,7 @@ static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 
 void mt_pb_udp_timers(MtDrv *d) {
     uint8_t i, k;
-    for (i = 0; i < d->nudp; i++) {
+    for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *s = &d->udp[i];
         uint8_t g = s->gen;
         if (s->used != LIVE) continue;
@@ -292,7 +294,7 @@ void mt_pb_udp_timers(MtDrv *d) {
 uint32_t mt_pb_udp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
-    for (i = 0; i < d->nudp; i++) {
+    for (i = 0; i < d->udp_hi; i++) {
         const MtUdpStream *s = &d->udp[i];
         if (s->used != LIVE) continue;
         for (k = 0; k < s->rq_n; k++)
