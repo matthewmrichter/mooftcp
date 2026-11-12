@@ -25,12 +25,14 @@
 
 static int same(const MtUdpStream *s, uint8_t gen) { return s->used == LIVE && s->gen == gen; }
 
+typedef char mt_udp_slot_ok[MT_PB_SLOT_OK(MT_PB_MAX_UDP, sizeof(MtUdpStream)) ? 1 : -1];
+
 static MtUdpStream *stream_of(MtDrv *d, StreamPtr h) {
     MacPtr32 base = mt_os_addr(&d->udp[0]);
     uint32_t off = h - base, i;
     if (off >= (uint32_t)d->nudp * (uint32_t)sizeof(MtUdpStream)) return NULL;
-    i = off / (uint32_t)sizeof(MtUdpStream);
-    if (d->udp[i].used != LIVE || d->udp[i].handle != h) return NULL;   /* stale or misaligned */
+    i = mt_pb_slot(off, MT_PB_SLOT_M(sizeof(MtUdpStream)));             /* = off / sizeof(MtUdpStream), see mt_pb.h */
+    if (i >= d->nudp || d->udp[i].used != LIVE || d->udp[i].handle != h) return NULL;   /* stale or misaligned */
     return &d->udp[i];
 }
 

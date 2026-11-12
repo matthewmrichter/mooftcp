@@ -215,6 +215,28 @@ static void glue_deadline_cached(void) {
     T_EQ(x.d->gdl_scans, sc + 2);
 }
 
+/* 1.1d2: stream_of finds the slot by a multiply (mt_pb_slot) instead of a division: exact for every offset a live
+ * handle has (slot * size + gen bits 0..14) on every slot, never more than one slot off elsewhere. */
+static void slot_by_multiply_equals_division(void) {
+    static const uint32_t sizes[2] = { sizeof(MtStream), sizeof(MtUdpStream) };
+    static const uint32_t slots[2] = { MT_PB_MAX_TCP, MT_PB_MAX_UDP };
+    int k;
+    for (k = 0; k < 2; k++) {
+        uint32_t size = sizes[k], n = slots[k], m = MT_PB_SLOT_M(sizes[k]), i, r, off, bad = 0;
+        T_CHECK(MT_PB_SLOT_OK(slots[k], sizes[k]));
+        for (i = 0; i < n; i++)
+            for (r = 0; r <= 14; r += 2)
+                if (mt_pb_slot(i * size + r, m) != i) bad++;
+        T_EQ(bad, 0);
+        for (off = 0; off < n * size; off++) {
+            uint32_t q = mt_pb_slot(off, m);
+            if (q != off / size && q != off / size + 1u) bad++;
+        }
+        T_EQ(bad, 0);
+    }
+}
+
 T_MAIN(data_arrival_after_partial_read, pending_small_read_then_data_arrival,
        small_reads_from_asr_drain_without_nesting, unconfigured_through_driver_entry_no_completion,
-       stream_scans_bounded_by_highest_used_slot, glue_deadline_cached)
+       stream_scans_bounded_by_highest_used_slot, glue_deadline_cached,
+       slot_by_multiply_equals_division)

@@ -34,12 +34,14 @@ static int same(const MtStream *s, uint8_t gen, uint16_t conn) {
     return s->used != 0 && s->gen == gen && s->conn == conn;
 }
 
+typedef char mt_tcp_slot_ok[MT_PB_SLOT_OK(MT_PB_MAX_TCP, sizeof(MtStream)) ? 1 : -1];
+
 static MtStream *stream_of(MtDrv *d, StreamPtr h) {
     MacPtr32 base = mt_os_addr(&d->tcp[0]);
     uint32_t off = h - base, i;
     if (off >= (uint32_t)d->ntcp * (uint32_t)sizeof(MtStream)) return NULL;
-    i = off / (uint32_t)sizeof(MtStream);
-    if (d->tcp[i].used != LIVE || d->tcp[i].handle != h) return NULL;   /* stale or misaligned */
+    i = mt_pb_slot(off, MT_PB_SLOT_M(sizeof(MtStream)));                /* = off / sizeof(MtStream), see mt_pb.h */
+    if (i >= d->ntcp || d->tcp[i].used != LIVE || d->tcp[i].handle != h) return NULL;   /* stale or misaligned */
     return &d->tcp[i];
 }
 

@@ -284,6 +284,16 @@ struct MtDrv {
 enum { MT_PB_DL_STALE = 0, MT_PB_DL_AT = 1, MT_PB_DL_NONE = 2 };
 static inline void mt_pb_dl_stale(MtDrv *d) { d->gdl_state = MT_PB_DL_STALE; }
 
+/* 1.1d2: the slot of a stream handle without a division (stream_of runs on every call; __udivsi3 is two divu.w on the
+ * 68000). For an offset off < n * size <= 65535 from the first slot, (off * M) >> 16 with M = ceil(65536 / size) is
+ * exactly off / size whenever off = slot * size + r with r <= 14 (a live handle: the slot's address plus its gen bits,
+ * mt_pb_tcp.c / mt_pb_udp.c), on every slot below n (MT_PB_SLOT_OK, checked at compile time). Any other offset maps
+ * to a slot whose handle compare fails, as with the division, or to n (callers check). One 16x16 mulu.w. */
+#define MT_PB_SLOT_M(size) ((65536u + (uint32_t)(size) - 1u) / (uint32_t)(size))
+#define MT_PB_SLOT_OK(n, size) ((uint32_t)(n) * (uint32_t)(size) <= 65535u && \
+    ((uint32_t)(n) - 1u) * (MT_PB_SLOT_M(size) * (uint32_t)(size) - 65536u) + 14u * MT_PB_SLOT_M(size) < 65536u)
+static inline uint32_t mt_pb_slot(uint32_t off, uint32_t m) { return ((uint32_t)(uint16_t)off * (uint16_t)m) >> 16; }
+
 /* After a slot was freed (used = 0): tcp_hi and udp_hi drop past every free slot at the top. A create raises them. */
 void     mt_pb_hi_lower(MtDrv *d);
 
