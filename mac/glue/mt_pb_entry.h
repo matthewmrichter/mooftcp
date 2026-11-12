@@ -44,9 +44,9 @@ int     mt_entry_sweep(MtEntry *e, int note, int why);
  * owner is gone and could not be swept now: drop the frame / skip the tick (MtDrv.n_dead_drops). */
 int     mt_entry_core_ok(MtEntry *e, int why);
 /* mt_entry_drain only when mt_entry_core_ok allows (the timer and the gate's after-callback). */
-void    mt_entry_drain_ok(MtEntry *e, int why);
+int     mt_entry_drain_ok(MtEntry *e, int why);   /* nonzero if it ran a PB or a completion */
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
-void    mt_entry_drain(MtEntry *e);
+int     mt_entry_drain(MtEntry *e);              /* nonzero if it ran a PB or a completion */
 
 /* The A5 recorded at issue time lives in the PB's ioCmdAddr (bytes 8..11 of the Device Manager's
  * fill12), which the Device Manager does not use for a control call once the PB is off its

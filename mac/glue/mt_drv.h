@@ -32,7 +32,8 @@ typedef struct MtRes {
     int16_t        cfg_result;   /* mt_cfg_load result */
     int16_t        enet_err;     /* unit install error at boot / mt_enet_open error at open */
     uint8_t        mode;         /* MCFG mode slot */
-    uint8_t        pad;
+    uint8_t        armed;        /* 1.1d2 (was a zero pad byte): an early timer tick armed the timer; the gate's
+                                  * after callback that follows re-arms only if its drain ran a PB (mt_drv.c) */
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
     uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */

@@ -71,9 +71,9 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* Queued PBs run only when the core may run (mt_entry_core_ok): a quit application's queued PBs are
  * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
  * (the timer and the gate's after-callback use this). */
-void mt_entry_drain_ok(MtEntry *e, int why) {
-    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return;
-    mt_entry_drain(e);
+int mt_entry_drain_ok(MtEntry *e, int why) {
+    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return 0;
+    return mt_entry_drain(e);
 }
 
 /* Glue frames left by a routine whose process quit inside it (Task 12 round 4): abandon them if that
@@ -252,10 +252,11 @@ int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
 }
 
 /* The gate is held, so a completion routine that calls the driver nests (call-out, depth). */
-void mt_entry_drain(MtEntry *e) {
+int mt_entry_drain(MtEntry *e) {
     MtDrv *d = e->d;
     MtAnyPb *pb;
-    for (;;) {
+    int ran = 0;
+    for (;; ran = 1) {
         if ((pb = pop(&e->doneq)) != NULL) {        /* older results first */
             mt_pb_call_complete(d, pb, pb->hdr.ioResult);
             continue;
@@ -270,6 +271,6 @@ void mt_entry_drain(MtEntry *e) {
             mt_pb_call_complete(d, pb, MT_DRV_REFUSED);
             continue;
         }
-        return;
+        return ran;
     }
 }

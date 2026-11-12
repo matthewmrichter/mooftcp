@@ -5,6 +5,7 @@
 #include "pbfake.h"
 #include "mt_util.h"
 #include "mt_drv_logic.h"
+#include "mt_timer.h"
 #include "mt_cfg.h"
 #include "mt_pb_entry.h"
 
@@ -601,15 +602,15 @@ static void drain_masks_only_nonempty_rings(void) {
     s = pbt_create(&g_x, 4096, 0, 0);
     T_CHECK(s != 0);
     pbf_mask_calls = 0;
-    mt_entry_drain(&g_e);                                 /* three empty rings */
+    T_EQ(mt_entry_drain(&g_e), 0);                        /* three empty rings: nothing ran (1.1d2) */
     T_EQ(pbf_mask_calls, 0);
     st = pbt_pb(TCPStatus, s);                            /* one PB queued by a preempting caller */
     g_g.depth = 1;
     T_EQ(mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_ASYNC, 1), 0);
     T_EQ(g_e.pend.queued, 1);
     pbf_mask_calls = 0;
-    mt_entry_drain(&g_e);
-    T_EQ(g_e.n_pend_run, 1);                              /* it ran */
+    T_EQ(mt_entry_drain(&g_e), 1);                        /* it ran, and the drain says so (after_cb re-queries) */
+    T_EQ(g_e.n_pend_run, 1);
     T_EQ(pbf_mask_calls, 1);                              /* one masked pop: the ring that held it */
     T_EQ(pbf_mask, 0);
     g_g.depth = 0;
@@ -619,11 +620,14 @@ static void drain_masks_only_nonempty_rings(void) {
 /* 1.1d1 F5: a tick inside the Time Manager task that finds nothing due skips the sweep and the tick work (the timer
  * is re-armed only for earlier deadlines, so it may fire before the current one); any other tick runs in full. */
 static void tick_idle_only_for_early_timer_ticks(void) {
-    T_CHECK(mt_drv_tick_idle(1, 1));
-    T_CHECK(mt_drv_tick_idle(1, MT_NO_DEADLINE));
-    T_CHECK(!mt_drv_tick_idle(1, 0));                     /* something is due */
-    T_CHECK(!mt_drv_tick_idle(0, 500));                   /* not from the timer: the full tick, as before */
-    T_CHECK(!mt_drv_tick_idle(0, 0));
+    MtTimer t;                                            /* 1.1d2: the gate's tick_cb passes MtTimer.in_cb */
+    memset(&t, 0, sizeof t);
+    T_CHECK(!mt_drv_tick_idle(t.in_cb, 500));             /* not inside the Time Manager task: the full tick */
+    T_CHECK(!mt_drv_tick_idle(t.in_cb, 0));
+    t.in_cb = 1;                                          /* what mt_timer_fire sets around the callback */
+    T_CHECK(mt_drv_tick_idle(t.in_cb, 1));
+    T_CHECK(mt_drv_tick_idle(t.in_cb, MT_NO_DEADLINE));
+    T_CHECK(!mt_drv_tick_idle(t.in_cb, 0));               /* something is due */
 }
 
 /* ---- final review fix 2: a chained 1-byte reader has bounded nesting ---- */

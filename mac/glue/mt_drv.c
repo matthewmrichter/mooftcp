@@ -80,6 +80,7 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     MtRes *r = (MtRes *)ctx;
+    r->armed = 0;                                /* a frame after an early tick: after_cb queries the deadline */
     /* MultiFinder: notice a quit application before the core writes into its receive buffers: every
      * frame, one header load per recorded owner (a load and a branch without MultiFinder; Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_RX)) return;   /* dropped (TCP
@@ -87,12 +88,26 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     mt_pb_input(r->d, frame, len);
 }
 
+/* After a gate session (and an early timer tick): the watchdog, then the timer for the deadline d read at now (now is
+ * read before the deadline query: the shot is never late). The Time Manager is touched only for an earlier deadline. */
+static void arm_next(MtRes *r, uint32_t now, uint32_t d) {
+    mt_enet_watchdog(&r->enet, now);             /* idle: one compare */
+    d = mt_enet_wd_deadline(&r->enet, d, now);
+    mt_timer_arm_deadline(&r->timer, d, now, &r->tm_due);
+}
+
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
+    uint32_t now = mt_os_ms(), dl = mt_pb_next_deadline_ms(r->d);   /* O(1) since 1.1d2 (F7) */
     /* 1.1d1: run from the Time Manager task (in_cb; a tick deferred behind a held gate runs in full, as before) before
-     * anything is due (the timer is re-armed only for earlier deadlines): no sweep, no tick work; after_cb drains,
-     * runs the watchdog and arms the next deadline, as after any gate session */
-    if (r->timer.in_cb && mt_drv_tick_idle(1, mt_pb_next_deadline_ms(r->d))) return;
+     * anything is due (the timer is re-armed only for earlier deadlines): no sweep, no tick work. 1.1d2: the timer is
+     * armed here with the deadline just read, and after_cb does not query it again unless its drain ran a PB */
+    if (mt_drv_tick_idle(r->timer.in_cb, dl)) {
+        arm_next(r, now, dl);
+        r->armed = 1;
+        return;
+    }
+    r->armed = 0;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -102,13 +117,15 @@ static void tick_cb(void *ctx) {
 
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    uint32_t now, d;
-    mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
+    uint32_t now;
+    int ran = mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
                                                  * is still recorded (its queued PBs are not dropped yet) */
-    now = mt_os_ms();                            /* read before the deadline query: the shot is never late */
-    mt_enet_watchdog(&r->enet, now);             /* idle: one compare */
-    d = mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d), now);
-    mt_timer_arm_deadline(&r->timer, d, now, &r->tm_due);   /* Time Manager traps only for an earlier deadline */
+    if (r->armed) {                              /* an early tick armed the timer already (tick_cb) */
+        r->armed = 0;
+        if (!ran) return;
+    }
+    now = mt_os_ms();
+    arm_next(r, now, mt_pb_next_deadline_ms(r->d));
 }
 
 static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
