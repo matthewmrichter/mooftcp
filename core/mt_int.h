@@ -16,9 +16,12 @@
  *     use mt_layout_calc(), so the size accounting stays authoritative.
  *  2. Timers: implement `uint32_t mt_<mod>_deadline(const mt_stack*, uint32_t now)`
  *     returning ms from now (0 = overdue) or MT_NO_DEADLINE, and
- *     `void mt_<mod>_timers(mt_stack*, uint32_t now)`. Then add ONE line each to
- *     mt_next_deadline() (`d = mt_dl_min(d, mt_<mod>_deadline(s, now));`) and
- *     mt_tick() in mt_stack.c. Plain calls, no registration table.
+ *     `void mt_<mod>_timers(mt_stack*, uint32_t now)`. Add ONE line to mt_tick() and one to
+ *     mt_next_deadline_scan() in mt_stack.c (`d = mt_dl_min(d, mt_<mod>_deadline(s, now));`).
+ *     Then (1.1d2, the cached deadline below) either add the same line to mt_next_deadline() when
+ *     the deadline is O(1) (a flag, one field), or, for a table, to dl_rescan() and call
+ *     mt_dl_add / mt_dl_stale wherever one of its deadlines is armed, moved or removed.
+ *     Plain calls, no registration table.
  *  3. If the module started life as a stub in core/mt_stubs.c, delete the stub.
  */
 
@@ -39,6 +42,20 @@
 
 /* Smaller of two relative deadlines (MT_NO_DEADLINE is the maximum value). */
 static inline uint32_t mt_dl_min(uint32_t a, uint32_t b) { return a < b ? a : b; }
+
+/* 1.1d2 F7, the cached deadline. mt_stack.dl_at caches the earliest deadline of the modules with tables to scan
+ * (ARP entries, TCP timers incl. ULP and the stall retry, DNS queries) while dl_state is MT_DL_AT (an overdue one
+ * may be held as the time of the rescan that found it: the answer is 0 either way); MT_DL_NONE: they have none;
+ * MT_DL_STALE: unknown, mt_next_deadline rescans once (dl_rescan) before it answers. Every change to one of those
+ * deadlines keeps it exact:
+ *  - mt_dl_add(s, at): a deadline at `at` (in the future) was armed: an earlier one replaces dl_at;
+ *  - mt_dl_stale(s): one was disarmed or moved, or a table changed (the earliest may have gone).
+ * A disarm is usually the earliest one anyway (the RTO cleared by an ACK), so nothing finer is kept. mt_tick marks
+ * the cache stale when it ends (its timers may move anything). Test builds compare every answer with the full scan
+ * (mt_next_deadline_scan). */
+enum { MT_DL_STALE = 0, MT_DL_AT = 1, MT_DL_NONE = 2 };
+static inline void mt_dl_stale(mt_stack *s);
+void mt_dl_add(mt_stack *s, uint32_t at);       /* mt_stack.c (out of line: one copy, small code) */
 
 /* ---- ARP ---- */
 enum { MT_ARP_FREE = 0, MT_ARP_PENDING = 1, MT_ARP_RESOLVED = 2 };
@@ -374,10 +391,17 @@ struct mt_stack {
 #ifdef MT_TUNE
     mt_tune tune;            /* run-time timing levers (perf builds only; defaults = the MT_TCP_* defines) */
 #endif
+    uint32_t dl_at;          /* 1.1d2 F7: the cached earliest deadline (absolute ms) while dl_state == MT_DL_AT */
+#ifdef MT_TEST_HOOKS
+    uint32_t dl_scans;       /* rescans done (tests: the cache answers without one) */
+#endif
     /* scratch */
     uint8_t txbuf[MT_TXBUF_SIZE];   /* upper layers build at txbuf + 14 */
     uint8_t arpbuf[60];             /* ARP requests/replies, kept apart from txbuf */
+    uint8_t dl_state;        /* MT_DL_STALE / AT / NONE (in the struct's tail padding) */
 };
+
+static inline void mt_dl_stale(mt_stack *s) { s->dl_state = MT_DL_STALE; }
 
 /* mt_stack_init's last step: the tune block gets the release constants (perf builds); release: nothing. */
 #ifdef MT_TUNE
@@ -486,6 +510,11 @@ void mt_ip_lo_drain(mt_stack *s, uint32_t now);
 void mt_ip_lo_flush(mt_stack *s);
 void mt_ip_timers(mt_stack *s, uint32_t now);
 uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now);
+#ifdef MT_TEST_HOOKS
+/* The core's deadline by a full scan of every table (what mt_next_deadline answered before 1.1d2): the reference the
+ * cached answer is checked against. */
+uint32_t mt_next_deadline_scan(const mt_stack *s, uint32_t now);
+#endif
 
 /* Protocol handlers. */
 void mt_icmp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16_t len, uint32_t now);
@@ -518,6 +547,8 @@ static inline void mt_tcp_set_state(mt_tcp *t, uint8_t st) {
 }
 void mt_tcp_timers(mt_stack *s, uint32_t now);
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now);
+/* F7: every change to a TCB's timers (tmr/tmask, ulp_dl while the ULP deadline counts: RTO or PERSIST armed and
+ * ulp_ms nonzero) calls mt_dl_add / mt_dl_stale (mt_tcp.c tmr_set / tmr_clr / ulp_at, mt_tcp_out.c arm_rto ...). */
 /* An ARP entry for `ip` just resolved: every connection whose next hop is `ip` and that has
  * unacked data goes back to snd_una (go-back-N, bounded by cwnd) and resends, except for the
  * segment mt_arp_insert released from the held slot a moment ago (s->arp_rel, set by

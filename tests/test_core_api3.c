@@ -285,8 +285,43 @@ static void test_tcp_hi_tracks_highest_used(void) {
     T_EQ(mt_tcp_get_state(c), MT_TCP_ESTABLISHED);
 }
 
+/* 1.1d2 F7: the core keeps its earliest deadline cached. A query after work that moved no timer rescans nothing, an
+ * armed timer is folded in without a rescan, and removing the earliest one costs exactly one rescan at the next
+ * query. The value always equals the full scan (mt_next_deadline_scan, test builds). */
+static void test_deadline_cached(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    rec r; uint32_t ps, ms, sc; uint8_t f[200]; uint16_t n;
+    mt_tcp *t;
+    memset(&r, 0, sizeof r);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(t != NULL);
+    if (!t) return;
+    T_EQ(mt_next_deadline(s, 1), mt_next_deadline_scan(s, 1));
+    sc = s->dl_scans;
+    T_EQ(mt_next_deadline(s, 5), mt_next_deadline_scan(s, 5));
+    T_EQ(s->dl_scans, sc);                                   /* nothing changed: no rescan */
+    T_EQ(tsend(t, (const uint8_t *)"x", 1, 1, 0, 10), 1);   /* arms the RTO, earlier than the ARP entry's expiry */
+    T_EQ(mt_next_deadline(s, 10), t->rto);
+    T_EQ(mt_next_deadline_scan(s, 10), t->rto);
+    T_EQ(s->dl_scans, sc);                                   /* folded in */
+    /* the echo: one byte of data, PSH, acking ours (the RTO, the earliest deadline, is cleared) */
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps, ms + 1, TF_ACK | TF_PSH, 8192, NULL, 0, (const uint8_t *)"y", 1);
+    mt_input(s, f, n, 20);
+    T_EQ(mt_next_deadline(s, 20), mt_next_deadline_scan(s, 20));
+    T_EQ(s->dl_scans, sc + 1);                               /* one rescan */
+    T_EQ(mt_next_deadline(s, 21), mt_next_deadline_scan(s, 21));
+    T_EQ(s->dl_scans, sc + 1);
+    T_EQ(mt_tcp_recv(t, f, 1, 22), 1);                       /* reading moves no timer */
+    T_EQ(mt_next_deadline(s, 22), mt_next_deadline_scan(s, 22));
+    T_EQ(s->dl_scans, sc + 1);
+    mt_tick(s, 30);                                          /* a tick rescans once (its timers may move anything) */
+    T_EQ(mt_next_deadline(s, 30), mt_next_deadline_scan(s, 30));
+    T_EQ(s->dl_scans, sc + 2);
+}
+
 T_MAIN(test_set_config_addr_change_flushes_arp, test_set_config_other_changes_keep_arp,
        test_set_config_mtu_shrink_reclamps_mss,
        test_set_config_dns_change_next_retry_uses_new_server,
        test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start,
-       test_info_after_fin_acked, test_one_field_getters, test_tcp_hi_tracks_highest_used)
+       test_info_after_fin_acked, test_one_field_getters, test_tcp_hi_tracks_highest_used,
+       test_deadline_cached)

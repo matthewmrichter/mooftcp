@@ -34,12 +34,40 @@ typedef struct {
     uint8_t acc_fin;             /* the FIN is accepted too */
 } seg;
 
-static uint32_t rel(uint32_t at, uint32_t now) { return mt_time_before(at, now) ? 0u : at - now; }
+/* ---- Timer state (1.1d2 F7: every change keeps the stack's cached deadline exact, mt_int.h) ---- */
+
+/* The ULP deadline (ulp_dl) counts while RTO or PERSIST is armed and ulp_ms is nonzero. */
+#define ULP_ON(t) (((t)->tmask & TM_RTO_PERSIST) && (t)->ulp_ms)
+
 static void tmr_set(mt_tcp *t, unsigned i, uint32_t at) {
+    uint8_t m = t->tmask, b = (uint8_t)(1u << i);
     t->tmr[i] = at;
-    t->tmask |= (uint8_t)(1u << i);
+    t->tmask = (uint8_t)(m | b);
+    if ((m & b) || (b & TM_RTO_PERSIST)) mt_dl_stale(t->st);   /* moved (the ACK clock re-arming the RTO: the
+                                                                * earliest one, usually), or RTO/PERSIST armed here
+                                                                * (the ULP deadline may count from here): rescan.
+                                                                * arm_rto, the send path, folds a new RTO in. */
+    else mt_dl_add(t->st, at);                                 /* TIME_WAIT / FIN_WAIT_2 / delayed ACK armed */
 }
-static void tmr_clr(mt_tcp *t, unsigned i) { t->tmask &= (uint8_t)~(1u << i); }
+
+static void tmr_clr(mt_tcp *t, unsigned i) {
+    uint8_t b = (uint8_t)(1u << i);
+    if (!(t->tmask & b)) return;
+    t->tmask &= (uint8_t)~b;
+    mt_dl_stale(t->st);
+}
+
+/* ulp_dl = at; a deadline that counts moved */
+static void ulp_at(mt_tcp *t, uint32_t at) {
+    if (ULP_ON(t)) mt_dl_stale(t->st);
+    t->ulp_dl = at;
+}
+
+/* Every timer off at once (terminate, reset, back to listen, release): the cache is rebuilt at the next query. */
+static void tmr_none(mt_tcp *t) {
+    if (t->tmask) mt_dl_stale(t->st);
+    t->tmask = 0;
+}
 
 static void fire(mt_tcp *t, mt_tcp_event ev, uint32_t arg) {
     if (t->used && t->cb) t->cb(t, ev, arg, t->user);
@@ -103,7 +131,7 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
-    t->tmask = 0;
+    tmr_none(t);
     mt_tcp_set_state(t, MT_TCP_CLOSED);
     mt_log(t->st, MT_LOG_TCP_TERM, (uint8_t)r, t->lport);
     g = ++t->gen;
@@ -121,7 +149,7 @@ static void conn_reset(mt_tcp *t) {
     t->sq_off = 0;
     t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
     t->snd_wl1 = t->snd_wl2 = t->iss = t->irs = 0;
-    t->tmask = 0;
+    tmr_none(t);
     t->rto = MT_RTO_INIT(t->st);
     t->srtt8 = t->rttvar4 = 0;
     t->dupacks = 0;
@@ -190,7 +218,10 @@ void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
     uint32_t ms = (uint32_t)seconds * 1000u;
     /* ulp_dl is always start + ulp_ms (set when the RTO/PERSIST timer armed, or pushed out by
      * progress), so while a timer is armed it moves with the new length. */
-    if (t->tmask & TM_RTO_PERSIST) t->ulp_dl += ms - t->ulp_ms;
+    if (t->tmask & TM_RTO_PERSIST) {
+        t->ulp_dl += ms - t->ulp_ms;
+        mt_dl_stale(t->st);                                 /* F7: the ULP deadline moved, appeared or went */
+    }
     t->ulp_ms = ms;
     if (abort) t->flags |= MT_TF_ULPABORT;
     else t->flags &= (uint8_t)~MT_TF_ULPABORT;
@@ -282,7 +313,7 @@ static void send_rst(mt_tcp *t, uint32_t now) {
 }
 
 static void back_to_listen(mt_tcp *t) {
-    t->tmask = 0;
+    tmr_none(t);
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
     t->rto = MT_RTO_INIT(t->st);                              /* not the backed-off value of the dead half-open */
@@ -334,6 +365,7 @@ void mt_tcp_release(mt_tcp *t) {
     if (!t->used) return;
     send_rst(t, t->tnow);
     if (t->flags & MT_TF_EST) s->stats.tcp_conns_open--;
+    tmr_none(t);
     {
         uint8_t gen = (uint8_t)(t->gen + 1u);
         memset(t, 0, sizeof *t);           /* used = 0, cb = NULL: no further callbacks */
@@ -497,7 +529,7 @@ static uint32_t backoff(uint32_t rto) { return rto >= MT_TCP_RTO_MAX / 2u ? MT_T
 static void ulp_expired(mt_tcp *t, uint32_t now) {
     uint8_t g0 = t->gen;
     if (!(t->flags & MT_TF_ULPABORT)) {
-        t->ulp_dl = now + t->ulp_ms;                       /* report only: keep retrying */
+        ulp_at(t, now + t->ulp_ms);                 /* report only: keep retrying */
         fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
     } else if (t->state == MT_TCP_SYN_SENT) {
         tcp_term(t, MT_TERM_OPEN_FAILED);
@@ -550,6 +582,7 @@ static void rto_fire(mt_tcp *t, uint32_t now) {
 static void stall_retry(mt_stack *s, uint32_t now) {
     uint16_t i;
     s->stall_on = 0;
+    mt_dl_stale(s);
     for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !(t->flags2 & MT_T2_STALL)) continue;
@@ -604,6 +637,8 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
         }
     }
 }
+
+static uint32_t rel(uint32_t at, uint32_t now) { return mt_time_before(at, now) ? 0u : at - now; }
 
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now) {
     uint32_t best = s->stall_on ? rel(s->stall_at, now) : MT_NO_DEADLINE;
@@ -795,7 +830,7 @@ static void ack_progress(mt_tcp *t, uint32_t acked, uint32_t now) {
     }
     if (t->cwnd > CWND_MAX) t->cwnd = CWND_MAX;
     t->rto = mt_tcp_rto_base(t);
-    t->ulp_dl = now + t->ulp_ms;
+    ulp_at(t, now + t->ulp_ms);
     if (t->snd_una == t->snd_max) tmr_clr(t, MT_TT_RTO);
     else if (!(t->tmask & (1u << MT_TT_PERSIST))) tmr_set(t, MT_TT_RTO, now + t->rto);
 }
@@ -968,7 +1003,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         goto out;
     }
     if (t->tmask & (1u << MT_TT_PERSIST))                  /* a peer that answers is not gone: it has */
-        t->ulp_dl = t->tmr[MT_TT_PERSIST] + t->ulp_ms;     /* until a full ULP after the next probe */
+        ulp_at(t, t->tmr[MT_TT_PERSIST] + t->ulp_ms);   /* until a full ULP after the next probe */
     if (g->ack == t->snd_una) {
         /* Duplicate ACK (RFC 5681): no data, window unchanged, data outstanding, not a probe
          * answer. The third one fast-retransmits the first unacked segment; recovery then

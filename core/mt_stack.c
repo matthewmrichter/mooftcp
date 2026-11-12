@@ -122,6 +122,7 @@ void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t
     uint16_t i, lm;
     if (oaddr != s->cfg.addr || omask != s->cfg.mask || ogw != s->cfg.gateway) {
         memset(s->arp, 0, (size_t)s->lim.arp_entries * sizeof(mt_arp_entry));
+        mt_dl_stale(s);                          /* F7: the ARP deadlines went with the table */
         if (s->pend->len) {                      /* the held frame was addressed from the old setup */
             s->pend->len = 0;
             s->stats.arp_drops++;
@@ -267,9 +268,41 @@ void mt_tick(mt_stack *s, uint32_t now) {
     mt_dns_timers(s, now);
     mt_dhcp_timers(s, now);
     mt_ip_lo_drain(s, now);       /* last: frames the timers just queued to ourselves go too */
+    mt_dl_stale(s);               /* F7: the timers may have moved anything: one rescan at the next query */
 }
 
-uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
+void mt_dl_add(mt_stack *s, uint32_t at) {
+    if (s->dl_state == MT_DL_NONE || (s->dl_state == MT_DL_AT && mt_time_before(at, s->dl_at))) {
+        s->dl_at = at;
+        s->dl_state = MT_DL_AT;
+    }
+}
+
+/* 1.1d2 F7: the cached earliest deadline of the table modules (mt_int.h "the cached deadline"), rebuilt only when a
+ * change made it stale; the O(1) terms (loopback and reassembly, DHCP) are read every time. */
+static void dl_rescan(mt_stack *s, uint32_t now) {
+    uint32_t d = mt_arp_deadline(s, now);
+    d = mt_dl_min(d, mt_tcp_deadline(s, now));
+    d = mt_dl_min(d, mt_dns_deadline(s, now));
+    s->dl_at = now + d;
+    s->dl_state = d == MT_NO_DEADLINE ? MT_DL_NONE : MT_DL_AT;
+#ifdef MT_TEST_HOOKS
+    s->dl_scans++;
+#endif
+}
+
+uint32_t mt_next_deadline(mt_stack *s, uint32_t now) {
+    uint32_t d = MT_NO_DEADLINE;
+    if (s->dl_state == MT_DL_STALE) dl_rescan(s, now);
+    if (s->dl_state == MT_DL_AT) d = mt_time_before(s->dl_at, now) ? 0u : s->dl_at - now;
+    d = mt_dl_min(d, mt_ip_deadline(s, now));
+    d = mt_dl_min(d, mt_dhcp_deadline(s, now));
+    MT_ASSERT(d == mt_next_deadline_scan(s, now));
+    return d;
+}
+
+#ifdef MT_TEST_HOOKS
+uint32_t mt_next_deadline_scan(const mt_stack *s, uint32_t now) {
     uint32_t d = mt_arp_deadline(s, now);
     d = mt_dl_min(d, mt_ip_deadline(s, now));
     d = mt_dl_min(d, mt_tcp_deadline(s, now));
@@ -277,6 +310,7 @@ uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     d = mt_dl_min(d, mt_dhcp_deadline(s, now));
     return d;
 }
+#endif
 
 #ifdef MT_TUNE
 int mt_tune_set(mt_stack *s, const mt_tune *t) {

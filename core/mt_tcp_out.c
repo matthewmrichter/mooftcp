@@ -141,16 +141,24 @@ int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n
     if (flags & MT_TH_ACK) {
         t->flags &= (uint8_t)~MT_TF_ACKNOW;
         t->flags2 &= (uint8_t)~MT_T2_ACKHALF;
-        t->tmask &= (uint8_t)~(1u << MT_TT_DELACK);
+        if (t->tmask & (1u << MT_TT_DELACK)) {
+            t->tmask &= (uint8_t)~(1u << MT_TT_DELACK);
+            mt_dl_stale(s);                           /* F7: a deadline went */
+        }
     }
     return 0;
 }
 
 static void arm_rto(mt_tcp *t, uint32_t now) {
     if (!(t->tmask & (1u << MT_TT_RTO))) {
-        if (!(t->tmask & (1u << MT_TT_PERSIST))) t->ulp_dl = now + t->ulp_ms;
+        mt_stack *s = t->st;
+        if (!(t->tmask & (1u << MT_TT_PERSIST))) {
+            t->ulp_dl = now + t->ulp_ms;
+            if (t->ulp_ms) mt_dl_add(s, t->ulp_dl);      /* F7: the ULP deadline counts from here */
+        }
         t->tmask |= (uint8_t)(1u << MT_TT_RTO);
         t->tmr[MT_TT_RTO] = now + t->rto;
+        mt_dl_add(s, t->tmr[MT_TT_RTO]);
     }
 }
 
@@ -161,6 +169,7 @@ static void arm_persist(mt_tcp *t, uint32_t now) {
         if (!(t->tmask & (1u << MT_TT_RTO))) t->ulp_dl = now + t->ulp_ms;
         t->tmask = (uint8_t)((t->tmask & ~(1u << MT_TT_RTO)) | (1u << MT_TT_PERSIST));
         t->tmr[MT_TT_PERSIST] = now + t->rto;
+        mt_dl_stale(t->st);                               /* F7: deadlines moved (rare: a zero window) */
     }
 }
 
@@ -185,6 +194,7 @@ static void stall(mt_tcp *t, int idle, int again, uint32_t now) {
     if (!s->stall_on) {
         s->stall_on = 1;
         s->stall_at = now + MT_STALL(s);
+        mt_dl_add(s, s->stall_at);
     }
 }
 
@@ -294,6 +304,7 @@ void mt_tcp_output(mt_tcp *t, uint32_t now) {
         arm_persist(t, now);
     } else if (t->tmask & (1u << MT_TT_PERSIST)) {
         t->tmask &= (uint8_t)~(1u << MT_TT_PERSIST);      /* window reopened: leave persist */
+        mt_dl_stale(t->st);
         t->rto = mt_tcp_rto_base(t);
     }
     if (t->snd_max != t->snd_una && !(t->tmask & ((1u << MT_TT_RTO) | (1u << MT_TT_PERSIST))))

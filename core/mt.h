@@ -382,7 +382,10 @@ int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
 
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);
-uint32_t  mt_next_deadline(const mt_stack *s, uint32_t now);   /* ms from now, or MT_NO_DEADLINE */
+/* ms from now, or MT_NO_DEADLINE. Not const since 1.1d2: the stack keeps its earliest deadline cached, and a query
+ * after a change that made the cache stale rebuilds it (one scan); otherwise the answer costs O(1). The rule above
+ * stands: re-query after every API call. */
+uint32_t  mt_next_deadline(mt_stack *s, uint32_t now);
 
 #ifdef MT_TUNE
 /* Perf builds only (compile option MT_TUNE; release builds do not have this): run-time TCP timing levers for
