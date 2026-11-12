@@ -91,6 +91,21 @@ typedef struct MtEnet {
     MtEnetTx  tx[MT_ENET_TXSLOTS];
 } MtEnet;
 
+/* The PB for an async EWrite of slot s's frame, n bytes (mt_enet_write; the perf builds' pump): the whole PB cleared
+ * with one memset (1.1d1: was a byte loop), then csCode, refnum and the two-entry WDS. */
+#define MT_ENET_CS_WRITE 249
+static inline void mt_enet_tx_prep(const MtEnet *e, MtEnetTx *s, uint16_t n)
+{
+    memset(&s->pb, 0, sizeof s->pb);
+    s->wds[0].len = n;
+    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
+    s->wds[1].len = 0;
+    s->wds[1].ptr = 0;
+    s->pb.csCode = MT_ENET_CS_WRITE;
+    s->pb.ioRefNum = e->refnum;
+    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+}
+
 /* Open the driver, read the MAC, attach both handlers (rx frames go to `gate`). Frames can reach
  * the gate's rx callback as soon as the handlers are attached: the stack the callback feeds must
  * be initialised BEFORE this call (Task 10: mt_pb_init first, then mt_enet_open). 0 or an error

@@ -405,6 +405,28 @@ static void watchdog_scan_period(void)
     T_EQ(E.tx_started, 0);
 }
 
+/* 1.1d1 F4: the EWrite PB a transmit slot gets (mt_enet_write, the perf builds' pump): every byte of the old PB
+ * cleared (the driver keeps state in it: qLink, ioResult, ...), then csCode, refnum and the WDS of n bytes. */
+static void tx_prep_clears_the_whole_pb(void)
+{
+    MtEnetTx *s;
+    MtEnetPB want;
+    setup();
+    s = &E.tx[3];
+    memset(s, 0xA5, sizeof *s);
+    mt_enet_tx_prep(&E, s, 60);
+    memset(&want, 0, sizeof want);
+    want.csCode = MT_ENET_CS_WRITE;
+    want.ioRefNum = -48;
+    want.ePointer = (uint32_t)(uintptr_t)s->wds;
+    T_MEMEQ(&s->pb, &want, sizeof want);
+    T_EQ(s->wds[0].len, 60);
+    T_EQ(s->wds[0].ptr, (uint32_t)(uintptr_t)s->frame);
+    T_EQ(s->wds[1].len, 0);
+    T_EQ(s->wds[1].ptr, 0);
+    T_EQ(s->frame[0], 0xA5);                 /* the frame is the caller's: untouched */
+}
+
 T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_kills_after_timeout, watchdog_kill_not_repeated_when_service_is_late,
        watchdog_reattach_after_second_timeout, watchdog_reattach_cancelled_when_the_kill_freed_the_slot,
@@ -414,4 +436,4 @@ T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_blocked_on_a_closed_link_never_gives_up,
        watchdog_no_reattach_request_when_link_is_closed, watchdog_quarantine_keeps_started_count_exact,
        open_keeps_in_flight_slots, watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time,
-       watchdog_scan_period)
+       watchdog_scan_period, tx_prep_clears_the_whole_pb)

@@ -10,26 +10,12 @@
 #include "mt_trace.h"
 #endif
 
-#define CS_EWRITE    249           /* as mt_enet.c E_WRITE */
 #define E_NOTOPEN    (-28)         /* notOpenErr: the link closed before the task issued the frame */
 
 _Static_assert((MT_ENET_PUMP_Q & (MT_ENET_PUMP_Q - 1u)) == 0 && MT_ENET_PUMP_Q > MT_ENET_TXSLOTS,
                "the FIFO holds every slot and wraps by mask");
 
 static void barrier(void) { __asm__ volatile("" : : : "memory"); }
-
-/* The PB for a queued EWrite of the slot's frame, n bytes (the same fields mt_enet_write prepares). */
-static void fill_pb(const MtEnet *e, MtEnetTx *s, uint16_t n)
-{
-    memset(&s->pb, 0, sizeof s->pb);
-    s->wds[0].len = n;
-    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
-    s->wds[1].len = 0;
-    s->wds[1].ptr = 0;
-    s->pb.csCode = CS_EWRITE;
-    s->pb.ioRefNum = e->refnum;
-    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
-}
 
 /* The slot is started: the watchdog times it and the owner's reap counts its result (owner context only). */
 static void count_started(MtEnet *e, MtEnetTx *s)
@@ -56,7 +42,7 @@ int mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t le
     memcpy(s->frame, frame, len);
     n = mt_enet_pad(s->frame, len);
     if (n != len) e->tx_pad++;
-    fill_pb(e, s, n);
+    mt_enet_tx_prep(e, s, n);              /* the same PB mt_enet_write prepares */
     s->pb.ioResult = 1;                         /* ours until the task issues it: mt_enet_tx_claim skips it */
     count_started(e, s);
     p->q[h] = (uint8_t)(s - e->tx);

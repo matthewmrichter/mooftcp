@@ -10,7 +10,7 @@
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 int mt_os_enet_blocked(int16_t refnum);
 
-enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
+enum { E_ATTACH = 247, E_DETACH = 248, E_GETINFO = 252 };   /* EWrite: MT_ENET_CS_WRITE (mt_enet.h) */
 
 extern void mt_enet_ph(void);
 extern void mt_enet_ph_set_ctx(void *gate);
@@ -122,14 +122,7 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
     memcpy(s->frame, frame, len);
     n = mt_enet_pad(s->frame, len);
     if (n != len) e->tx_pad++;
-    zero(&s->pb, sizeof s->pb);
-    s->wds[0].len = n;
-    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
-    s->wds[1].len = 0;
-    s->wds[1].ptr = 0;
-    s->pb.csCode = E_WRITE;
-    s->pb.ioRefNum = e->refnum;
-    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+    mt_enet_tx_prep(e, s, n);
 #ifdef MT_TRACE
     mt_trace_ewrite(s, n, 0);    /* perf builds with the trace: the record and the trace's completion routine */
 #endif
