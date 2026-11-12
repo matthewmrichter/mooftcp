@@ -5,8 +5,8 @@
  *   source: preset <id> | MoofTCPTune.cfg | none (the run id is no preset and there is no cfg: nothing is set),
  *   last line "RESULT OK" or "RESULT FAIL <reason>" (for example "not a tune build").
  * The levers apply to timers armed from then until the next restart. A run id that names a preset
- * (tune_parse.h) selects it (a run id "a+b" applies preset a, then adds b's change, in one run: "txpump+delack0" sets
- * both, "x+default" restores the defaults); otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
+ * (tune_parse.h) selects it (a run id "a_b" applies preset a, then adds b's change, in one run: "txpump_delack0" sets
+ * both, "x_default" restores the defaults; "a+b" is accepted too); otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
  * "quickack=", "txpump="; a missing key keeps the current value) is read if it exists.
  * A "!!<id>" run file (mac/common/runid.h) makes the run unattended: no alert, the app quits. */
 #include <Quickdraw.h>
@@ -155,22 +155,22 @@ int main(void)
         else put_vals("before", before);
     }
     if (!reason[0]) {
-        /* "a+b+c": a, then the changes of b and c added in that order, in this one run (a combination, or a sweep
-         * step and its restore with "+default", in one boot); otherwise one preset, or MoofTCPTune.cfg. Each step
-         * prints its source: and the values read back. */
+        /* "a_b_c" (or "a+b+c"): a, then the changes of b and c added in that order, in this one run (a combination,
+         * or a sweep step and its restore with "_default", in one boot); otherwise one preset, or MoofTCPTune.cfg.
+         * Each step prints its source: and the values read back. */
         const char *tok = id;
         from_block(before, &v);
         for (;;) {
             char one[24];
-            const char *plus = strchr(tok, '+');
-            size_t tl = plus ? (size_t)(plus - tok) : strlen(tok);
+            const char *next;
+            size_t tl = tn_step_len(tok, &next);
             int is_preset;
             if (tl >= sizeof one) tl = sizeof one - 1;
             memcpy(one, tok, tl);
             one[tl] = 0;
             is_preset = one[0] && tn_preset_step(one, tok == id, &v);
             if (is_preset) P("source: preset %s\r", one);
-            else if (plus) sprintf(reason, "unknown preset '%s' in the run id", one);
+            else if (next) sprintf(reason, "unknown preset '%s' in the run id", one);
             else if ((clen = read_cfg(cfg, 512)) >= 0) {
                 int k = tn_parse_cfg(cfg, clen, &v, err, (int)sizeof err);
                 if (k < 0) sprintf(reason, "MoofTCPTune.cfg: %s", err);
@@ -188,8 +188,8 @@ int main(void)
             to_block(&v, want);
             for (i = MT_TW_RTO_MIN; i <= MT_TW_TXPUMP; i++)
                 if (after[i] != want[i]) strcpy(reason, "values read back differ from those set");
-            if (reason[0] || !plus) break;
-            tok = plus + 1;
+            if (reason[0] || !next) break;
+            tok = next;
         }
     }
     ok = reason[0] == 0;

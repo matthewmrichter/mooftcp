@@ -3,9 +3,9 @@
 # MoofTCPTune and then MoofDiag in ONE boot, both unattended with the run file "!!<id>", and print both outputs.
 #   tune-run.sh [--keep-disk] [--cfg <MoofTCPTune.cfg>] [--release] <id>
 #     <id>        the run id: a preset (default delack0 delack20 delack50 qack16 qackall rto500 rto700 stall2 stall5
-#                 txpump), or "a+b" (a, then b's change added, in one boot: txpump+delack0 sets both,
-#                 delack0+default is the restore check),
-#                 or any other id with --cfg
+#                 txpump), or "a_b" (a, then b's change added, in one boot: txpump_delack0 sets both,
+#                 delack0_default is the restore check; "a+b" works too),
+#                 or any other id (without "_" or "+": those make a preset chain) with --cfg
 #     --cfg f     also put f on the image as MoofTCPTune.cfg (read when the id is no preset)
 #     --release   use the RELEASE MoofTCP instead (build-mac/): MoofTCPTune must then end RESULT FAIL "not a tune
 #                 build" and MoofDiag prints no tune: line; this run exits 0 when exactly that happened

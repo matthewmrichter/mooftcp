@@ -41,6 +41,14 @@ int tn_preset_step(const char *id, int first, tn_vals *v)
     return 1;
 }
 
+unsigned tn_step_len(const char *tok, const char **rest)
+{
+    unsigned n = 0;
+    while (tok[n] && tok[n] != '_' && tok[n] != '+') n++;
+    *rest = tok[n] ? tok + n + 1 : 0;
+    return n;
+}
+
 static void fail(char *err, int cap, const char *what, const char *a)
 {
     if (err && cap > 0) snprintf(err, (size_t)cap, "%s %.20s", what, a);

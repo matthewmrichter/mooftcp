@@ -14,10 +14,14 @@ void tn_defaults(tn_vals *v);
  * returns 1; returns 0 (v untouched) for any other name. */
 int tn_preset(const char *id, tn_vals *v);
 
-/* One step of a run id "a+b+c": the first step is tn_preset (defaults plus a's change); every later step applies
- * only its preset's change on top of *v ("default" restores all the defaults). So "txpump+delack0" sets both, and
- * "delack0+default" ends at the defaults. Returns 0 (v untouched) for an unknown name. */
+/* One step of a run id "a_b_c": the first step is tn_preset (defaults plus a's change); every later step applies
+ * only its preset's change on top of *v ("default" restores all the defaults). So "txpump_delack0" sets both, and
+ * "delack0_default" ends at the defaults. Returns 0 (v untouched) for an unknown name. */
 int tn_preset_step(const char *id, int first, tn_vals *v);
+
+/* The steps of a run id are joined by '_' (MoofAgent refuses '+' in run ids); '+' is still accepted (Snow runs).
+ * Returns the length of tok's first step; *rest is the text after its separator, or NULL when it is the last. */
+unsigned tn_step_len(const char *tok, const char **rest);
 
 /* MoofTCPTune.cfg: lines "key=value" with key rto_min, rto_init, delack, stall, quickack or txpump, value a decimal
  * number; CR, LF or CRLF end a line; blank lines and lines starting with '#' are skipped; spaces around the

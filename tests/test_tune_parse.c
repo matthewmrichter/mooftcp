@@ -31,7 +31,7 @@ static void test_presets(void) {
     T_CHECK(!tn_preset("", &v));
 }
 
-/* "a+b": the later steps add their change ("txpump+delack0" = both); "default" restores everything. */
+/* "a_b": the later steps add their change ("txpump_delack0" = both); "default" restores everything. */
 static void test_preset_chain(void) {
     tn_vals v, d;
     tn_defaults(&d);
@@ -72,4 +72,24 @@ static void test_cfg_errors(void) {
     T_EQ(tn_parse_cfg("delack=-1\r", 10, &v, err, sizeof err), -1);
 }
 
-T_MAIN(test_defaults_match_core, test_presets, test_preset_chain, test_cfg_parse, test_cfg_errors)
+/* Run id steps are joined by '_' (MoofAgent refuses '+' in run ids); '+' still splits (Snow scripts). */
+static void test_step_split(void) {
+    const char *rest;
+    T_EQ(tn_step_len("txpump_delack0", &rest), 6);
+    T_CHECK(rest && strcmp(rest, "delack0") == 0);
+    T_EQ(tn_step_len(rest, &rest), 7);
+    T_CHECK(rest == NULL);
+    T_EQ(tn_step_len("delack0+default", &rest), 7);
+    T_CHECK(rest && strcmp(rest, "default") == 0);
+    T_EQ(tn_step_len("a+b_c", &rest), 1);
+    T_EQ(tn_step_len(rest, &rest), 1);
+    T_CHECK(rest && strcmp(rest, "c") == 0);
+    T_EQ(tn_step_len("txpump", &rest), 6);
+    T_CHECK(rest == NULL);
+    T_EQ(tn_step_len("", &rest), 0);
+    T_CHECK(rest == NULL);
+    T_EQ(tn_step_len("x_", &rest), 1);                      /* a trailing separator: an empty last step */
+    T_CHECK(rest && rest[0] == 0);
+}
+
+T_MAIN(test_defaults_match_core, test_presets, test_preset_chain, test_cfg_parse, test_cfg_errors, test_step_split)
