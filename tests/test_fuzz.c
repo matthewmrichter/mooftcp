@@ -596,6 +596,12 @@ static void check_invariants(void) {
         const mt_tcp *t = &g.s->tcp[i];
         if (!t->used) continue;
         if (t->rcvq.used > t->rcvq.size) bad("ring overflow");
+        {
+            mt_tcp_info in;
+            mt_tcp_get_info(t, &in);
+            if (mt_tcp_get_state(t) != in.state || mt_tcp_rcv_avail(t) != in.rcv_avail)
+                bad("one-field getters differ from mt_tcp_get_info");
+        }
         check_sendq(t);
         if (t->sq_n && t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_CLOSE_WAIT &&
             t->state != MT_TCP_FIN_WAIT_1 && t->state != MT_TCP_CLOSING &&

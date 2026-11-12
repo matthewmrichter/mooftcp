@@ -339,6 +339,9 @@ void mt_tcp_release(mt_tcp *t) {
     }
 }
 
+mt_tcp_state mt_tcp_get_state(const mt_tcp *t) { return (mt_tcp_state)t->state; }
+uint32_t mt_tcp_rcv_avail(const mt_tcp *t) { return t->rcvq.used; }
+
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     uint32_t sent = 0, q = mt_tcp_sq_total(t);
     memset(i, 0, sizeof *i);

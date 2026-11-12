@@ -206,8 +206,50 @@ static void test_info_after_fin_acked(void) {
     T_EQ(in.send_queued, 0);
 }
 
+/* 1.1d1 F3: the one-field getters agree with mt_tcp_get_info in every state they pass through. */
+static void same_as_info(const mt_tcp *t) {
+    mt_tcp_info in;
+    mt_tcp_get_info(t, &in);
+    T_EQ(mt_tcp_get_state(t), in.state);
+    T_EQ(mt_tcp_rcv_avail(t), in.rcv_avail);
+}
+
+static void test_one_field_getters(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    rec r; uint32_t ps, ms; uint8_t f[200], buf[8]; uint16_t n;
+    static uint8_t rb[4096];
+    mt_tcp *t, *c = mt_tcp_create(s, rb, sizeof rb, rec_cb, &r);
+    memset(&r, 0, sizeof r);
+    T_CHECK(c != NULL);
+    if (!c) return;
+    T_EQ(mt_tcp_get_state(c), MT_TCP_CLOSED);
+    same_as_info(c);
+    T_EQ(mt_tcp_listen(c, 0, 0, 7000), MT_OK);
+    T_EQ(mt_tcp_get_state(c), MT_TCP_LISTEN);
+    same_as_info(c);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(t != NULL);
+    if (!t) return;
+    T_EQ(mt_tcp_get_state(t), MT_TCP_ESTABLISHED);
+    T_EQ(mt_tcp_rcv_avail(t), 0);
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps, ms, TF_ACK | TF_PSH, 8192, NULL, 0, (const uint8_t *)"hello", 5);
+    mt_input(s, f, n, 1);
+    T_EQ(mt_tcp_rcv_avail(t), 5);
+    same_as_info(t);
+    T_EQ(mt_tcp_recv(t, buf, 2, 2), 2);
+    T_EQ(mt_tcp_rcv_avail(t), 3);
+    same_as_info(t);
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps + 5, ms, TF_ACK | TF_FIN, 8192, NULL, 0, NULL, 0);
+    mt_input(s, f, n, 3);
+    T_EQ(mt_tcp_get_state(t), MT_TCP_CLOSE_WAIT);
+    same_as_info(t);
+    T_EQ(mt_tcp_close(t, 4), MT_OK);
+    T_EQ(mt_tcp_get_state(t), MT_TCP_LAST_ACK);
+    same_as_info(t);
+}
+
 T_MAIN(test_set_config_addr_change_flushes_arp, test_set_config_other_changes_keep_arp,
        test_set_config_mtu_shrink_reclamps_mss,
        test_set_config_dns_change_next_retry_uses_new_server,
        test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start,
-       test_info_after_fin_acked)
+       test_info_after_fin_acked, test_one_field_getters)

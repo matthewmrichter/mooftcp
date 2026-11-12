@@ -45,17 +45,10 @@ static MtStream *stream_of(MtDrv *d, StreamPtr h) {
 
 static void info(const MtStream *s, mt_tcp_info *in) { mt_tcp_get_info(s->t, in); }
 
-static mt_tcp_state state_of(const MtStream *s) {
-    mt_tcp_info in;
-    info(s, &in);
-    return in.state;
-}
+/* One field each (1.1d1): these run on every call and callback, mt_tcp_get_info fills the whole record. */
+static mt_tcp_state state_of(const MtStream *s) { return mt_tcp_get_state(s->t); }
 
-static uint32_t unread(const MtStream *s) {
-    mt_tcp_info in;
-    info(s, &in);
-    return in.rcv_avail - s->lent;
-}
+static uint32_t unread(const MtStream *s) { return mt_tcp_rcv_avail(s->t) - s->lent; }
 
 static void complete(MtStream *s, MtAnyPb *pb, int16_t err) { mt_pb_call_complete(s->d, pb, err); }
 

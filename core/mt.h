@@ -339,6 +339,10 @@ typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
   uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms;
   uint32_t snd_una, snd_nxt, rcv_nxt, cwnd; uint16_t mss; } mt_tcp_info;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
+/* One field of mt_tcp_get_info each, for callers that need only that one (the PB glue checks the state and the
+ * unread count on every call): mt_tcp_get_state(t) == info.state, mt_tcp_rcv_avail(t) == info.rcv_avail. */
+mt_tcp_state mt_tcp_get_state(const mt_tcp *t);
+uint32_t     mt_tcp_rcv_avail(const mt_tcp *t);
 
 /* Data transfer. Latency rules: a send with nothing unacked leaves before mt_tcp_send_segs
  * returns (a loopback send is queued for the next mt_tick); in-order data is readable (and DATA
