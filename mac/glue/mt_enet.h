@@ -155,7 +155,7 @@ int  mt_enet_reattach_io(MtEnet *e);
 void mt_enet_init(MtEnet *e);
 void mt_enet_link_reset(MtEnet *e);
 /* Deadline (ms from now, MT_NO_DEADLINE allowed) to arm the timer with: while a slot is started, capped at the
- * next scan (wd_next - now, 0 when due; the scan period before the first scan) so the watchdog keeps getting ticks.
+ * next scan (wd_next - now, 0 when due or overdue) so the watchdog keeps getting ticks.
  * Absolute since 1.1d1: the timer is re-armed only for earlier deadlines, and a cap of "100 ms from every query"
  * would have been one. */
 uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d, uint32_t now);

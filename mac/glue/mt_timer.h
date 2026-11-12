@@ -79,7 +79,7 @@ void mt_timer_arm(MtTimer *t, uint32_t ms);
 /* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed), computed at `now` (mt_os_ms):
  * the helper every caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). Since 1.1d1
  * the Time Manager task is touched only when the deadline is earlier than the pending shot (mt_timer_keep); *due
- * is the caller's record of that shot's absolute time (written here, under the same mask as the arm). */
+ * is the caller's record of that shot's absolute time (written here; one writer context: the gate owner). */
 void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, uint32_t *due);
 void mt_timer_cancel(MtTimer *t);
 void mt_timer_close(MtTimer *t);

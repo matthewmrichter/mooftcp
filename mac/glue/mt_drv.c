@@ -89,11 +89,10 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    uint8_t shot = r->tm_shot;
-    r->tm_shot = 0;
-    /* 1.1d1: the timer fired before anything is due (it is re-armed only for earlier deadlines): no sweep, no tick
-     * work; after_cb drains, runs the watchdog and arms the next deadline, as after any gate session */
-    if (shot && mt_drv_tick_idle(1, mt_pb_next_deadline_ms(r->d))) return;
+    /* 1.1d1: run from the Time Manager task (in_cb; a tick deferred behind a held gate runs in full, as before) before
+     * anything is due (the timer is re-armed only for earlier deadlines): no sweep, no tick work; after_cb drains,
+     * runs the watchdog and arms the next deadline, as after any gate session */
+    if (r->timer.in_cb && mt_drv_tick_idle(1, mt_pb_next_deadline_ms(r->d))) return;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -112,11 +111,7 @@ static void after_cb(void *ctx) {
     mt_timer_arm_deadline(&r->timer, d, now, &r->tm_due);   /* Time Manager traps only for an earlier deadline */
 }
 
-static void tm_cb(void *ctx) {
-    MtRes *r = (MtRes *)ctx;
-    r->tm_shot = 1;
-    mt_gate_tick(&r->gate);
-}
+static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
 
 #ifdef MT_TUNE
 /* Perf builds: link.tx goes through the transmit pump (mt_enet.h), which with the lever off does what

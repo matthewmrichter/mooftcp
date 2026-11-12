@@ -39,7 +39,9 @@ static void watchdog_idle_costs_nothing(void)
     {
         MtEnetTx *s = start();
         T_CHECK(s);
-        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), MT_ENET_WD_SCAN_MS);   /* fresh: the old cap */
+        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), 0);    /* not scanned yet: due */
+        mt_enet_watchdog(&E, 0);
+        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), MT_ENET_WD_SCAN_MS);
         s->pb.ioResult = 0;
         mt_enet_watchdog(&E, 100);
         T_EQ(E.tx_started, 0);

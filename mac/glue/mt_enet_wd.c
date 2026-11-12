@@ -47,10 +47,10 @@ int mt_enet_tx_quarantined(const MtEnet *e)
 
 uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d, uint32_t now)
 {
-    uint32_t w;
+    uint32_t w = e->wd_next - now;               /* wd_fresh (no scan yet) never reaches here from after_cb, which
+                                                 * runs the watchdog first; a stale wd_next only means "due" */
     if (!e->tx_started) return d;
-    if (e->wd_fresh) w = MT_ENET_WD_SCAN_MS;     /* no scan yet: the next watchdog call scans */
-    else w = (int32_t)(e->wd_next - now) > 0 ? e->wd_next - now : 0;
+    if ((int32_t)w < 0) w = 0;
     return d < w ? d : w;
 }
 

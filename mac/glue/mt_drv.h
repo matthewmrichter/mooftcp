@@ -32,8 +32,7 @@ typedef struct MtRes {
     int16_t        cfg_result;   /* mt_cfg_load result */
     int16_t        enet_err;     /* unit install error at boot / mt_enet_open error at open */
     uint8_t        mode;         /* MCFG mode slot */
-    volatile uint8_t tm_shot;    /* 1.1d1 (was a pad byte): set by the Time Manager task before it asks the gate for a
-                                  * tick, taken by the tick callback (a tick from the timer, not from a queued PB) */
+    uint8_t        pad;
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
     uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */

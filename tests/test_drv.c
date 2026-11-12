@@ -616,8 +616,8 @@ static void drain_masks_only_nonempty_rings(void) {
     T_EQ(pbf_bad, 0);
 }
 
-/* 1.1d1 F5: a timer tick that finds nothing due skips the sweep and the tick work (the timer is re-armed only for
- * earlier deadlines, so it may fire before the current one); a tick asked for by a queued PB never does. */
+/* 1.1d1 F5: a tick inside the Time Manager task that finds nothing due skips the sweep and the tick work (the timer
+ * is re-armed only for earlier deadlines, so it may fire before the current one); any other tick runs in full. */
 static void tick_idle_only_for_early_timer_ticks(void) {
     T_CHECK(mt_drv_tick_idle(1, 1));
     T_CHECK(mt_drv_tick_idle(1, MT_NO_DEADLINE));
