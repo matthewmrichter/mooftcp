@@ -261,6 +261,10 @@ struct MtDrv {
 #ifndef MT_NO_DHCP
     struct MtStatusView *view;  /* DHCP mode: the status mirror the event callback updates (NULL: none) */
 #endif
+#ifdef MT_TUNE
+    volatile uint8_t *txpump;   /* perf builds: the link's transmit pump switch (MtEnetPump.on, mt_enet.h), set by the
+                                 * driver at boot; NULL = no pump (Control 0x4D55 then refuses txpump 1) */
+#endif
 };
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data

@@ -18,6 +18,9 @@
 #include <stdint.h>
 #include "mt_gate.h"
 #include "mt_enet_logic.h"
+#ifdef MT_TUNE
+#include "mt_timer.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,6 +154,55 @@ int  mt_os_enet_blocked(int16_t refnum);
  * allocated until their ioResult is not 1 (mt_enet_tx_busy() == 0). */
 void mt_enet_close(MtEnet *e);
 int  mt_enet_tx_busy(const MtEnet *e);       /* transmit slots in flight */
+
+#ifdef MT_TUNE
+/* ---- transmit pump (PERF BUILDS ONLY: MT_TUNE lever txpump, task 17; mt_enet_pump.c, plain C, host-tested:
+ * tests/test_enet_pump.c) ----
+ * Why: mt_enet_write issues the async EWrite wherever the core emits a frame: inside the Ethernet driver's
+ * receive delivery (handler -> gate -> core -> ACK) and from the application's call at mask 0. MacTCP issues
+ * every EWrite from its own Time Manager task, after the driver's poll returned, and DaynaPORT and MoofPort
+ * both handle the other contexts late (echo-latency analysis R1).
+ * What: the driver's link.tx is mt_enet_tx_write (mt_drv.c). With the lever off and nothing queued it does
+ * exactly what mt_enet_write does (claim, copy, pad, EWrite now). With the lever on, or while frames are still
+ * queued (so a switch-off never reorders), it claims and fills a slot the same way, marks it ours (ioResult 1:
+ * mt_enet_tx_claim skips it), counts it started (tx_started, tx_ok: the watchdog times it from now, which also
+ * catches a pump that never ran) and puts the slot on a FIFO; the first frame primes a dedicated Time Manager
+ * task MT_ENET_PUMP_MS away (not MtTimer's deadline rounding to 17 ms). No free slot: 1 (busy), as today; the
+ * core stalls and retries. The task (mt_enet_pump_run) issues the queued EWrites in order. It never enters the
+ * core and touches only the queued slots' PBs and its own fields (the counters the gate owner keeps are not
+ * written from it: a refused EWrite only stores its error in the slot's ioResult, and the owner's next reap
+ * counts it in tx_err as any async error). A link that is not open fails the slot with -28 the same way.
+ * Contexts: link.tx runs only in the gate owner (one producer: head); the task is the one consumer (tail). The
+ * driver may deliver frames inside the task's EWrite: the handler then runs the core through the gate and its
+ * frames join the FIFO behind; `running` tells such a nested link.tx that the task drains them (no prime); the
+ * task re-checks after clearing it, so a frame queued by an interrupt in between is never stranded. */
+#define MT_ENET_PUMP_Q  16u        /* FIFO entries: a power of two above MT_ENET_TXSLOTS (it can never fill) */
+#define MT_ENET_PUMP_MS 1u         /* Time Manager delay of the pump task after the first queued frame */
+typedef struct MtEnetPump {
+    MtTimer  tm;                   /* the pump's own Time Manager task (Mac; unused on the host) */
+    volatile uint8_t on;           /* lever txpump (Control 0x4D55); written by the gate owner only */
+    volatile uint8_t head;         /* next FIFO entry link.tx fills (gate owner) */
+    volatile uint8_t tail;         /* next FIFO entry the task issues (task) */
+    volatile uint8_t armed;        /* primed, task not yet started (owner sets, task clears) */
+    volatile uint8_t running;      /* the task is draining the FIFO */
+    uint8_t  max_q;                /* deepest FIFO seen (owner) */
+    uint8_t  q[MT_ENET_PUMP_Q];    /* slot indexes into MtEnet.tx */
+    uint32_t runs;                 /* task runs (task) */
+    uint32_t issued;               /* EWrites the task issued (task) */
+    uint32_t nested;               /* frames queued while the task was draining (owner): delivered inside its EWrite */
+#ifdef MT_TEST_HOOKS
+    void (*test_window)(struct MtEnetPump *p);   /* host tests: runs after the task's last look, before running = 0 */
+#endif
+} MtEnetPump;
+/* The driver's link.tx in perf builds (see above). */
+int  mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t len);
+/* The pump task's body (Time Manager time on the Mac; tests call it as the task). */
+void mt_enet_pump_run(MtEnet *e, MtEnetPump *p);
+/* Toolbox side (mt_enet.c; faked in tests/pbfake.c): PBControlAsync on the slot's prepared PB (its result), and
+ * PrimeTime of the pump's task MT_ENET_PUMP_MS from now (legal from any context, the task itself included). */
+int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s);
+void    mt_enet_pump_prime(MtEnetPump *p);
+#endif
 
 #ifdef __cplusplus
 }

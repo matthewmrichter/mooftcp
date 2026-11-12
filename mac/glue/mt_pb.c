@@ -186,26 +186,32 @@ static int answers_zero(int16_t cs) {
 }
 
 #ifdef MT_TUNE
-/* Private Control MT_CS_TUNE (mt_tune_abi.h): get or set the core's timing levers; perf builds only. Runs in
- * mt_pb_control's critical section (under the core gate: mt_os_irq_save = MT_GATE_ENTER; the core is not entered, in_core is only set inside it). */
+/* Private Control MT_CS_TUNE (mt_tune_abi.h): get or set the core's timing levers and the link's transmit pump
+ * (d->txpump, glue state: the core has no part in it); perf builds only. Version 1 blocks read as txpump 0. Runs in
+ * mt_pb_control's critical section (under the core gate: mt_os_irq_save = MT_GATE_ENTER; the core is not entered,
+ * in_core is only set inside it), which is also the gate owner the pump's switch belongs to (mt_enet.h). */
 int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
     uint16_t w[MT_TW_N];
     MacPtr32 a;
     uint8_t *p;
     mt_tune t;
+    uint16_t pump;
     memcpy(&a, (const uint8_t *)pb + 28, 4);
     p = (uint8_t *)mt_os_ptr(a);
     if (!p) return MT_TUNE_PARAMERR;
     memcpy(w, p, MT_TUNE_BLOCK_BYTES);
-    if (w[MT_TW_VERSION] != MT_TUNE_ABI_VERSION) return MT_TUNE_PARAMERR;
+    if (w[MT_TW_VERSION] != MT_TUNE_ABI_VERSION && w[MT_TW_VERSION] != MT_TUNE_ABI_V1) return MT_TUNE_PARAMERR;
     if (w[MT_TW_OP] == MT_TUNE_OP_SET) {
-        if (w[MT_TW_QUICKACK] > 255u) return MT_TUNE_PARAMERR;
+        pump = w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : w[MT_TW_TXPUMP];
+        if (w[MT_TW_QUICKACK] > 255u || pump > 1u || (pump && !d->txpump)) return MT_TUNE_PARAMERR;
         t.rto_min = w[MT_TW_RTO_MIN];
         t.rto_init = w[MT_TW_RTO_INIT];
         t.delack_ms = w[MT_TW_DELACK];
         t.stall_ms = w[MT_TW_STALL];
         t.quickack = (uint8_t)w[MT_TW_QUICKACK];
-        return mt_tune_set(d->s, &t) == MT_OK ? 0 : MT_TUNE_PARAMERR;
+        if (mt_tune_set(d->s, &t) != MT_OK) return MT_TUNE_PARAMERR;
+        if (d->txpump) *d->txpump = (uint8_t)pump;
+        return 0;
     }
     if (w[MT_TW_OP] != MT_TUNE_OP_GET) return MT_TUNE_PARAMERR;
     mt_tune_get(d->s, &t);
@@ -214,7 +220,7 @@ int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
     w[MT_TW_DELACK] = t.delack_ms;
     w[MT_TW_STALL] = t.stall_ms;
     w[MT_TW_QUICKACK] = t.quickack;
-    w[MT_TW_RSVD] = 0;
+    w[MT_TW_TXPUMP] = (w[MT_TW_VERSION] != MT_TUNE_ABI_V1 && d->txpump) ? *d->txpump : 0;
     memcpy(p, w, MT_TUNE_BLOCK_BYTES);
     return 0;
 }

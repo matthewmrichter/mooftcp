@@ -85,6 +85,16 @@ extern const void *pbf_dev_head;         /* head request of .ENET0's queue, for 
 extern int pbf_blocked_calls;
 extern int pbf_reattach_calls;           /* the fake mt_enet_reattach_io */
 extern int pbf_reattach_result;
+#ifdef MT_TUNE
+#include "mt_enet.h"
+/* The transmit pump's Toolbox side (mt_enet.h, perf builds): mt_enet_io_write counts, runs the hook (the driver:
+ * it may deliver frames from inside, or change pbf_enet_io_result), then returns pbf_enet_io_result; 0 leaves the
+ * PB in flight (ioResult 1) until the test completes it. mt_enet_pump_prime only counts (the test runs the task). */
+extern int pbf_enet_io_calls;
+extern int16_t pbf_enet_io_result;
+extern void (*pbf_enet_io_hook)(MtEnet *e, MtEnetTx *s);
+extern int pbf_pump_primes;
+#endif
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */

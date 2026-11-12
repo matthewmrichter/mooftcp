@@ -45,6 +45,12 @@ void pbf_reset(void) {
     pbf_blocked_calls = 0;
     pbf_reattach_calls = 0;
     pbf_reattach_result = 0;
+#ifdef MT_TUNE
+    pbf_enet_io_calls = 0;
+    pbf_enet_io_result = 0;
+    pbf_enet_io_hook = NULL;
+    pbf_pump_primes = 0;
+#endif
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
@@ -338,6 +344,21 @@ int mt_enet_reattach_io(MtEnet *e) {
     e->opened = pbf_reattach_result == 0;
     return pbf_reattach_result;
 }
+
+#ifdef MT_TUNE
+int pbf_enet_io_calls;
+int16_t pbf_enet_io_result;
+void (*pbf_enet_io_hook)(MtEnet *e, MtEnetTx *s);
+int pbf_pump_primes;
+int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s) {
+    pbf_enet_io_calls++;
+    s->pb.ioResult = 1;                          /* the Device Manager: in flight from here */
+    if (pbf_enet_io_hook) pbf_enet_io_hook(e, s);
+    if (pbf_enet_io_result < 0) s->pb.ioResult = pbf_enet_io_result;
+    return pbf_enet_io_result;
+}
+void mt_enet_pump_prime(MtEnetPump *p) { (void)p; pbf_pump_primes++; }
+#endif
 
 /* ---- harness ---- */
 

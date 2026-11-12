@@ -181,6 +181,13 @@ static int tcb_of_frame(const uint8_t *f, uint16_t len) {
     return -1;
 }
 
+#ifdef MT_TUNE
+/* PB fuzzer, perf builds: the link behind link.tx is the driver's transmit pump (mt_enet_tx_write) over the fake
+ * EWrite; 1 = the pump refused (closed, no free slot, EWrite refused at once on the direct path). */
+static int g_fe_live;
+static int fz_enet_tx(const uint8_t *f, uint16_t len);
+#endif
+
 static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
     int refuse, k;
     (void)ctx;
@@ -197,6 +204,9 @@ static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
         refuse = rn(50) == 0;                               /* 2% link errors */
         if (!refuse && rn(300) == 0) g.refuse_burst = (int)rn(8);
     }
+#ifdef MT_TUNE
+    if (!refuse && g_fe_live) refuse = fz_enet_tx(f, len);  /* the pump's own refusals count the same */
+#endif
     if (len >= 54 && mt_rd16(f + 12) == 0x0800 && f[23] == 6) {
         const uint8_t *th = f + 14 + ((f[14] & 15u) << 2);
         uint32_t seq = mt_rd32(th + 4);
@@ -905,6 +915,9 @@ static void fuzz_setup(uint32_t seed) {
     g.rng = seed * 2654435761u + 1u;
     link.ctx = NULL;
     link.tx = link_tx;
+#ifdef MT_TUNE
+    g_fe_live = 0;                              /* the core fuzzer: link_tx alone */
+#endif
     mt_limits_default(&lim);
     g.s = mt_stack_init(g_arena, sizeof g_arena, &lim, &link, rnd());
     T_CHECK(g.s != NULL);
@@ -1104,6 +1117,120 @@ static struct {
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
          defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes, lo_rx;
 } P;
+
+#ifdef MT_TUNE
+/* The transmit pump (mt_enet.h, lever txpump) between the core and the wire. The fuzzer is the driver (pbfake's
+ * mt_enet_io_write hook: fz_wire) and the Time Manager (mt_enet_pump_run from pb_step, and from inside link.tx as
+ * a task interrupting the core's output). Checked: every frame link.tx accepted reaches the wire exactly once and
+ * in acceptance order (a shadow FIFO of length + hash); queued frames always have a primed, idle pump; tx_started
+ * counts the started slots; a frame the driver delivers inside the pump's EWrite (nested input) is answered
+ * through the same FIFO. Act_tune switches the lever. */
+static MtEnet FE;
+static MtEnetPump FP;
+#define SH_N 64
+static struct {
+    uint32_t hash[SH_N];
+    uint16_t len[SH_N];
+    uint32_t head, tail;                        /* pushed at acceptance, popped at the EWrite */
+    uint8_t issued[MT_ENET_TXSLOTS];            /* the slot's EWrite is with the "driver" */
+    int top;                                    /* the pump runs from pb_step: frames may be delivered inside */
+    long n_direct, n_pumped, n_nested_in, n_io_refused, n_busy, n_runs_in_tx, n_closed;
+} FZ;
+
+static uint32_t fz_hash(const uint8_t *f, uint16_t len) {
+    uint32_t h = 2166136261u;
+    uint16_t i;
+    for (i = 0; i < len; i++) h = (h ^ f[i]) * 16777619u;
+    return h;
+}
+
+static void fz_wire(MtEnet *e, MtEnetTx *s) {
+    static uint8_t nf[1514];
+    uint32_t k;
+    (void)e;
+    pbf_enet_io_result = rn(40) == 0 ? -17 : 0;  /* the driver refuses at once now and then */
+    if (FZ.head == FZ.tail) { bad("pump: EWrite of a frame link.tx never accepted"); return; }
+    k = FZ.tail++ % SH_N;
+    if (s->wds[0].len != mt_enet_padded_len(FZ.len[k]) || fz_hash(s->frame, FZ.len[k]) != FZ.hash[k])
+        bad("pump: frame on the wire out of order or changed");
+    if (pbf_enet_io_result == 0) FZ.issued[s - FE.tx] = 1;
+    else FZ.n_io_refused++;
+    if (FP.running) FZ.n_pumped++; else FZ.n_direct++;
+    if (FZ.top && rn(4) == 0 && !P.d->in_core) {   /* DaynaPORT: a frame delivered inside the pump's EWrite */
+        uint16_t n = gen_frame(nf);
+        FZ.n_nested_in++;
+        mt_pb_input(P.d, nf, n);
+    }
+}
+
+/* The pump's task runs (top: from pb_step, where the driver may deliver frames inside its EWrite). A closed link
+ * fails every queued slot without an EWrite (and refuses new frames meanwhile): those leave the shadow unwritten. */
+static void fz_run(int top) {
+    if (!FE.opened) FZ.tail += (uint32_t)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
+    FZ.top = top;
+    mt_enet_pump_run(&FE, &FP);
+    FZ.top = 0;
+}
+
+static int fz_enet_tx(const uint8_t *f, uint16_t len) {
+    uint32_t at = FZ.head;
+    int r;
+    if (FZ.head - FZ.tail >= SH_N) { bad("pump: shadow FIFO overflow"); return 1; }
+    FZ.hash[at % SH_N] = fz_hash(f, len);
+    FZ.len[at % SH_N] = len;
+    FZ.head++;
+    r = mt_enet_tx_write(&FE, &FP, f, len);
+    if (r && FZ.tail <= at) {                   /* refused before any EWrite: never on the wire */
+        if (FZ.head != at + 1) bad("pump: shadow FIFO grew during link.tx");
+        FZ.head = at;
+        FZ.n_busy++;
+    }
+    if (!r && FP.armed && rn(8) == 0) {         /* the pump's task interrupts the core's output here */
+        FZ.n_runs_in_tx++;
+        fz_run(0);
+    }
+    return r;
+}
+
+static void fz_pump_setup(void) {
+    memset(&FZ, 0, sizeof FZ);
+    mt_enet_init(&FE);
+    memset(&FP, 0, sizeof FP);
+    FE.refnum = -48;
+    FE.opened = 1;
+    FP.on = (uint8_t)rn(2);
+    pbf_enet_io_hook = fz_wire;
+    P.d->txpump = &FP.on;
+    g_fe_live = 1;
+}
+
+static void fz_pump_step(void) {
+    unsigned i;
+    for (i = 0; i < MT_ENET_TXSLOTS; i++)       /* the driver completes issued writes */
+        if (FZ.issued[i] && rn(2)) {
+            FE.tx[i].pb.ioResult = rn(30) ? 0 : -1;
+            FZ.issued[i] = 0;
+        }
+    if (rn(400) == 0) { FE.opened = (uint8_t)!FE.opened; FZ.n_closed++; }   /* reattach window / failed open */
+    if (!FE.opened && rn(8) == 0) FE.opened = 1;
+    if (FP.armed && rn(3) == 0) fz_run(1);      /* the pump's Time Manager task */
+}
+
+static void fz_pump_invariants(void) {
+    unsigned i, nq, st = 0;
+    uint8_t t;
+    if (FP.running) bad("pump: running flag left set");
+    nq = (unsigned)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
+    if (nq && !FP.armed) bad("pump: frames queued without a primed task");
+    if (nq != FZ.head - FZ.tail) bad("pump: queued frames differ from the frames accepted and not yet written");
+    for (t = FP.tail; t != FP.head; t = (uint8_t)((t + 1u) & (MT_ENET_PUMP_Q - 1u))) {
+        const MtEnetTx *s = &FE.tx[FP.q[t]];
+        if (s->pb.ioResult != 1 || !s->started || FZ.issued[FP.q[t]]) bad("pump: a queued slot is not ours");
+    }
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) st += FE.tx[i].started;
+    if (st != FE.tx_started) bad("pump: tx_started differs from the started slots");
+}
+#endif
 
 static TCPiopb *pr_pb(prec *r) { return (TCPiopb *)r->blk; }
 static uint8_t *pr_buf(prec *r) { return r->blk + PR_PB; }
@@ -1791,28 +1918,34 @@ static void act_tune(void) {
     int want_ok;
     if (!r) return;
     blk = pr_buf(r);
-    w[MT_TW_VERSION] = rn(12) ? MT_TUNE_ABI_VERSION : (uint16_t)rn(4);
+    w[MT_TW_VERSION] = rn(12) ? (rn(4) ? MT_TUNE_ABI_VERSION : MT_TUNE_ABI_V1) : (uint16_t)rn(4);
     w[MT_TW_OP] = rn(10) ? (uint16_t)rn(2) : (uint16_t)rn(5);
     w[MT_TW_RTO_MIN] = (uint16_t)(rn(8) ? 100 + rn(4901) : rn(6000));
     w[MT_TW_RTO_INIT] = (uint16_t)(rn(8) ? w[MT_TW_RTO_MIN] + rn(10001u - w[MT_TW_RTO_MIN] > 0 ? 10001u - w[MT_TW_RTO_MIN] : 1) : rn(11000));
     w[MT_TW_DELACK] = (uint16_t)(rn(8) ? rn(501) : rn(700));
     w[MT_TW_STALL] = (uint16_t)(rn(8) ? 1 + rn(100) : rn(130));
     w[MT_TW_QUICKACK] = (uint16_t)(rn(8) ? rn(256) : rn(300));
-    w[MT_TW_RSVD] = (uint16_t)rn(65536);
+    w[MT_TW_TXPUMP] = (uint16_t)(rn(8) ? rn(2) : rn(65536));   /* the transmit pump lever (version 2) */
     memcpy(blk, w, sizeof w);
     a = pbf_a(blk);
     memcpy((uint8_t *)pr_pb(r) + 28, &a, 4);
     res = issue_ex(r, MT_CS_TUNE, 0, -1, -1, 0);
-    want_ok = w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION && (w[MT_TW_OP] == MT_TUNE_OP_GET || w[MT_TW_OP] == MT_TUNE_OP_SET);
+    want_ok = (w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION || w[MT_TW_VERSION] == MT_TUNE_ABI_V1) &&
+              (w[MT_TW_OP] == MT_TUNE_OP_GET || w[MT_TW_OP] == MT_TUNE_OP_SET);
     if (res != 0 && res != MT_TUNE_PARAMERR) bad("tune control: result not 0 or -50");
     if (!want_ok && res == 0) bad("tune control: bad version or op accepted");
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_SET && w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION && w[MT_TW_TXPUMP] > 1)
+        bad("tune control: txpump > 1 accepted");
     memcpy(v, blk, sizeof v);
     if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_SET) {
         mt_tune t;
         mt_tune_get(P.d->s, &t);
         if (t.rto_min != w[MT_TW_RTO_MIN] || t.rto_init != w[MT_TW_RTO_INIT] || t.delack_ms != w[MT_TW_DELACK] ||
             t.stall_ms != w[MT_TW_STALL] || t.quickack != w[MT_TW_QUICKACK]) bad("tune control: set did not read back");
+        if (FP.on != (w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : w[MT_TW_TXPUMP])) bad("tune control: txpump not applied");
     }
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_GET &&
+        v[MT_TW_TXPUMP] != (w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : FP.on)) bad("tune control: get txpump wrong");
     if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_GET &&
         (v[MT_TW_RTO_MIN] < 100 || v[MT_TW_RTO_MIN] > 5000 || v[MT_TW_RTO_INIT] < v[MT_TW_RTO_MIN] ||
          v[MT_TW_RTO_INIT] > 10000 || v[MT_TW_DELACK] > 500 || v[MT_TW_STALL] < 1 || v[MT_TW_STALL] > 100 ||
@@ -1861,6 +1994,9 @@ static void pb_invariants(void) {
     if (pbf_irq != 0) bad("interrupt mask not restored");
     if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
     if (P.d->rel_mask) bad("deferred release left over");
+#ifdef MT_TUNE
+    fz_pump_invariants();
+#endif
     if (pbf_bad) { bad("misuse seen by the fake OS (pointer, routine, irq nesting)"); pbf_bad = 0; }
     pb_udp_invariants();
     for (i = 0; i < PS_N; i++) {
@@ -1980,6 +2116,9 @@ static void pb_setup(uint32_t seed) {
     for (k = 0; k < US_N; k++) { P.us[k].buf = (uint8_t *)pbf_alloc(US_BUF); memset(P.us[k].buf, CAN2, US_BUF); }
     g.now = rn(2) ? 0xFFF00000u + rnd() % 0x100000u : rnd();
     pbf_now = g.now;
+#ifdef MT_TUNE
+    fz_pump_setup();
+#endif
 }
 
 static void pb_step(uint8_t *f) {
@@ -2000,6 +2139,9 @@ static void pb_step(uint8_t *f) {
     if (rn(3) == 0) mt_pb_input(P.d, f, gen_pb_udp(f));
     if (rn(8) == 0) mt_pb_input(P.d, f, gen_pb_echo_reply(f));
     for (k = (int)rn(3); k > 0; k--) pb_action();
+#ifdef MT_TUNE
+    fz_pump_step();
+#endif
     check_invariants();
     pb_invariants();
     if ((g.step & 63) == 0) pb_full_canary_check();
@@ -2080,6 +2222,15 @@ static void test_fuzz_pb(void) {
     T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
     T_CHECK(early > 0); T_CHECK(rx > 0);
     T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
+#ifdef MT_TUNE
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb txpump (last seed): direct %ld pumped %ld nested input %ld refused at once %ld busy/closed %ld "
+                "task inside link.tx %ld link toggles %ld pump nested %lu max queue %u\n", FZ.n_direct, FZ.n_pumped,
+                FZ.n_nested_in, FZ.n_io_refused, FZ.n_busy, FZ.n_runs_in_tx, FZ.n_closed, (unsigned long)FP.nested,
+                (unsigned)FP.max_q);
+    T_CHECK(FZ.n_direct > 0); T_CHECK(FZ.n_pumped > 0); T_CHECK(FZ.n_nested_in > 0); T_CHECK(FZ.n_io_refused > 0);
+    T_CHECK(FZ.n_busy > 0); T_CHECK(FZ.n_runs_in_tx > 0); T_CHECK(FP.nested > 0);
+#endif
 }
 
 /* The fuzzer's frame damage must always be detectable by TCP: 400000 mutations of one segment

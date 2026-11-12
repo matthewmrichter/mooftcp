@@ -5,8 +5,9 @@
  *   source: preset <id> | MoofTCPTune.cfg | none (the run id is no preset and there is no cfg: nothing is set),
  *   last line "RESULT OK" or "RESULT FAIL <reason>" (for example "not a tune build").
  * The levers apply to timers armed from then until the next restart. A run id that names a preset
- * (tune_parse.h) selects it (a run id "a+b" applies preset a, then b, in one run); otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
- * "quickack="; a missing key keeps the current value) is read if it exists.
+ * (tune_parse.h) selects it (a run id "a+b" applies preset a, then adds b's change, in one run: "txpump+delack0" sets
+ * both, "x+default" restores the defaults); otherwise MoofTCPTune.cfg ("rto_min=", "rto_init=", "delack=", "stall=",
+ * "quickack=", "txpump="; a missing key keeps the current value) is read if it exists.
  * A "!!<id>" run file (mac/common/runid.h) makes the run unattended: no alert, the app quits. */
 #include <Quickdraw.h>
 #include <Dialogs.h>
@@ -80,20 +81,22 @@ static OSErr tune_call(short ref, uint16_t *w, uint16_t op)
 
 static void put_vals(const char *tag, const uint16_t *w)
 {
-    P("%s: rto_min=%u rto_init=%u delack=%u stall=%u quickack=%u\r", tag, (unsigned)w[MT_TW_RTO_MIN],
-      (unsigned)w[MT_TW_RTO_INIT], (unsigned)w[MT_TW_DELACK], (unsigned)w[MT_TW_STALL], (unsigned)w[MT_TW_QUICKACK]);
+    P("%s: rto_min=%u rto_init=%u delack=%u stall=%u quickack=%u txpump=%u\r", tag, (unsigned)w[MT_TW_RTO_MIN],
+      (unsigned)w[MT_TW_RTO_INIT], (unsigned)w[MT_TW_DELACK], (unsigned)w[MT_TW_STALL], (unsigned)w[MT_TW_QUICKACK],
+      (unsigned)w[MT_TW_TXPUMP]);
 }
 
 static void to_block(const tn_vals *v, uint16_t *w)
 {
     w[MT_TW_RTO_MIN] = (uint16_t)v->rto_min; w[MT_TW_RTO_INIT] = (uint16_t)v->rto_init;
     w[MT_TW_DELACK] = (uint16_t)v->delack; w[MT_TW_STALL] = (uint16_t)v->stall; w[MT_TW_QUICKACK] = (uint16_t)v->quickack;
+    w[MT_TW_TXPUMP] = (uint16_t)v->txpump;
 }
 
 static void from_block(const uint16_t *w, tn_vals *v)
 {
     v->rto_min = w[MT_TW_RTO_MIN]; v->rto_init = w[MT_TW_RTO_INIT]; v->delack = w[MT_TW_DELACK];
-    v->stall = w[MT_TW_STALL]; v->quickack = w[MT_TW_QUICKACK];
+    v->stall = w[MT_TW_STALL]; v->quickack = w[MT_TW_QUICKACK]; v->txpump = w[MT_TW_TXPUMP];
 }
 
 /* MoofTCPTune.cfg beside the app: its text in buf, length returned, or -1 if there is none. */
@@ -152,8 +155,9 @@ int main(void)
         else put_vals("before", before);
     }
     if (!reason[0]) {
-        /* "a+b+c": presets applied in that order in this one run (a sweep step and its restore in one boot);
-         * otherwise one preset, or MoofTCPTune.cfg. Each step prints its source: and the values read back. */
+        /* "a+b+c": a, then the changes of b and c added in that order, in this one run (a combination, or a sweep
+         * step and its restore with "+default", in one boot); otherwise one preset, or MoofTCPTune.cfg. Each step
+         * prints its source: and the values read back. */
         const char *tok = id;
         from_block(before, &v);
         for (;;) {
@@ -164,7 +168,7 @@ int main(void)
             if (tl >= sizeof one) tl = sizeof one - 1;
             memcpy(one, tok, tl);
             one[tl] = 0;
-            is_preset = one[0] && tn_preset(one, &v);
+            is_preset = one[0] && tn_preset_step(one, tok == id, &v);
             if (is_preset) P("source: preset %s\r", one);
             else if (plus) sprintf(reason, "unknown preset '%s' in the run id", one);
             else if ((clen = read_cfg(cfg, 512)) >= 0) {
@@ -182,7 +186,7 @@ int main(void)
             if (r != 0) { sprintf(reason, "read back failed (Control %d)", (int)r); break; }
             put_vals("after", after);
             to_block(&v, want);
-            for (i = MT_TW_RTO_MIN; i <= MT_TW_QUICKACK; i++)
+            for (i = MT_TW_RTO_MIN; i <= MT_TW_TXPUMP; i++)
                 if (after[i] != want[i]) strcpy(reason, "values read back differ from those set");
             if (reason[0] || !plus) break;
             tok = plus + 1;

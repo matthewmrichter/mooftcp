@@ -5,24 +5,38 @@
 
 void tn_defaults(tn_vals *v)
 {
-    v->rto_min = 1000; v->rto_init = 1000; v->delack = 100; v->stall = 10; v->quickack = 4;
+    v->rto_min = 1000; v->rto_init = 1000; v->delack = 100; v->stall = 10; v->quickack = 4; v->txpump = 0;
+}
+
+/* The preset's one change applied to *t ("default": all the defaults); 0 for an unknown name. */
+static int change(const char *id, tn_vals *t)
+{
+    if (strcmp(id, "default") == 0) tn_defaults(t);
+    else if (strcmp(id, "delack0") == 0) t->delack = 0;
+    else if (strcmp(id, "delack20") == 0) t->delack = 20;
+    else if (strcmp(id, "delack50") == 0) t->delack = 50;
+    else if (strcmp(id, "qack16") == 0) t->quickack = 16;
+    else if (strcmp(id, "qackall") == 0) t->quickack = 255;
+    else if (strcmp(id, "rto500") == 0) { t->rto_min = 500; t->rto_init = 500; }
+    else if (strcmp(id, "rto700") == 0) { t->rto_min = 700; t->rto_init = 700; }
+    else if (strcmp(id, "stall2") == 0) t->stall = 2;
+    else if (strcmp(id, "stall5") == 0) t->stall = 5;
+    else if (strcmp(id, "txpump") == 0) t->txpump = 1;
+    else return 0;
+    return 1;
 }
 
 int tn_preset(const char *id, tn_vals *v)
 {
+    return tn_preset_step(id, 1, v);
+}
+
+int tn_preset_step(const char *id, int first, tn_vals *v)
+{
     tn_vals t;
-    tn_defaults(&t);
-    if (strcmp(id, "default") == 0) { }
-    else if (strcmp(id, "delack0") == 0) t.delack = 0;
-    else if (strcmp(id, "delack20") == 0) t.delack = 20;
-    else if (strcmp(id, "delack50") == 0) t.delack = 50;
-    else if (strcmp(id, "qack16") == 0) t.quickack = 16;
-    else if (strcmp(id, "qackall") == 0) t.quickack = 255;
-    else if (strcmp(id, "rto500") == 0) { t.rto_min = 500; t.rto_init = 500; }
-    else if (strcmp(id, "rto700") == 0) { t.rto_min = 700; t.rto_init = 700; }
-    else if (strcmp(id, "stall2") == 0) t.stall = 2;
-    else if (strcmp(id, "stall5") == 0) t.stall = 5;
-    else return 0;
+    if (first) tn_defaults(&t);
+    else t = *v;
+    if (!change(id, &t)) return 0;
     *v = t;
     return 1;
 }
@@ -63,6 +77,7 @@ int tn_parse_cfg(const char *text, long len, tn_vals *v, char *err, int errcap)
         else if (strcmp(key, "delack") == 0) dst = &v->delack;
         else if (strcmp(key, "stall") == 0) dst = &v->stall;
         else if (strcmp(key, "quickack") == 0) dst = &v->quickack;
+        else if (strcmp(key, "txpump") == 0) dst = &v->txpump;
         else { fail(err, errcap, "unknown key", key); return -1; }
         if (nn == 0 || nn > 5) { fail(err, errcap, "bad number for", key); return -1; }
         for (k = 0; k < nn; k++) {

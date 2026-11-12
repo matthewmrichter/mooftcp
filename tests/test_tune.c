@@ -244,7 +244,7 @@ static void test_pb_control_get_set(void) {
     mt_tune_get(x.d->s, &t); T_EQ(t.stall_ms, 5);
     w[MT_TW_QUICKACK] = 256;
     T_EQ(tune_call(&x, w, MT_TUNE_ABI_VERSION, MT_TUNE_OP_SET), MT_TUNE_PARAMERR);
-    T_EQ(tune_call(&x, w, 2, MT_TUNE_OP_GET), MT_TUNE_PARAMERR);          /* bad version */
+    T_EQ(tune_call(&x, w, 3, MT_TUNE_OP_GET), MT_TUNE_PARAMERR);          /* bad version */
     T_EQ(tune_call(&x, w, MT_TUNE_ABI_VERSION, 7), MT_TUNE_PARAMERR);     /* bad op */
     T_EQ(pbf_bad, 0);
 }

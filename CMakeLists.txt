@@ -46,7 +46,8 @@ endif()
 # The MacTCP PB dispatcher (mac/glue/mt_pb*.c), host-built against the fake OS layer
 # tests/pbfake.c (mt_os.h). Packed PB structs: taking a member's address is an error.
 file(GLOB MT_GLUE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/mac/glue/mt_pb*.c)
-list(APPEND MT_GLUE_SRC ${CMAKE_SOURCE_DIR}/mac/glue/mt_gate.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_wd.c)
+list(APPEND MT_GLUE_SRC ${CMAKE_SOURCE_DIR}/mac/glue/mt_gate.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_wd.c
+     ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_pump.c)
 if(MT_GLUE_SRC)
   add_library(mtglue STATIC ${MT_GLUE_SRC} ${CMAKE_SOURCE_DIR}/tests/pbfake.c)
   target_include_directories(mtglue PUBLIC ${CMAKE_SOURCE_DIR}/mac/glue
@@ -87,7 +88,7 @@ if(MT_NO_DHCP)   # the client and the driver's DHCP mode do not exist in Lite
   list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_dhcp.c ${CMAKE_SOURCE_DIR}/tests/test_pb_dhcp.c)
 endif()
 if(NOT MT_TUNE)   # the run-time levers exist only in the perf configuration (build-tune)
-  list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_tune.c)
+  list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_tune.c ${CMAKE_SOURCE_DIR}/tests/test_enet_pump.c)
 endif()
 foreach(src ${MT_TEST_SRC})
   get_filename_component(name ${src} NAME_WE)

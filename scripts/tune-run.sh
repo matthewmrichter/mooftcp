@@ -2,8 +2,9 @@
 # MoofTCPTune check in Snow (MT_TUNE task 14): install the perf build of MoofTCP (MT_TUNE=1: build-mac-tune/), run
 # MoofTCPTune and then MoofDiag in ONE boot, both unattended with the run file "!!<id>", and print both outputs.
 #   tune-run.sh [--keep-disk] [--cfg <MoofTCPTune.cfg>] [--release] <id>
-#     <id>        the run id: a preset (default delack0 delack20 delack50 qack16 qackall rto500 rto700 stall2 stall5),
-#                 or "a+b" (two presets in one boot, e.g. delack0+default: the restore check),
+#     <id>        the run id: a preset (default delack0 delack20 delack50 qack16 qackall rto500 rto700 stall2 stall5
+#                 txpump), or "a+b" (a, then b's change added, in one boot: txpump+delack0 sets both,
+#                 delack0+default is the restore check),
 #                 or any other id with --cfg
 #     --cfg f     also put f on the image as MoofTCPTune.cfg (read when the id is no preset)
 #     --release   use the RELEASE MoofTCP instead (build-mac/): MoofTCPTune must then end RESULT FAIL "not a tune

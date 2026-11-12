@@ -206,3 +206,17 @@ void mt_enet_close(MtEnet *e)
     mt_enet_ph_set_ctx(0);
     if (e->gate) e->gate->open = 0;
 }
+
+#ifdef MT_TUNE
+/* The transmit pump's Toolbox side (perf builds; mt_enet.h "transmit pump", mt_enet_pump.c). */
+int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s)
+{
+    (void)e;
+    return (int16_t)PBControlAsync((ParmBlkPtr)&s->pb);
+}
+
+void mt_enet_pump_prime(MtEnetPump *p)
+{
+    mt_timer_arm(&p->tm, MT_ENET_PUMP_MS);       /* PrimeTime; inside the task's own run too (mt_timer.h) */
+}
+#endif

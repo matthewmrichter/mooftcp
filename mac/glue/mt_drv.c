@@ -106,6 +106,21 @@ static void after_cb(void *ctx) {
 
 static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
 
+#ifdef MT_TUNE
+/* Perf builds: link.tx goes through the transmit pump (mt_enet.h), which with the lever off does what
+ * mt_enet_write does; pump_cb is the pump's own Time Manager task (never enters the core).
+ * MT_TXPUMP_BOOT=1 (measurement builds only, e.g. MT_TUNE=1 MT_EXTRA_CFLAGS="... -DMT_TXPUMP_BOOT=1"
+ * scripts/mem-check.sh): the lever starts on, so the memory and stack rules are checked with the pump in use. */
+#ifndef MT_TXPUMP_BOOT
+#define MT_TXPUMP_BOOT 0
+#endif
+static int pump_tx(void *ctx, const uint8_t *frame, uint16_t len) {
+    MtRes *r = (MtRes *)ctx;
+    return mt_enet_tx_write(&r->enet, &r->pump, frame, len);
+}
+static void pump_cb(void *ctx) { MtRes *r = (MtRes *)ctx; mt_enet_pump_run(&r->enet, &r->pump); }
+#endif
+
 /* ---- boot (from the INIT, once) ---- */
 
 static long boot(void *drvr);
@@ -150,8 +165,13 @@ static long boot(void *drvr) {
     r->variant = MT_RES_VARIANT_LITE;            /* full: stays 0 (NewPtrSysClear) */
 #endif
 
+#ifdef MT_TUNE
+    link.ctx = r;
+    link.tx = pump_tx;
+#else
     link.ctx = &r->enet;
     link.tx = mt_enet_write;
+#endif
     r->d = mt_pb_init((uint8_t *)r + off, len - off, &lim, &link, LM_TICKS);
     if (!r->d) { mt_mac_free(raw); return MT_BOOT_NOMEM; }
     mt_mac_entropy(&ea, &eb);
@@ -169,6 +189,11 @@ static long boot(void *drvr) {
     r->stk.flags = (uint16_t)((MT_STACK_MARK ? 1 : 0) | (MT_STACK_PAINT ? 2 : 0));
     mt_os_mac_set_stack(&r->stk);
     mt_timer_init(&r->timer, tm_cb, r);
+#ifdef MT_TUNE
+    mt_timer_init(&r->pump.tm, pump_cb, r);
+    r->pump.on = MT_TXPUMP_BOOT;
+    r->d->txpump = &r->pump.on;
+#endif
 
     r->view.magic = MT_VIEW_MAGIC;
     r->view.version = MT_VIEW_VERSION;
@@ -191,6 +216,9 @@ static long boot(void *drvr) {
     if (e) {
         r->enet_err = (int16_t)e;
         mt_timer_close(&r->timer);
+#ifdef MT_TUNE
+        mt_timer_close(&r->pump.tm);
+#endif
         mt_os_mac_set_gate(0);
         mt_os_mac_set_stack(0);
         g_res = 0;

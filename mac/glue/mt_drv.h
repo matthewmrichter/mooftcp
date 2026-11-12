@@ -38,6 +38,10 @@ typedef struct MtRes {
      * view.mode stays 0), so readers of the view need no variant check. */
     mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
     MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
+#ifdef MT_TUNE
+    MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
+                                  * above keeps its place for readers built without MT_TUNE */
+#endif
 } MtRes;
 
 /* MtRes.variant: which build made the driver. The core's mt_stack differs between the two (Lite has
