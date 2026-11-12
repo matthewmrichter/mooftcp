@@ -64,11 +64,23 @@ static inline uint32_t mt_timer_deadline_ms(uint32_t d)
     return d < MT_TIMER_STEP_MS ? MT_TIMER_STEP_MS : d;
 }
 
+/* 1.1d1: the pending shot already fires in time. t is armed (primed, not yet fired) for the absolute ms time `due`
+ * (the coarse clock, mt_os_ms), and a new shot would be `ms` after `now`: nonzero when due <= now + ms (wrap-safe).
+ * Pure, host-tested. A shot kept this way fires no later than the new one would (both are exact-ms PrimeTimes from
+ * a coarse "now": either may land up to one clock step before the coarse deadline, never later than one step
+ * after it); when it fires early the tick finds nothing due (mt_drv_tick_idle) and the deadline is armed again. */
+static inline int mt_timer_keep(const MtTimer *t, uint32_t due, uint32_t now, uint32_t ms)
+{
+    return t->armed && (int32_t)(now + ms - due) >= 0;
+}
+
 int  mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx);   /* 0 or a Toolbox error */
 void mt_timer_arm(MtTimer *t, uint32_t ms);
-/* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed): the helper every
- * caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). */
-void mt_timer_arm_deadline(MtTimer *t, uint32_t d);
+/* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed), computed at `now` (mt_os_ms):
+ * the helper every caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). Since 1.1d1
+ * the Time Manager task is touched only when the deadline is earlier than the pending shot (mt_timer_keep); *due
+ * is the caller's record of that shot's absolute time (written here, under the same mask as the arm). */
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, uint32_t *due);
 void mt_timer_cancel(MtTimer *t);
 void mt_timer_close(MtTimer *t);
 

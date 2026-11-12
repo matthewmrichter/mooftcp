@@ -116,4 +116,12 @@ typedef struct MtEntry {
 #define MT_DRV_TRAP_IMMED 0x0200u
 #define MT_DRV_TRAP_ASYNC 0x0400u
 
+/* 1.1d1: the gate's tick callback skips the MultiFinder sweep and the tick work (mt_pb_tick) when the tick came from
+ * the timer (not from a PB queued for the owner) and nothing is due yet: next_ms = mt_pb_next_deadline_ms, nonzero.
+ * The timer is re-armed only for earlier deadlines (mt_timer_keep), so it may fire before the current deadline;
+ * such a tick then does no more than a tick that did not happen (the after callback still drains and re-arms). */
+static inline int mt_drv_tick_idle(int from_timer, uint32_t next_ms) {
+    return from_timer && next_ms != 0;
+}
+
 #endif /* MT_DRV_LOGIC_H */

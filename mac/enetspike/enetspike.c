@@ -95,7 +95,7 @@ static void after_cb(void *ctx)
     App *a = (App *)ctx;
     uint32_t d = mt_next_deadline(a->s, mt_os_ms());
     a->after_calls++;
-    mt_timer_arm_deadline(&a->tm, d);
+    mt_timer_arm(&a->tm, mt_timer_deadline_ms(d));   /* always re-armed (the driver keeps an earlier shot) */
 }
 static void tm_cb(void *ctx) { mt_gate_tick(((App *)ctx)->g); }
 

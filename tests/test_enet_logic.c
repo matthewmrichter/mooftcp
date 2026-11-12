@@ -67,4 +67,24 @@ static void timer_deadline_helper(void)
     T_CHECK(MT_TIMER_STEP_MS >= 17);
 }
 
-T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper)
+/* 1.1d1 F5: a deadline re-arms the Time Manager task only when it is earlier than the pending shot. */
+static void timer_rearm_only_when_earlier(void)
+{
+    MtTimer t;
+    memset(&t, 0, sizeof t);
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 500));                  /* not armed (or fired: inside the callback) */
+    t.armed = 1;
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 500));                   /* later: the shot at 1100 stays */
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 100));                   /* the same time: stays */
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 99));                   /* earlier: re-arm */
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 17));
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, MT_TIMER_MAX_MS));       /* no deadline: the longest shot */
+    T_CHECK(mt_timer_keep(&t, 0x10u, 0xFFFFFFF0u, 0x20u));         /* across the 2^32 wrap */
+    T_CHECK(!mt_timer_keep(&t, 0x10u, 0xFFFFFFF0u, 0x1Fu));
+    t.in_cb = 1;                                                   /* armed again in the same callback */
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 500));
+    t.armed = 0;
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 500));                  /* fired: PrimeTime from the callback */
+}
+
+T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier)

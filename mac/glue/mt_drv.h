@@ -32,7 +32,8 @@ typedef struct MtRes {
     int16_t        cfg_result;   /* mt_cfg_load result */
     int16_t        enet_err;     /* unit install error at boot / mt_enet_open error at open */
     uint8_t        mode;         /* MCFG mode slot */
-    uint8_t        pad;
+    volatile uint8_t tm_shot;    /* 1.1d1 (was a pad byte): set by the Time Manager task before it asks the gate for a
+                                  * tick, taken by the tick callback (a tick from the timer, not from a queued PB) */
     mt_ifconfig    cfg;          /* configuration from the prefs (applied at the first open) */
     MtStackMark    stk;          /* interrupt-time stack depth (mt_stackmark.h); new fields go at the end */
     uint8_t        cfg_flags;    /* MCFG flags byte (MT_CFG_FLAG_LOG ...) */
@@ -41,6 +42,8 @@ typedef struct MtRes {
      * view.mode stays 0), so readers of the view need no variant check. */
     mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
     MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
+    uint32_t       tm_due;       /* 1.1d1, appended: the absolute time (mt_os_ms) the timer's pending shot is for
+                                  * (mt_timer_arm_deadline; valid while timer.armed) */
 #ifdef MT_TUNE
     MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
                                   * above keeps its place for readers built without MT_TUNE */

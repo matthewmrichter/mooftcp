@@ -4,8 +4,6 @@
 #include "mt_enet.h"
 #include "mt_os.h"
 
-#define NO_DEADLINE 0xFFFFFFFFu
-
 /* A finished slot (ioResult <= 0) that was started: count its error once, mark it free. */
 static void reap(MtEnet *e, MtEnetTx *c)
 {
@@ -47,10 +45,13 @@ int mt_enet_tx_quarantined(const MtEnet *e)
     return n;
 }
 
-uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d)
+uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d, uint32_t now)
 {
+    uint32_t w;
     if (!e->tx_started) return d;
-    return (d == NO_DEADLINE || d > MT_ENET_WD_SCAN_MS) ? MT_ENET_WD_SCAN_MS : d;
+    if (e->wd_fresh) w = MT_ENET_WD_SCAN_MS;     /* no scan yet: the next watchdog call scans */
+    else w = (int32_t)(e->wd_next - now) > 0 ? e->wd_next - now : 0;
+    return d < w ? d : w;
 }
 
 void mt_enet_init(MtEnet *e)

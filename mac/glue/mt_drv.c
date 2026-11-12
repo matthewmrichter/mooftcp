@@ -89,6 +89,11 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
+    uint8_t shot = r->tm_shot;
+    r->tm_shot = 0;
+    /* 1.1d1: the timer fired before anything is due (it is re-armed only for earlier deadlines): no sweep, no tick
+     * work; after_cb drains, runs the watchdog and arms the next deadline, as after any gate session */
+    if (shot && mt_drv_tick_idle(shot, mt_pb_next_deadline_ms(r->d))) return;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -98,13 +103,20 @@ static void tick_cb(void *ctx) {
 
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
+    uint32_t now, d;
     mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
                                                  * is still recorded (its queued PBs are not dropped yet) */
-    mt_enet_watchdog(&r->enet, mt_os_ms());      /* idle: one compare */
-    mt_timer_arm_deadline(&r->timer, mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d)));
+    now = mt_os_ms();                            /* read before the deadline query: the shot is never late */
+    mt_enet_watchdog(&r->enet, now);             /* idle: one compare */
+    d = mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d), now);
+    mt_timer_arm_deadline(&r->timer, d, now, &r->tm_due);   /* Time Manager traps only for an earlier deadline */
 }
 
-static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
+static void tm_cb(void *ctx) {
+    MtRes *r = (MtRes *)ctx;
+    r->tm_shot = 1;
+    mt_gate_tick(&r->gate);
+}
 
 #ifdef MT_TUNE
 /* Perf builds: link.tx goes through the transmit pump (mt_enet.h), which with the lever off does what
@@ -261,7 +273,10 @@ static int16_t link_up(MtRes *r) {
 #endif
         mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: arms the timer too */
     r->view.linked = 1;
-    mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d));
+    {
+        uint32_t now = mt_os_ms();
+        mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d), now, &r->tm_due);
+    }
     return 0;
 }
 

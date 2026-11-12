@@ -616,6 +616,16 @@ static void drain_masks_only_nonempty_rings(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* 1.1d1 F5: a timer tick that finds nothing due skips the sweep and the tick work (the timer is re-armed only for
+ * earlier deadlines, so it may fire before the current one); a tick asked for by a queued PB never does. */
+static void tick_idle_only_for_early_timer_ticks(void) {
+    T_CHECK(mt_drv_tick_idle(1, 1));
+    T_CHECK(mt_drv_tick_idle(1, MT_NO_DEADLINE));
+    T_CHECK(!mt_drv_tick_idle(1, 0));                     /* something is due */
+    T_CHECK(!mt_drv_tick_idle(0, 500));                   /* not from the timer: the full tick, as before */
+    T_CHECK(!mt_drv_tick_idle(0, 0));
+}
+
 /* ---- final review fix 2: a chained 1-byte reader has bounded nesting ---- */
 
 static uint8_t g_rd[4096];
@@ -856,4 +866,5 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        preemption_inside_nested_core_call_is_not_a_callout, chained_one_byte_reader_is_bounded,
        goodbye_drops_streams_holding_app_routines_or_pbs,
        chained_buffer_emptying_reader_is_bounded, goodbye_drops_pbs_with_app_completion,
-       entry_inline_completions_are_bounded, drain_masks_only_nonempty_rings)
+       entry_inline_completions_are_bounded, drain_masks_only_nonempty_rings,
+       tick_idle_only_for_early_timer_ticks)

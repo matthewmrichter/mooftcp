@@ -87,9 +87,15 @@ void mt_timer_arm(MtTimer *t, uint32_t ms)
     irq_on(g);
 }
 
-void mt_timer_arm_deadline(MtTimer *t, uint32_t d)
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, uint32_t *due)
 {
-    mt_timer_arm(t, mt_timer_deadline_ms(d));
+    uint32_t ms = mt_timer_deadline_ms(d);
+    sr_t g = irq_off();                          /* the armed check, the arm and *due together */
+    if (!mt_timer_keep(t, *due, now, ms)) {
+        *due = now + ms;
+        mt_timer_arm(t, ms);                     /* nests its own mask section */
+    }
+    irq_on(g);
 }
 
 void mt_timer_close(MtTimer *t)
