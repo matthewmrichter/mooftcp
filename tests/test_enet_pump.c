@@ -69,6 +69,7 @@ static void test_off_issues_at_once_in_order(void)
     T_EQ(g_nwire, 3);
     T_EQ(g_wire[0], 1); T_EQ(g_wire[1], 2); T_EQ(g_wire[2], 3);
     T_EQ(pbf_pump_primes, 0);
+    T_EQ(pbf_enet_write_calls, 3);                       /* off is mt_enet_write itself (release path) */
     T_EQ(E.tx_ok, 3); T_EQ(E.tx_pad, 1); T_EQ(E.tx_started, 3);
     T_EQ(mt_enet_tx_busy(&E), 3);
     T_EQ(PU.head, PU.tail);
@@ -221,6 +222,32 @@ static void test_refused_and_closed_counted_by_owner(void)
     T_EQ(mt_enet_tx_busy(&E), 0);
 }
 
+/* Watchdog KillIO / reattach (task time, gate owned) holds the pump: a task run issues nothing and clears armed;
+ * the release primes again and the queued frames leave in order. Pumped frames never use mt_enet_write. */
+static void test_hold_blocks_task_until_released(void)
+{
+    setup();
+    PU.on = 1;
+    T_EQ(wr(1, 60), 0);
+    T_EQ(wr(2, 60), 0);
+    mt_enet_pump_hold(&PU, 1);
+    mt_enet_pump_run(&E, &PU);                           /* the task fires during the synchronous calls */
+    T_EQ(g_nwire, 0);
+    T_EQ(PU.armed, 0);
+    T_EQ(PU.issued, 0);
+    T_EQ(pbf_pump_primes, 1);
+    mt_enet_pump_hold(&PU, 0);
+    T_EQ(pbf_pump_primes, 2);                            /* re-primed for the frames still queued */
+    T_CHECK(PU.armed);
+    mt_enet_pump_run(&E, &PU);
+    T_EQ(g_nwire, 2);
+    T_EQ(g_wire[0], 1); T_EQ(g_wire[1], 2);
+    mt_enet_pump_hold(&PU, 1);                           /* nothing queued: a release primes nothing */
+    mt_enet_pump_hold(&PU, 0);
+    T_EQ(pbf_pump_primes, 2);
+    T_EQ(pbf_enet_write_calls, 0);
+}
+
 /* Drop paths before a slot is taken are today's: closed, bad length. */
 static void test_closed_and_bad_length_dropped(void)
 {
@@ -342,5 +369,6 @@ static void test_ack_from_receive_delivery_waits_for_task(void)
 T_MAIN(test_off_issues_at_once_in_order, test_on_queues_until_task_runs, test_ring_full_returns_busy,
        test_off_with_queue_keeps_order, test_nested_write_drained_by_same_run, test_write_after_run_primes_again,
        test_frame_in_the_last_window_not_stranded,
-       test_refused_and_closed_counted_by_owner, test_closed_and_bad_length_dropped, test_control_txpump_v2_and_v1,
+       test_refused_and_closed_counted_by_owner, test_hold_blocks_task_until_released,
+       test_closed_and_bad_length_dropped, test_control_txpump_v2_and_v1,
        test_ack_from_receive_delivery_waits_for_task)

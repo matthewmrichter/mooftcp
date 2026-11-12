@@ -15,7 +15,7 @@ _Static_assert((MT_ENET_PUMP_Q & (MT_ENET_PUMP_Q - 1u)) == 0 && MT_ENET_PUMP_Q >
 
 static void barrier(void) { __asm__ volatile("" : : : "memory"); }
 
-/* The PB for an EWrite of the slot's frame, n bytes (what mt_enet_write prepares before PBControlAsync). */
+/* The PB for a queued EWrite of the slot's frame, n bytes (the same fields mt_enet_write prepares). */
 static void fill_pb(const MtEnet *e, MtEnetTx *s, uint16_t n)
 {
     memset(&s->pb, 0, sizeof s->pb);
@@ -41,8 +41,10 @@ int mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t le
     MtEnetTx *s;
     uint16_t n;
     uint8_t h, depth;
-    int16_t r;
 
+    h = p->head;
+    if (!p->on && h == p->tail)                 /* lever off, nothing queued: the release path itself */
+        return mt_enet_write(e, frame, len);
     if (!e->opened) { e->tx_drop_closed++; return 1; }
     if (!mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
     s = mt_enet_tx_claim(e);
@@ -52,18 +54,6 @@ int mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t le
     n = mt_enet_pad(s->frame, len);
     if (n != len) e->tx_pad++;
     fill_pb(e, s, n);
-    h = p->head;
-    if (!p->on && h == p->tail) {               /* lever off, nothing queued: mt_enet_write's path */
-        r = mt_enet_io_write(e, s);
-        if (r < 0) {
-            s->pb.ioResult = r;                 /* refused at once: the slot is free again, counted here */
-            e->last_err = r;
-            e->tx_err++;
-            return 1;
-        }
-        count_started(e, s);
-        return 0;
-    }
     s->pb.ioResult = 1;                         /* ours until the task issues it: mt_enet_tx_claim skips it */
     count_started(e, s);
     p->q[h] = (uint8_t)(s - e->tx);
@@ -80,9 +70,21 @@ int mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t le
     return 0;
 }
 
+void mt_enet_pump_hold(MtEnetPump *p, int on)
+{
+    if (on) { p->hold = 1; return; }
+    p->hold = 0;
+    barrier();
+    if (p->head != p->tail && !p->armed) {      /* a run during the hold left them: prime again */
+        p->armed = 1;
+        mt_enet_pump_prime(p);
+    }
+}
+
 void mt_enet_pump_run(MtEnet *e, MtEnetPump *p)
 {
     int16_t r;
+    if (p->hold) { p->armed = 0; return; }      /* synchronous .ENET0 calls in progress: mt_enet_pump_hold re-primes */
     mt_os_stack_enter();                        /* an episode of its own: the driver may deliver inside EWrite */
     p->armed = 0;
     p->runs++;

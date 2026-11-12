@@ -1134,7 +1134,7 @@ static struct {
     uint32_t head, tail;                        /* pushed at acceptance, popped at the EWrite */
     uint8_t issued[MT_ENET_TXSLOTS];            /* the slot's EWrite is with the "driver" */
     int top;                                    /* the pump runs from pb_step: frames may be delivered inside */
-    long n_direct, n_pumped, n_nested_in, n_io_refused, n_busy, n_runs_in_tx, n_closed;
+    long n_direct, n_pumped, n_nested_in, n_io_refused, n_busy, n_runs_in_tx, n_closed, n_held_runs;
 } FZ;
 
 static uint32_t fz_hash(const uint8_t *f, uint16_t len) {
@@ -1166,7 +1166,7 @@ static void fz_wire(MtEnet *e, MtEnetTx *s) {
 /* The pump's task runs (top: from pb_step, where the driver may deliver frames inside its EWrite). A closed link
  * fails every queued slot without an EWrite (and refuses new frames meanwhile): those leave the shadow unwritten. */
 static void fz_run(int top) {
-    if (!FE.opened) FZ.tail += (uint32_t)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
+    if (!FE.opened && !FP.hold) FZ.tail += (uint32_t)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
     FZ.top = top;
     mt_enet_pump_run(&FE, &FP);
     FZ.top = 0;
@@ -1213,6 +1213,11 @@ static void fz_pump_step(void) {
         }
     if (rn(400) == 0) { FE.opened = (uint8_t)!FE.opened; FZ.n_closed++; }   /* reattach window / failed open */
     if (!FE.opened && rn(8) == 0) FE.opened = 1;
+    if (rn(60) == 0) {                          /* watchdog KillIO / reattach: the task fires during the hold */
+        mt_enet_pump_hold(&FP, 1);
+        if (rn(2)) { FZ.n_held_runs++; fz_run(0); }
+        mt_enet_pump_hold(&FP, 0);
+    }
     if (FP.armed && rn(3) == 0) fz_run(1);      /* the pump's Time Manager task */
 }
 
@@ -2229,7 +2234,7 @@ static void test_fuzz_pb(void) {
                 FZ.n_nested_in, FZ.n_io_refused, FZ.n_busy, FZ.n_runs_in_tx, FZ.n_closed, (unsigned long)FP.nested,
                 (unsigned)FP.max_q);
     T_CHECK(FZ.n_direct > 0); T_CHECK(FZ.n_pumped > 0); T_CHECK(FZ.n_nested_in > 0); T_CHECK(FZ.n_io_refused > 0);
-    T_CHECK(FZ.n_busy > 0); T_CHECK(FZ.n_runs_in_tx > 0); T_CHECK(FP.nested > 0);
+    T_CHECK(FZ.n_busy > 0); T_CHECK(FZ.n_runs_in_tx > 0); T_CHECK(FP.nested > 0); T_CHECK(FZ.n_held_runs > 0);
 #endif
 }
 

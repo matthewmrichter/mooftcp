@@ -268,7 +268,13 @@ static void enet_service(MtRes *r, const MtAnyPb *pb) {
     if (pb->hdr.csCode == -1 || sr_irq() || mt_os_gate_depth() != 0) return;
     z = mt_mac_zone_sys();
     MT_GATE_ENTER(&r->gate);
+#ifdef MT_TUNE
+    mt_enet_pump_hold(&r->pump, 1);              /* no pumped EWrite between the blocked check and the sync calls */
+#endif
     mt_enet_service(&r->enet, mt_os_ms());
+#ifdef MT_TUNE
+    mt_enet_pump_hold(&r->pump, 0);              /* frames still queued are primed again */
+#endif
     MT_GATE_LEAVE(&r->gate);                     /* after_cb re-arms the timer */
     mt_mac_zone_restore(z);
 }

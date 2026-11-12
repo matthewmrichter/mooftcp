@@ -94,6 +94,9 @@ extern int pbf_enet_io_calls;
 extern int16_t pbf_enet_io_result;
 extern void (*pbf_enet_io_hook)(MtEnet *e, MtEnetTx *s);
 extern int pbf_pump_primes;
+/* mt_enet_write (mt_enet.c on the Mac, the pump's lever-off path): the fake does what the Mac function does (claim,
+ * copy, pad, EWrite through mt_enet_io_write, count) and counts its calls. */
+extern int pbf_enet_write_calls;
 #endif
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */

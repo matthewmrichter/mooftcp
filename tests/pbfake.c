@@ -50,6 +50,7 @@ void pbf_reset(void) {
     pbf_enet_io_result = 0;
     pbf_enet_io_hook = NULL;
     pbf_pump_primes = 0;
+    pbf_enet_write_calls = 0;
 #endif
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
@@ -358,6 +359,40 @@ int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s) {
     return pbf_enet_io_result;
 }
 void mt_enet_pump_prime(MtEnetPump *p) { (void)p; pbf_pump_primes++; }
+int pbf_enet_write_calls;
+int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len) {   /* mt_enet.c's steps, Toolbox call faked */
+    MtEnet *e = (MtEnet *)ctx;
+    MtEnetTx *s;
+    uint16_t n;
+    int16_t r;
+    pbf_enet_write_calls++;
+    if (!e->opened) { e->tx_drop_closed++; return 1; }
+    if (!mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
+    s = mt_enet_tx_claim(e);
+    if (!s) { e->tx_drop_busy++; return 1; }
+    memcpy(s->frame, frame, len);
+    n = mt_enet_pad(s->frame, len);
+    if (n != len) e->tx_pad++;
+    memset(&s->pb, 0, sizeof s->pb);
+    s->wds[0].len = n;
+    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
+    s->wds[1].len = 0;
+    s->wds[1].ptr = 0;
+    s->pb.csCode = 249;
+    s->pb.ioRefNum = e->refnum;
+    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+    r = mt_enet_io_write(e, s);
+    if (r < 0) {
+        s->pb.ioResult = r;
+        e->last_err = r;
+        e->tx_err++;
+        return 1;
+    }
+    s->started = 1;
+    if (!e->tx_started++) e->wd_fresh = 1;
+    e->tx_ok++;
+    return 0;
+}
 #endif
 
 /* ---- harness ---- */

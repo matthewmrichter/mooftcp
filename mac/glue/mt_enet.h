@@ -162,8 +162,8 @@ int  mt_enet_tx_busy(const MtEnet *e);       /* transmit slots in flight */
  * receive delivery (handler -> gate -> core -> ACK) and from the application's call at mask 0. MacTCP issues
  * every EWrite from its own Time Manager task, after the driver's poll returned, and DaynaPORT and MoofPort
  * both handle the other contexts late (echo-latency analysis R1).
- * What: the driver's link.tx is mt_enet_tx_write (mt_drv.c). With the lever off and nothing queued it does
- * exactly what mt_enet_write does (claim, copy, pad, EWrite now). With the lever on, or while frames are still
+ * What: the driver's link.tx is mt_enet_tx_write (mt_drv.c). With the lever off and nothing queued it calls
+ * mt_enet_write itself (the release path). With the lever on, or while frames are still
  * queued (so a switch-off never reorders), it claims and fills a slot the same way, marks it ours (ioResult 1:
  * mt_enet_tx_claim skips it), counts it started (tx_started, tx_ok: the watchdog times it from now, which also
  * catches a pump that never ran) and puts the slot on a FIFO; the first frame primes a dedicated Time Manager
@@ -172,6 +172,11 @@ int  mt_enet_tx_busy(const MtEnet *e);       /* transmit slots in flight */
  * core and touches only the queued slots' PBs and its own fields (the counters the gate owner keeps are not
  * written from it: a refused EWrite only stores its error in the slot's ioResult, and the owner's next reap
  * counts it in tx_err as any async error). A link that is not open fails the slot with -28 the same way.
+ * Such a pumped frame is DROPPED (link.tx already returned 0, so TCP does not stall and retry it as it does for the
+ * direct path's refusal; the RTO recovers it), and tx_ok counts frames when they are queued (also those dropped
+ * this way): MtEnetPump.issued counts the EWrites the task issued.
+ * Watchdog: enet_service (mt_drv.c) holds the pump (mt_enet_pump_hold) around mt_enet_service, so no pumped EWrite
+ * lands between mt_os_enet_blocked's check and a synchronous KillIO / EDetach / EAttach.
  * Contexts: link.tx runs only in the gate owner (one producer: head); the task is the one consumer (tail). The
  * driver may deliver frames inside the task's EWrite: the handler then runs the core through the gate and its
  * frames join the FIFO behind; `running` tells such a nested link.tx that the task drains them (no prime); the
@@ -185,6 +190,8 @@ typedef struct MtEnetPump {
     volatile uint8_t tail;         /* next FIFO entry the task issues (task) */
     volatile uint8_t armed;        /* primed, task not yet started (owner sets, task clears) */
     volatile uint8_t running;      /* the task is draining the FIFO */
+    volatile uint8_t hold;         /* the gate owner is about to make synchronous .ENET0 calls (watchdog KillIO /
+                                    * reattach, mt_drv.c enet_service): the task issues nothing (mt_enet_pump_hold) */
     uint8_t  max_q;                /* deepest FIFO seen (owner) */
     uint8_t  q[MT_ENET_PUMP_Q];    /* slot indexes into MtEnet.tx */
     uint32_t runs;                 /* task runs (task) */
@@ -196,8 +203,13 @@ typedef struct MtEnetPump {
 } MtEnetPump;
 /* The driver's link.tx in perf builds (see above). */
 int  mt_enet_tx_write(MtEnet *e, MtEnetPump *p, const uint8_t *frame, uint16_t len);
-/* The pump task's body (Time Manager time on the Mac; tests call it as the task). */
+/* The pump task's body (Time Manager time on the Mac; tests call it as the task). While `hold` is set it returns
+ * at once (armed cleared, FIFO untouched). */
 void mt_enet_pump_run(MtEnet *e, MtEnetPump *p);
+/* Gate owner, task time only: on = 1 before synchronous .ENET0 calls (no pumped EWrite can then slip in between
+ * mt_os_enet_blocked's check and a sync EDetach/EAttach and make it wait); on = 0 after them: frames still queued are
+ * primed again. */
+void mt_enet_pump_hold(MtEnetPump *p, int on);
 /* Toolbox side (mt_enet.c; faked in tests/pbfake.c): PBControlAsync on the slot's prepared PB (its result), and
  * PrimeTime of the pump's task MT_ENET_PUMP_MS from now (legal from any context, the task itself included). */
 int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s);

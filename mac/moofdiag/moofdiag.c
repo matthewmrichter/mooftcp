@@ -164,7 +164,7 @@ int main(void)
     size_t n;
     short ref = 0;
     OSErr r;
-    int pass = 0, unconf = 0, opened = 0;
+    int pass = 0, unconf = 0, opened = 0, tune_ok = 0;
     THz save;
     long sysfree, syszone;
 
@@ -245,10 +245,12 @@ int main(void)
                 tp.ioCRefNum = ref;
                 tp.csCode = MT_CS_TUNE;
                 memcpy(&tp.csParam[0], &tbp, 4);
-                if (PBControlSync((ParmBlkPtr)&tp) == 0)
+                if (PBControlSync((ParmBlkPtr)&tp) == 0) {
+                    tune_ok = 1;
                     P("tune: rto_min=%u rto_init=%u delack=%u stall=%u quickack=%u txpump=%u\r", (unsigned)tb[MT_TW_RTO_MIN],
                       (unsigned)tb[MT_TW_RTO_INIT], (unsigned)tb[MT_TW_DELACK], (unsigned)tb[MT_TW_STALL],
                       (unsigned)tb[MT_TW_QUICKACK], (unsigned)tb[MT_TW_TXPUMP]);
+                }
             }
         }
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
@@ -319,11 +321,15 @@ int main(void)
               (unsigned long)m->enet.reattach_abandoned, (unsigned)m->enet.reattach_req,
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
             P("timer: fired %lu armed %u\r", (unsigned long)m->timer.fired, m->timer.armed);
-#ifdef MT_TUNE
-            P("txpump: on %u runs %lu issued %lu nested %lu max queue %u queued %u task fired %lu\r", (unsigned)m->pump.on,
-              (unsigned long)m->pump.runs, (unsigned long)m->pump.issued, (unsigned long)m->pump.nested,
-              (unsigned)m->pump.max_q, (unsigned)((m->pump.head - m->pump.tail) & (MT_ENET_PUMP_Q - 1u)),
-              (unsigned long)m->pump.tm.fired);
+#ifndef MT_TUNE
+            (void)tune_ok;
+#else
+            if (tune_ok)   /* a release driver's MtRes ends before .pump: read it only from a driver that answered the tune call */
+                P("txpump: on %u runs %lu issued %lu nested %lu max queue %u queued %u task fired %lu hold %u (with the pump, enet tx ok counts frames when queued)\r",
+                  (unsigned)m->pump.on, (unsigned long)m->pump.runs, (unsigned long)m->pump.issued,
+                  (unsigned long)m->pump.nested, (unsigned)m->pump.max_q,
+                  (unsigned)((m->pump.head - m->pump.tail) & (MT_ENET_PUMP_Q - 1u)), (unsigned long)m->pump.tm.fired,
+                  (unsigned)m->pump.hold);
 #endif
             if (!(m->stk.flags & 1))
                 P("stack: not built with marks (rebuild with MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096)\r");
