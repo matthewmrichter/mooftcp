@@ -16,6 +16,9 @@ target_compile_options(mtcore68k PRIVATE
 # Plan 4 ruling: the DHCP client is off every per-packet path (a handful of messages per lease) and
 # its code is resident in the system heap, so it is built for size (the later -Os wins over -O2).
 set_source_files_properties(${MT_CORE_DIR}/mt_dhcp.c PROPERTIES COMPILE_OPTIONS -Os)
+# 1.1d2: the same ruling for the resolver (core mt_dns.c and the DNR glue mt_pb_dns.c): a few datagrams per lookup,
+# never on a per-packet path; size buys back the cached deadline's code (resident must not grow).
+set_source_files_properties(${MT_CORE_DIR}/mt_dns.c PROPERTIES COMPILE_OPTIONS -Os)
 
 # The Mac Ethernet/clock/gate glue (Task 9). mt_trace.c / mt_trace_mac.c: the echo-path trace (perf builds with
 # MT_TUNE and MT_TRACE only; empty objects otherwise, never linked). mt_enet.c and mt_timer.c include Toolbox headers;
@@ -39,4 +42,5 @@ target_compile_definitions(mtdrv68k PUBLIC MT_OS_MAC)
 target_link_libraries(mtdrv68k PUBLIC mtcore68k)
 target_compile_options(mtdrv68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
+set_source_files_properties(mt_pb_dns.c PROPERTIES COMPILE_OPTIONS -Os)   # 1.1d2: see mt_dns.c above
 set(MT_DRV_STUBS ${CMAKE_CURRENT_SOURCE_DIR}/mt_drv_stubs.s PARENT_SCOPE)
