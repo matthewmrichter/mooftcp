@@ -26,9 +26,16 @@ static int push(MtDrvPend *q, MtAnyPb *pb) {
     return ok;
 }
 
+/* Look before masking (1.1d1): an empty ring is skipped without a mask section. The look is one 16-bit load (atomic
+ * on the 68000) and every pop still happens under the mask. A stale "empty" only misses a push that lands after the
+ * look, and every push sets tick_pending, so the gate owner drains again before it lets go; a stale "not empty"
+ * finds the ring empty under the mask. */
 static MtAnyPb *pop(MtDrvPend *q) {
-    int m = mt_os_mask();
-    MtAnyPb *pb = (MtAnyPb *)mt_drv_pend_pop(q);
+    int m;
+    MtAnyPb *pb;
+    if (*(volatile const uint16_t *)&q->head == q->tail) return NULL;
+    m = mt_os_mask();
+    pb = (MtAnyPb *)mt_drv_pend_pop(q);
     mt_os_unmask(m);
     return pb;
 }

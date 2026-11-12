@@ -592,6 +592,30 @@ static void preemption_inside_nested_core_call_is_not_a_callout(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* 1.1d1 F1: the owner looks at a ring before it masks interrupts. Empty rings cost no mask section (after_cb drains
+ * at every outermost gate leave); a non-empty one is still popped under the mask, oldest first. */
+static void drain_masks_only_nonempty_rings(void) {
+    StreamPtr s;
+    TCPiopb *st;
+    entry_setup();
+    s = pbt_create(&g_x, 4096, 0, 0);
+    T_CHECK(s != 0);
+    pbf_mask_calls = 0;
+    mt_entry_drain(&g_e);                                 /* three empty rings */
+    T_EQ(pbf_mask_calls, 0);
+    st = pbt_pb(TCPStatus, s);                            /* one PB queued by a preempting caller */
+    g_g.depth = 1;
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_ASYNC, 1), 0);
+    T_EQ(g_e.pend.queued, 1);
+    pbf_mask_calls = 0;
+    mt_entry_drain(&g_e);
+    T_EQ(g_e.n_pend_run, 1);                              /* it ran */
+    T_EQ(pbf_mask_calls, 1);                              /* one masked pop: the ring that held it */
+    T_EQ(pbf_mask, 0);
+    g_g.depth = 0;
+    T_EQ(pbf_bad, 0);
+}
+
 /* ---- final review fix 2: a chained 1-byte reader has bounded nesting ---- */
 
 static uint8_t g_rd[4096];
@@ -832,4 +856,4 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        preemption_inside_nested_core_call_is_not_a_callout, chained_one_byte_reader_is_bounded,
        goodbye_drops_streams_holding_app_routines_or_pbs,
        chained_buffer_emptying_reader_is_bounded, goodbye_drops_pbs_with_app_completion,
-       entry_inline_completions_are_bounded)
+       entry_inline_completions_are_bounded, drain_masks_only_nonempty_rings)

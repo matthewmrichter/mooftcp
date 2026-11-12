@@ -14,7 +14,7 @@ int pbf_nlog;
 int pbf_bad;
 int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
-int pbf_mask, pbf_mask_max;
+int pbf_mask, pbf_mask_max, pbf_mask_calls;
 MtGate *pbf_gate;
 void (*pbf_leave_hook)(void);
 MacPtr32 pbf_app_lo, pbf_app_hi;
@@ -64,7 +64,7 @@ void pbf_reset(void) {
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
     pbf_a5 = 0x00A50000u;
-    pbf_mask = pbf_mask_max = 0;
+    pbf_mask = pbf_mask_max = pbf_mask_calls = 0;
     pbf_gate = NULL;
     pbf_leave_hook = NULL;
     fake_tx_hook = NULL;
@@ -281,6 +281,7 @@ int mt_os_in_interrupt(void) { return pbf_in_int > 0; }
 
 int mt_os_mask(void) {
     int prev = pbf_mask++;
+    pbf_mask_calls++;
     if (pbf_mask > pbf_mask_max) pbf_mask_max = pbf_mask;
     return prev;
 }

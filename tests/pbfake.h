@@ -45,6 +45,7 @@ extern int pbf_bad;               /* misuse seen by the fake (bad pointer, unkno
 extern int pbf_irq, pbf_irq_max, pbf_irq_calls;
 extern int pbf_in_int;            /* what mt_os_in_interrupt reports */
 extern int pbf_mask, pbf_mask_max;      /* mt_os_mask depth (0 outside) and its maximum */
+extern int pbf_mask_calls;              /* mt_os_mask calls (each one an interrupt-mask section on the Mac) */
 extern MacPtr32 pbf_app_lo, pbf_app_hi; /* mt_os_app_mem range, [lo, hi) (default: all; classic mode) */
 extern void (*pbf_leave_hook)(void);   /* run at every outermost irq restore (gate leave) */
 extern struct MtGate *pbf_gate;           /* set: irq_save/restore move its depth (the Mac gate) */
