@@ -19,41 +19,47 @@ uint16_t mt_tcp_local_mss_to(const mt_stack *s, mt_ip4 rip) {
     return mt_ip_is_local(s, rip) ? (uint16_t)(MT_LO_MTU - 40u) : mt_tcp_local_mss(s);
 }
 
-/* Header at the IP payload area; returns its length. */
+/* Header at the IP payload area; returns its length. *hsum: the sum of its 16-bit words (checksum field 0), from
+ * the field values (1.1d2: finish needs no pass over the header). */
 static uint16_t build_hdr(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
-                          uint32_t ack, uint8_t flags, uint16_t win, uint16_t up) {
+                          uint32_t ack, uint8_t flags, uint16_t win, uint16_t up, uint32_t *hsum) {
     uint8_t *h = mt_ip_payload(s);
     uint16_t hl = (flags & MT_TH_SYN) ? TCP_HDR_SYN : TCP_HDR;
+    uint32_t sum;
+    if (!(flags & MT_TH_ACK)) ack = 0;
     mt_wr16(h, lport);
     mt_wr16(h + 2, rport);
     mt_wr32(h + 4, seq);
-    mt_wr32(h + 8, (flags & MT_TH_ACK) ? ack : 0u);
+    mt_wr32(h + 8, ack);
     h[12] = (uint8_t)(hl << 2);            /* data offset in words, high nibble */
     h[13] = flags;
     mt_wr16(h + 14, win);
     mt_wr16(h + 16, 0);
     mt_wr16(h + 18, up);                   /* urgent pointer */
+    sum = (uint32_t)lport + rport + (seq >> 16) + (seq & 0xFFFFu) + (ack >> 16) + (ack & 0xFFFFu) +
+          (((uint32_t)hl << 10) | flags) + win + up;
     if (hl == TCP_HDR_SYN) {
+        uint16_t mss = mt_tcp_local_mss_to(s, rip);
         h[20] = 2;
         h[21] = 4;
-        mt_wr16(h + 22, mt_tcp_local_mss_to(s, rip));
+        mt_wr16(h + 22, mss);
+        sum += 0x0204u + mss;
     }
+    *hsum = sum;
     return hl;
 }
 
-/* Checksum header + `psum` (payload sum already folded in by the caller) and send. Returns
+/* Checksum (pseudo-header + header sum `hsum` + payload sum `psum`, both from the caller) and send. Returns
  * nonzero if the link refused the frame (counted once here, in tcp_tx_stalls). A frame held for
  * ARP or dropped for another reason is not a refusal (ARP resolution / the RTO recover it). */
-static int finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t psum,
+static int finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t hsum, uint32_t psum,
                   uint32_t now) {
     uint8_t *h = mt_ip_payload(s);
     uint16_t tl = (uint16_t)(hl + plen);
-    uint32_t sum = mt_tcp_pseudo(mt_ip_src_for(s, rip), rip, tl) + psum;
-    sum = mt_cksum_add(sum, h, hl);          /* hl is even: chaining is exact */
-    mt_wr16(h + 16, mt_cksum_fold(sum));
+    mt_wr16(h + 16, mt_cksum_fold(mt_tcp_pseudo(mt_ip_src_for(s, rip), rip, tl) + hsum + psum));
     s->stats.tcp_out++;
     s->tx_refused = 0;
-    mt_ip_output(s, rip, 6, tl, now);
+    mt_ip_output_hdr(s, rip, 6, NULL, 0, h, tl, now);   /* = mt_ip_output: tl fits txbuf (hl + MSS) */
     if (!s->tx_refused) return 0;
     s->stats.tcp_tx_stalls++;
     return 1;
@@ -62,10 +68,11 @@ static int finish(mt_stack *s, mt_ip4 rip, uint16_t hl, uint16_t plen, uint32_t 
 void mt_tcp_send_raw(mt_stack *s, mt_ip4 rip, uint16_t lport, uint16_t rport, uint32_t seq,
                      uint32_t ack, uint8_t flags, uint32_t now) {
     uint16_t hl;
+    uint32_t hsum;
     if (s->cfg.addr == 0) return;
     if (flags & MT_TH_RST) s->stats.tcp_resets_out++;
-    hl = build_hdr(s, rip, lport, rport, seq, ack, flags, 0, 0);
-    finish(s, rip, hl, 0, 0, now);
+    hl = build_hdr(s, rip, lport, rport, seq, ack, flags, 0, 0, &hsum);
+    finish(s, rip, hl, 0, hsum, 0, now);
 }
 
 /* Copy n queued bytes starting off bytes past snd_una to dst and return their ones-complement
@@ -126,7 +133,7 @@ uint32_t mt_tcp_rcv_window(mt_tcp *t, int commit) {
 
 int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n, uint32_t now) {
     mt_stack *s = t->st;
-    uint32_t psum = 0;
+    uint32_t psum = 0, hsum;
     uint16_t hl, up = 0;
     if (s->cfg.addr == 0) return 0;
     if (flags & MT_TH_RST) s->stats.tcp_resets_out++;
@@ -135,9 +142,9 @@ int mt_tcp_xmit(mt_tcp *t, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n
         up = (uint16_t)(t->snd_up - seq);
     }
     hl = build_hdr(s, t->rip, t->lport, t->rport, seq, t->rcv_nxt, flags,
-                   (uint16_t)mt_tcp_rcv_window(t, 1), up);
+                   (uint16_t)mt_tcp_rcv_window(t, 1), up, &hsum);
     if (n) psum = copy_segs(t, off, mt_ip_payload(s) + hl, n);
-    if (finish(s, t->rip, hl, (uint16_t)n, psum, now)) return 1;   /* refused: the ACK stays owed */
+    if (finish(s, t->rip, hl, (uint16_t)n, hsum, psum, now)) return 1;   /* refused: the ACK stays owed */
     if (flags & MT_TH_ACK) {
         t->flags &= (uint8_t)~MT_TF_ACKNOW;
         t->flags2 &= (uint8_t)~MT_T2_ACKHALF;

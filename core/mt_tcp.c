@@ -1170,7 +1170,8 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     if (len < TCP_HDR || !mt_ip_is_local(s, dst) || src == 0 || src == MT_ETH_BCAST_IP) MT_DROP_GOTO(why);
     hl = (uint16_t)((pl[12] >> 4) << 2);
     if (hl < TCP_HDR || hl > len) MT_DROP_GOTO(why);
-    if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);
+    g.mss = 0;
+    if (hl > TCP_HDR && parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);
     sport = mt_rd16(pl);
     dport = mt_rd16(pl + 2);
     g.seq = mt_rd32(pl + 4);

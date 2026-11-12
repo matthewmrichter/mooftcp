@@ -211,14 +211,20 @@ int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len) {
     return 0;
 }
 
+/* Six-byte MAC compare inline (1.1d2: two memcmp calls per received frame before; mismatches leave at the first
+ * differing byte). */
+static int mac_eq(const uint8_t *a, const uint8_t *b) {
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5];
+}
+
 void mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now) {
     uint16_t type;
     s->now = now;
     if (len < MT_ETH_HDR) return;
-    if (memcmp(frame, s->cfg.mac, 6) != 0 &&
+    if (!mac_eq(frame, s->cfg.mac) &&
         (frame[0] & frame[1] & frame[2] & frame[3] & frame[4] & frame[5]) != 0xFF)
         return;
-    if (memcmp(frame + 6, s->cfg.mac, 6) == 0) return;      /* our own frame reflected back */
+    if (mac_eq(frame + 6, s->cfg.mac)) return;              /* our own frame reflected back */
     s->stats.eth_in++;
     type = mt_rd16(frame + 12);
     if (type == 0x0806) mt_arp_input(s, frame + MT_ETH_HDR, (uint16_t)(len - MT_ETH_HDR), now);

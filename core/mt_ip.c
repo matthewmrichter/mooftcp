@@ -193,20 +193,23 @@ uint32_t mt_ip_deadline(const mt_stack *s, uint32_t now) {
 
 /* ---- Output ---- */
 
+/* The header checksum is summed from the field values (1.1d2: no pass over the 20 bytes just written). */
 static void ip_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, uint16_t id, uint16_t ff,
                    uint16_t seglen) {
     uint8_t *h = s->txbuf + MT_ETH_HDR;
+    mt_ip4 src = mt_ip_src_for(s, dst);
+    uint16_t tl = (uint16_t)(MT_IP_HDR + seglen);
     h[0] = 0x45;
     h[1] = 0;
-    mt_wr16(h + 2, (uint16_t)(MT_IP_HDR + seglen));
+    mt_wr16(h + 2, tl);
     mt_wr16(h + 4, id);
     mt_wr16(h + 6, ff);
     h[8] = 64;
     h[9] = proto;
-    h[10] = 0; h[11] = 0;
-    mt_wr32(h + 12, mt_ip_src_for(s, dst));
+    mt_wr32(h + 12, src);
     mt_wr32(h + 16, dst);
-    mt_wr16(h + 10, mt_cksum_fold(mt_cksum_add(0, h, MT_IP_HDR)));
+    mt_wr16(h + 10, mt_cksum_fold(0x4500u + tl + id + ff + (0x4000u | proto) + (src >> 16) + (src & 0xFFFFu) +
+                                  (dst >> 16) + (dst & 0xFFFFu)));
 }
 
 /* Copy n bytes of the virtual payload hdr[0..hlen) || pl, starting at offset vo, to body. */
@@ -261,7 +264,7 @@ int mt_ip_output_hdr(mt_stack *s, mt_ip4 dst, uint8_t proto, const uint8_t *hdr,
     }
 
     if (MT_IP_HDR + tot <= mtu) {                                    /* fast path */
-        ip_gather(body, hdr, hlen, pl, 0, (uint16_t)tot);
+        if (hlen || pl != body) ip_gather(body, hdr, hlen, pl, 0, (uint16_t)tot);   /* else in place already */
         ip_hdr(s, dst, proto, id, 0, (uint16_t)tot);
         if (lo) lo_put(s, (uint16_t)(MT_IP_HDR + tot));
         else mt_eth_send(s, nexthop, 0x0800, (uint16_t)(MT_IP_HDR + tot), now);

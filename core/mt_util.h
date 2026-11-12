@@ -38,7 +38,13 @@ static inline int mt_seq_ge(uint32_t a, uint32_t b) { return (int32_t)(a - b) >=
  * mt_cksum_copy with 68000 asm (MT_ASM_CKSUM, mac/glue/mt_cksum68k.s) that returns
  * bit-identical results; tests/test_util.c pins the contract. */
 uint32_t mt_cksum_add(uint32_t sum, const uint8_t *p, uint32_t len);
-uint16_t mt_cksum_fold(uint32_t sum);
+/* The 16-bit checksum field for a sum: two end-around folds (exact for any uint32) and the complement. Inline since
+ * 1.1d2 (several calls per frame). */
+static inline uint16_t mt_cksum_fold(uint32_t sum) {
+    sum = (sum & 0xFFFFu) + (sum >> 16);
+    sum = (sum & 0xFFFFu) + (sum >> 16);
+    return (uint16_t)~sum;
+}
 /* Copy and checksum in one pass; same result as mt_cksum_add over src. src and dst may have
  * any alignment but must not overlap. */
 uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t len);
@@ -50,7 +56,7 @@ uint32_t mt_cksum_odd(uint32_t part);
  * Retro68 newlib memcpy moves long words when both pointers are even). */
 typedef struct { uint8_t *base; uint32_t size, head, used; } mt_ring;
 void mt_ring_init(mt_ring *r, uint8_t *mem, uint32_t size);
-uint32_t mt_ring_free(const mt_ring *r);
+static inline uint32_t mt_ring_free(const mt_ring *r) { return r->size - r->used; }   /* inline since 1.1d2 */
 uint32_t mt_ring_write(mt_ring *r, const uint8_t *p, uint32_t n);
 uint32_t mt_ring_read(mt_ring *r, uint8_t *dst, uint32_t n);
 /* Length of the contiguous run starting off bytes into the used data (0 if off >= used). */

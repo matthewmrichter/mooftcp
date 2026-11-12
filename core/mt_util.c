@@ -43,12 +43,6 @@ uint32_t mt_cksum_copy(uint32_t sum, uint8_t *dst, const uint8_t *src, uint32_t 
 }
 #endif
 
-uint16_t mt_cksum_fold(uint32_t sum) {
-    sum = (sum & 0xFFFFu) + (sum >> 16);
-    sum = (sum & 0xFFFFu) + (sum >> 16);
-    return (uint16_t)~sum;
-}
-
 uint32_t mt_cksum_odd(uint32_t part) {
     part = (part & 0xFFFFu) + (part >> 16);
     part = (part & 0xFFFFu) + (part >> 16);
@@ -61,8 +55,6 @@ void mt_ring_init(mt_ring *r, uint8_t *mem, uint32_t size) {
     r->head = 0;
     r->used = 0;
 }
-
-uint32_t mt_ring_free(const mt_ring *r) { return r->size - r->used; }
 
 /* Copy n bytes into the ring starting at physical index pos (< size), wrapping. */
 static void ring_put(mt_ring *r, uint32_t pos, const uint8_t *p, uint32_t n) {
