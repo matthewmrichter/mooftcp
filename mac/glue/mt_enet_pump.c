@@ -6,6 +6,9 @@
 #include <string.h>
 #include "mt_enet.h"
 #include "mt_stackmark.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 #define CS_EWRITE    249           /* as mt_enet.c E_WRITE */
 #define E_NOTOPEN    (-28)         /* notOpenErr: the link closed before the task issued the frame */
@@ -99,6 +102,9 @@ void mt_enet_pump_run(MtEnet *e, MtEnetPump *p)
             if (!e->opened) { s->pb.ioResult = E_NOTOPEN; continue; }   /* the owner's reap counts it */
             p->issued++;
             mt_os_stack_mark();
+#ifdef MT_TRACE
+            mt_trace_ewrite(s, s->wds[0].len, 1);   /* perf builds with the trace: issued by the pump's task */
+#endif
             r = mt_enet_io_write(e, s);
             if (r < 0) s->pb.ioResult = r;      /* refused at once: the owner's reap counts it (tx_err) */
         }

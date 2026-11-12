@@ -17,10 +17,12 @@ target_compile_options(mtcore68k PRIVATE
 # its code is resident in the system heap, so it is built for size (the later -Os wins over -O2).
 set_source_files_properties(${MT_CORE_DIR}/mt_dhcp.c PROPERTIES COMPILE_OPTIONS -Os)
 
-# The Mac Ethernet/clock/gate glue (Task 9). mt_enet.c and mt_timer.c include Toolbox headers;
+# The Mac Ethernet/clock/gate glue (Task 9). mt_trace.c / mt_trace_mac.c: the echo-path trace (perf builds with
+# MT_TUNE and MT_TRACE only; empty objects otherwise, never linked). mt_enet.c and mt_timer.c include Toolbox headers;
 # nothing here includes mt_mactcp.h next to them (the two clash), mt_os_mac.c only mt_os.h.
 add_library(mtglue68k STATIC
-  mt_gate.c mt_enet.c mt_enet_wd.c mt_enet_pump.c mt_enet_ph.s mt_timer.c mt_timer_tm.s mt_os_mac.c)
+  mt_gate.c mt_enet.c mt_enet_wd.c mt_enet_pump.c mt_enet_ph.s mt_timer.c mt_timer_tm.s mt_os_mac.c
+  mt_trace.c mt_trace_mac.c)
 target_include_directories(mtglue68k PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_definitions(mtglue68k PUBLIC MT_OS_MAC)
 target_compile_options(mtglue68k PRIVATE

@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 #include "mt_enet.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 /* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 int mt_os_enet_blocked(int16_t refnum);
@@ -127,6 +130,9 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
     s->pb.csCode = E_WRITE;
     s->pb.ioRefNum = e->refnum;
     s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+#ifdef MT_TRACE
+    mt_trace_ewrite(s, n, 0);    /* perf builds with the trace: the record and the trace's completion routine */
+#endif
     r = (int16_t)PBControlAsync((ParmBlkPtr)&s->pb);
     if (r < 0) {
         s->pb.ioResult = r;      /* refused at once: the slot is free again, counted here */

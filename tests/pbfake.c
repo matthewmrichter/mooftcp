@@ -4,6 +4,9 @@
 #include "mt_gate.h"
 #include "mt_int.h"
 #include "mt_util.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 uint32_t pbf_now;
 pbf_ev pbf_log[PBF_LOG];
@@ -51,6 +54,11 @@ void pbf_reset(void) {
     pbf_enet_io_hook = NULL;
     pbf_pump_primes = 0;
     pbf_enet_write_calls = 0;
+#endif
+#ifdef MT_TRACE
+    pbf_trace_us = 0;
+    pbf_trace_step = 1;
+    pbf_trace_mask_seen = 0;
 #endif
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
@@ -381,6 +389,9 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len) {   /* mt_enet.
     s->pb.csCode = 249;
     s->pb.ioRefNum = e->refnum;
     s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+#ifdef MT_TRACE
+    mt_trace_ewrite(s, n, 0);                    /* as mt_enet.c */
+#endif
     r = mt_enet_io_write(e, s);
     if (r < 0) {
         s->pb.ioResult = r;
@@ -393,6 +404,18 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len) {   /* mt_enet.
     e->tx_ok++;
     return 0;
 }
+#endif
+
+#ifdef MT_TRACE
+uint32_t pbf_trace_us, pbf_trace_step;
+int pbf_trace_mask_seen;
+uint32_t mt_os_trace_us(void) {
+    uint32_t t = pbf_trace_us;
+    pbf_trace_mask_seen = pbf_mask;
+    pbf_trace_us += pbf_trace_step;
+    return t;
+}
+uint32_t mt_os_trace_ew_compl(void) { return PBF_TRACE_EWCOMPL; }
 #endif
 
 /* ---- harness ---- */

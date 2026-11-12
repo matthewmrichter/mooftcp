@@ -378,6 +378,9 @@ int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_p
 int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
 #ifdef MT_TUNE
 int16_t  mt_pb_tune_control(MtDrv *d, MtAnyPb *pb);  /* csCode MT_CS_TUNE (mt_pb.c; perf builds only) */
+#ifdef MT_TRACE
+int16_t  mt_pb_trace_control(MtDrv *d, MtAnyPb *pb); /* csCode MT_CS_TRACE (mt_pb.c; perf builds with MT_TRACE) */
+#endif
 #endif
 void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m, uint16_t m_born);   /* cancel the lookups of the
                                                  * application in m (m_born as mt_pb_in_gone) */

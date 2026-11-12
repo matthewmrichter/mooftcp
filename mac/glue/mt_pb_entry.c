@@ -1,6 +1,16 @@
 /* mt_pb_entry.c - the .IPP Control entry: see mt_pb_entry.h. */
 #include "mt_pb_entry.h"
 #include "mt_os.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#include "mt_tune_abi.h"
+
+/* Perf builds with the trace: the private tune and trace calls are not part of what is measured. */
+static int traced(int16_t cs) { return cs != MT_CS_TRACE && cs != MT_CS_TUNE; }
+static uint8_t pb_bits(uint16_t trap, int irq) {
+    return (uint8_t)(((trap & MT_DRV_TRAP_ASYNC) ? MT_TRACE_A_ASYNC : 0) | (irq ? MT_TRACE_A_IRQ : 0));
+}
+#endif
 
 void mt_entry_init(MtEntry *e, struct MtDrv *d, MtGate *g) {
     memset(e, 0, sizeof *e);
@@ -141,6 +151,11 @@ static int16_t refuse(MtEntry *e, MtAnyPb *pb, int async) {
         return MT_DRV_REFUSED;
     }
     e->refuse_nest++;
+#ifdef MT_TRACE
+    if (traced(pb->hdr.csCode))
+        mt_trace_ev(MT_TRACE_PBDONE, pb->hdr.ioCompletion != 0, (uint16_t)pb->hdr.csCode, mt_os_addr(pb),
+                    (uint32_t)(int32_t)MT_DRV_REFUSED);
+#endif
     mt_os_complete(pb, MT_DRV_REFUSED);
     e->refuse_nest--;
     return MT_DRV_REFUSED;
@@ -213,9 +228,19 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
 
 int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     int16_t r;
+#ifdef MT_TRACE
+    int16_t cs = pb->hdr.csCode;                 /* the PB may be reused by the time the call returns */
+    MacPtr32 a = mt_os_addr(pb);
+    if (traced(cs)) mt_trace_ev(MT_TRACE_PBIN, pb_bits(trap, irq), (uint16_t)cs, a, 0);
+#endif
     mt_os_stack_enter();                         /* stack-depth episode (no-op on the host) */
     r = entry_control(e, pb, trap, irq);
     mt_os_stack_leave();
+#ifdef MT_TRACE
+    if (traced(cs))
+        mt_trace_ev(MT_TRACE_PBOUT, pb_bits(trap, irq), (uint16_t)cs, a,
+                    (uint32_t)(uint16_t)r << 16 | (uint16_t)pb->hdr.ioResult);
+#endif
     return r;
 }
 

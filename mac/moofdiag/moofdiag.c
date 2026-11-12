@@ -27,6 +27,9 @@
 #include "diag_streams.h"
 #include "runid.h"
 #include "mt_tune_abi.h"
+#ifdef MT_TRACE
+#include "mt_trace_abi.h"
+#endif
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* before mt_units.h: its low-memory reads are inlined into main */
 #include "mt_units.h"
 #include <stddef.h>
@@ -130,6 +133,52 @@ static void ip(char *b, uint32_t a)
     sprintf(b, "%lu.%lu.%lu.%lu", (unsigned long)(a >> 24), (unsigned long)(a >> 16 & 255),
             (unsigned long)(a >> 8 & 255), (unsigned long)(a & 255));
 }
+
+#ifdef MT_TRACE
+/* Perf builds with the echo-path trace (task 18): freeze the driver's ring, write every kept record as one line
+ *   TR <t_us> <event> <a hex> <b> <c hex> <d hex>
+ * (fields: mt_trace_abi.h), oldest first, then clear it (recording resumes). scripts/trace-echo.py reads them. The
+ * header line gives the counts and the clock's read cost; a driver without the trace answers the Control with -4. */
+static int16_t trace_call(short ref, MtTraceBlk *b, uint16_t op)
+{
+    CntrlParam cp;
+    void *bp = b;
+    memset(&cp, 0, sizeof cp);
+    b->version = MT_TRACE_ABI_VERSION;
+    b->op = op;
+    cp.ioCRefNum = ref;
+    cp.csCode = MT_CS_TRACE;
+    memcpy(&cp.csParam[0], &bp, 4);
+    return PBControlSync((ParmBlkPtr)&cp);
+}
+
+static void trace_dump(short ref)
+{
+    static const char *const nm[MT_TRACE_NEV] = { "?", "RX", "RXRUN", "DATA", "PBIN", "PBOUT", "PBDONE", "EWRITE",
+                                                    "EWDONE", "TICK", "TDEFER" };
+    static MtTraceRec buf[64];
+    MtTraceBlk b;
+    uint16_t kept, i;
+    int16_t e;
+    memset(&b, 0, sizeof b);
+    e = trace_call(ref, &b, MT_TRACE_OP_FREEZE);
+    if (e != 0) { P("trace: none (Control 0x4D56 = %d)\r", e); return; }
+    kept = b.got;
+    P("trace: version %u kept %u total %lu cap %u rec %u lap_us %lu now_us %lu clock %s\r", MT_TRACE_ABI_VERSION,
+      kept, (unsigned long)b.total, b.cap, b.rec_bytes, (unsigned long)b.lap_us, (unsigned long)b.now_us,
+      (b.flags & MT_TRACE_F_TMCLK) ? "timemgr" : "none");
+    for (b.first = 0; b.first < kept; b.first = (uint16_t)(b.first + b.got)) {
+        b.max = 64;
+        b.buf = (uint32_t)(uintptr_t)buf;
+        if (trace_call(ref, &b, MT_TRACE_OP_READ) != 0 || b.got == 0) break;
+        for (i = 0; i < b.got; i++)
+            P("TR %lu %s %02x %u %08lx %08lx\r", (unsigned long)buf[i].t, nm[buf[i].ev < MT_TRACE_NEV ? buf[i].ev : 0],
+              buf[i].a, buf[i].b, (unsigned long)buf[i].c, (unsigned long)buf[i].d);
+    }
+    e = trace_call(ref, &b, MT_TRACE_OP_CLEAR);
+    P("trace: %u records written, ring cleared (%d)\r", (unsigned)b.first, e);
+}
+#endif
 
 static void units(void)
 {
@@ -330,6 +379,9 @@ int main(void)
                   (unsigned long)m->pump.nested, (unsigned)m->pump.max_q,
                   (unsigned)((m->pump.head - m->pump.tail) & (MT_ENET_PUMP_Q - 1u)), (unsigned long)m->pump.tm.fired,
                   (unsigned)m->pump.hold);
+#endif
+#ifdef MT_TRACE
+            if (opened) trace_dump(ref);         /* perf builds with the trace: the TR lines (task 18) */
 #endif
             if (!(m->stk.flags & 1))
                 P("stack: not built with marks (rebuild with MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096)\r");

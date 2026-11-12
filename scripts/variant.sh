@@ -15,3 +15,12 @@ case "${MT_TUNE:-0}" in
   1) BM="$BM-tune"; MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS:-} -DMT_TUNE=1"; export MT_EXTRA_CFLAGS;;
   *) echo "MT_TUNE must be 0 or 1 (got '$MT_TUNE')" >&2; exit 2;;
 esac
+#   MT_TRACE=1          (only with MT_TUNE=1) the echo-path trace (compile option MT_TRACE, mac/glue/mt_trace.h: Control
+#                       0x4D56, MoofDiag's TR lines, scripts/trace-echo.py; never a release): its own tree,
+#                       build-mac-tune-trace/ (build-mac-lite-tune-trace/ with MT_LITE=1).
+case "${MT_TRACE:-0}" in
+  0) ;;
+  1) [ "${MT_TUNE:-0}" = 1 ] || { echo "MT_TRACE=1 needs MT_TUNE=1 (perf builds only)" >&2; exit 2; }
+     BM="$BM-trace"; MT_EXTRA_CFLAGS="${MT_EXTRA_CFLAGS:-} -DMT_TRACE=1"; export MT_EXTRA_CFLAGS;;
+  *) echo "MT_TRACE must be 0 or 1 (got '$MT_TRACE')" >&2; exit 2;;
+esac

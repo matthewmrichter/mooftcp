@@ -3,6 +3,9 @@
 #include "mt_int.h"
 #include "mt_util.h"
 #include "pbfake.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 #ifdef MT_TUNE
 #include "mt_tune_abi.h"
 #define FZ_STALL_MAX 100u      /* the PB fuzzer moves the stall lever (largest allowed value) */
@@ -1210,6 +1213,10 @@ static void fz_pump_step(void) {
         if (FZ.issued[i] && rn(2)) {
             FE.tx[i].pb.ioResult = rn(30) ? 0 : -1;
             FZ.issued[i] = 0;
+#ifdef MT_TRACE
+            if (FE.tx[i].pb.ioCompletion != PBF_TRACE_EWCOMPL) bad("trace: an EWrite without the trace's completion routine");
+            mt_trace_ew_done(&FE.tx[i].pb);     /* what IODone calls */
+#endif
         }
     if (rn(400) == 0) { FE.opened = (uint8_t)!FE.opened; FZ.n_closed++; }   /* reattach window / failed open */
     if (!FE.opened && rn(8) == 0) FE.opened = 1;
@@ -1959,6 +1966,91 @@ static void act_tune(void) {
 }
 #endif
 
+#ifdef MT_TRACE
+/* The echo-path trace (perf builds with MT_TRACE): its ring records every event the fuzzer's calls, frames and ticks
+ * cause; Control MT_CS_TRACE is driven with good and bad blocks. FT.c counts the events seen (coverage). */
+static MtTrace FTR;
+static struct { uint32_t seen; long n[MT_TRACE_NEV]; long reads, freezes, clears; } FT;
+
+static void fz_trace_setup(void) {
+    memset(&FTR, 0, sizeof FTR);
+    mt_trace_set(&FTR);
+    pbf_trace_us = rnd();                       /* the clock may wrap during the run */
+    pbf_trace_step = 1 + rn(300);
+    FT.seen = 0;
+}
+
+static const MtTraceRec *ft_rec(uint32_t k) {   /* k-th kept record, oldest first */
+    uint32_t first = FTR.total < MT_TRACE_RECS ? 0 : FTR.next;
+    return &FTR.rec[(first + k) % MT_TRACE_RECS];
+}
+
+static void act_trace(void) {
+    prec *r = pr_get();
+    MtTraceBlk blk, out;
+    MtTraceRec *buf;
+    MacPtr32 a;
+    int16_t res;
+    uint32_t kept, n, i, total0;
+    int frozen0, want_ok;
+    if (!r) return;
+    memset(&blk, 0, sizeof blk);
+    blk.version = rn(16) ? MT_TRACE_ABI_VERSION : (uint16_t)rn(4);
+    blk.op = rn(12) ? (uint16_t)rn(4) : (uint16_t)rn(9);
+    blk.first = (uint16_t)(rn(4) ? rn(64) : rn(2 * MT_TRACE_RECS));
+    blk.max = (uint16_t)(1 + rn(PR_BUF / sizeof(MtTraceRec)));
+    buf = (MtTraceRec *)pr_buf(r);
+    blk.buf = rn(20) ? pbf_a(buf) : 0;
+    memcpy(pr_ds(r), &blk, sizeof blk);
+    a = pbf_a(pr_ds(r));
+    memcpy((uint8_t *)pr_pb(r) + 28, &a, 4);
+    total0 = FTR.total;
+    frozen0 = FTR.frozen;
+    res = issue_ex(r, MT_CS_TRACE, 0, -1, -1, 0);
+    memcpy(&out, pr_ds(r), sizeof out);
+    want_ok = blk.version == MT_TRACE_ABI_VERSION && blk.op <= MT_TRACE_OP_CLEAR &&
+              (blk.op != MT_TRACE_OP_READ || (frozen0 && blk.buf));
+    if (res != (want_ok ? 0 : MT_TRACE_PARAMERR)) bad("trace control: wrong result");
+    if (res == 0) {
+        if (out.cap != MT_TRACE_RECS || out.rec_bytes != 16 || out.total != FTR.total) bad("trace control: info wrong");
+        if (blk.op == MT_TRACE_OP_CLEAR) {
+            FT.clears++;
+            if (FTR.total != 0 || FTR.frozen) bad("trace control: clear left records or the freeze");
+            FT.seen = 0;
+        } else if (FTR.total != total0) bad("trace control: the trace call itself was recorded");
+        if (blk.op == MT_TRACE_OP_FREEZE) { FT.freezes++; if (!FTR.frozen) bad("trace control: not frozen"); }
+        if (blk.op == MT_TRACE_OP_READ) {
+            FT.reads++;
+            kept = FTR.total < MT_TRACE_RECS ? FTR.total : MT_TRACE_RECS;
+            n = blk.first < kept ? kept - blk.first : 0;
+            if (n > blk.max) n = blk.max;
+            if (out.got != n) bad("trace control: read count wrong");
+            for (i = 0; i < n && i < out.got; i++)
+                if (memcmp(&buf[i], ft_rec(blk.first + i), sizeof *buf) != 0) { bad("trace control: read differs"); break; }
+        }
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void fz_trace_invariants(void) {
+    uint32_t kept = FTR.total < MT_TRACE_RECS ? FTR.total : MT_TRACE_RECS, k, from;
+    if (pbf_mask != 0) bad("trace: interrupt mask left raised");
+    if (FTR.next != FTR.total % MT_TRACE_RECS) bad("trace: ring index differs from the count");
+    for (k = 0; k < kept; k++) {
+        const MtTraceRec *r = ft_rec(k);
+        if (r->ev < 1 || r->ev >= MT_TRACE_NEV) { bad("trace: unknown event"); break; }
+        if (k && (int32_t)(r->t - ft_rec(k - 1)->t) <= 0) { bad("trace: clock not increasing"); break; }
+        if (r->ev == MT_TRACE_DATA && r->d == 0) { bad("trace: DATA with no bytes"); break; }
+    }
+    from = FTR.total - FT.seen > kept ? FTR.total - kept : FT.seen;   /* new records since the last look */
+    for (k = from; k < FTR.total; k++) {
+        uint8_t ev = ft_rec(kept - (FTR.total - k))->ev;
+        if (ev < MT_TRACE_NEV) FT.n[ev]++;
+    }
+    FT.seen = FTR.total;
+}
+#endif
+
 static void pb_action(void) {
     switch (rn(30)) {
     case 16: act_ucreate(); break;
@@ -1971,6 +2063,9 @@ static void pb_action(void) {
     case 26: act_ipmisc(); break;
 #ifdef MT_TUNE
     case 27: act_tune(); break;
+#endif
+#ifdef MT_TRACE
+    case 28: act_trace(); break;
 #endif
     case 0: act_create(); break;
     case 1: act_open(0); break;
@@ -2001,6 +2096,9 @@ static void pb_invariants(void) {
     if (P.d->rel_mask) bad("deferred release left over");
 #ifdef MT_TUNE
     fz_pump_invariants();
+#endif
+#ifdef MT_TRACE
+    fz_trace_invariants();
 #endif
     if (pbf_bad) { bad("misuse seen by the fake OS (pointer, routine, irq nesting)"); pbf_bad = 0; }
     pb_udp_invariants();
@@ -2124,6 +2222,9 @@ static void pb_setup(uint32_t seed) {
 #ifdef MT_TUNE
     fz_pump_setup();
 #endif
+#ifdef MT_TRACE
+    fz_trace_setup();
+#endif
 }
 
 static void pb_step(uint8_t *f) {
@@ -2235,6 +2336,15 @@ static void test_fuzz_pb(void) {
                 (unsigned)FP.max_q);
     T_CHECK(FZ.n_direct > 0); T_CHECK(FZ.n_pumped > 0); T_CHECK(FZ.n_nested_in > 0); T_CHECK(FZ.n_io_refused > 0);
     T_CHECK(FZ.n_busy > 0); T_CHECK(FZ.n_runs_in_tx > 0); T_CHECK(FP.nested > 0); T_CHECK(FZ.n_held_runs > 0);
+#endif
+#ifdef MT_TRACE
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb trace (all seeds): data %ld pbdone %ld ewrite %ld ewdone %ld tick %ld; control reads %ld "
+                "freezes %ld clears %ld\n", FT.n[MT_TRACE_DATA], FT.n[MT_TRACE_PBDONE], FT.n[MT_TRACE_EWRITE],
+                FT.n[MT_TRACE_EWDONE], FT.n[MT_TRACE_TICK], FT.reads, FT.freezes, FT.clears);
+    T_CHECK(FT.n[MT_TRACE_DATA] > 0); T_CHECK(FT.n[MT_TRACE_PBDONE] > 0); T_CHECK(FT.n[MT_TRACE_EWRITE] > 0);
+    T_CHECK(FT.n[MT_TRACE_EWDONE] > 0); T_CHECK(FT.n[MT_TRACE_TICK] > 0);
+    T_CHECK(FT.reads > 0); T_CHECK(FT.freezes > 0); T_CHECK(FT.clears > 0);
 #endif
 }
 

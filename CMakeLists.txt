@@ -21,6 +21,15 @@ if(MT_TUNE)
   add_compile_definitions(MT_TUNE)
 endif()
 
+# Perf builds (task 18): the echo-path trace (mac/glue/mt_trace.h, Control 0x4D56). Only with MT_TUNE. Use build-tune-trace.
+option(MT_TRACE "Build the perf configuration with the echo-path trace (needs MT_TUNE)" OFF)
+if(MT_TRACE)
+  if(NOT MT_TUNE)
+    message(FATAL_ERROR "MT_TRACE needs MT_TUNE (perf builds only)")
+  endif()
+  add_compile_definitions(MT_TRACE)
+endif()
+
 add_compile_options(-std=c99 -Wall -Wextra -Werror -g)
 if(MT_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
@@ -47,7 +56,7 @@ endif()
 # tests/pbfake.c (mt_os.h). Packed PB structs: taking a member's address is an error.
 file(GLOB MT_GLUE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/mac/glue/mt_pb*.c)
 list(APPEND MT_GLUE_SRC ${CMAKE_SOURCE_DIR}/mac/glue/mt_gate.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_wd.c
-     ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_pump.c)
+     ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_pump.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_trace.c)
 if(MT_GLUE_SRC)
   add_library(mtglue STATIC ${MT_GLUE_SRC} ${CMAKE_SOURCE_DIR}/tests/pbfake.c)
   target_include_directories(mtglue PUBLIC ${CMAKE_SOURCE_DIR}/mac/glue
@@ -90,6 +99,9 @@ endif()
 if(NOT MT_TUNE)   # the run-time levers exist only in the perf configuration (build-tune)
   list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_tune.c ${CMAKE_SOURCE_DIR}/tests/test_enet_pump.c)
 endif()
+if(NOT MT_TRACE)  # the echo-path trace exists only in the tune+trace configuration (build-tune-trace)
+  list(REMOVE_ITEM MT_TEST_SRC ${CMAKE_SOURCE_DIR}/tests/test_trace.c)
+endif()
 foreach(src ${MT_TEST_SRC})
   get_filename_component(name ${src} NAME_WE)
   add_executable(${name} ${src})
@@ -104,6 +116,8 @@ endforeach()
 find_program(MT_PYTHON3 python3)
 if(MT_PYTHON3)
   add_test(NAME test_keylat_py COMMAND ${MT_PYTHON3} ${CMAKE_SOURCE_DIR}/tests/test_keylat.py)
+  # the echo-path trace's PC side (scripts/trace-echo.py, task 18): parsing MoofDiag's TR lines, rounds, medians
+  add_test(NAME test_trace_echo_py COMMAND ${MT_PYTHON3} -I ${CMAKE_SOURCE_DIR}/tests/test_trace_echo.py)
   # the moofctl plugin (scripts/moofctl-plugins/mooftcp.py); exits 77 (ctest "Skipped") when moofagent's moofctl.py is not found
   add_test(NAME test_mooftcp_plugin COMMAND ${MT_PYTHON3} -I ${CMAKE_SOURCE_DIR}/tests/test_mooftcp_plugin.py)
   set_tests_properties(test_mooftcp_plugin PROPERTIES SKIP_RETURN_CODE 77)

@@ -98,6 +98,13 @@ extern int pbf_pump_primes;
  * copy, pad, EWrite through mt_enet_io_write, count) and counts its calls. */
 extern int pbf_enet_write_calls;
 #endif
+#ifdef MT_TRACE
+/* The trace clock (mt_os_trace_us): returns pbf_trace_us, then advances it by pbf_trace_step (reset: 0 and 1);
+ * pbf_trace_mask_seen = mt_os_mask's depth at the last read. mt_os_trace_ew_compl returns PBF_TRACE_EWCOMPL. */
+extern uint32_t pbf_trace_us, pbf_trace_step;
+extern int pbf_trace_mask_seen;
+#define PBF_TRACE_EWCOMPL 0x00EE0000u
+#endif
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */

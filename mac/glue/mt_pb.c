@@ -5,6 +5,9 @@
 #ifdef MT_TUNE
 #include "mt_tune_abi.h"
 #endif
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 #if defined(__GNUC__)
 #define OWN_BARRIER() __asm__ volatile("" ::: "memory")
@@ -145,6 +148,11 @@ void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     gen = d->co_gen;
     d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;
+#ifdef MT_TRACE
+    if (pb->hdr.csCode != MT_CS_TUNE && pb->hdr.csCode != MT_CS_TRACE)
+        mt_trace_ev(MT_TRACE_PBDONE, pb->hdr.ioCompletion != 0, (uint16_t)pb->hdr.csCode, mt_os_addr(pb),
+                    (uint32_t)(int32_t)err);
+#endif
     mt_os_complete(pb, err);
     if (d->co_gen != gen) return;               /* abandoned meanwhile (a wrongful unstick): the accounting
                                                  * was reset, a depth-- would wrap it */
@@ -226,6 +234,18 @@ int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
 }
 #endif
 
+#ifdef MT_TRACE
+/* Private Control MT_CS_TRACE (mt_trace_abi.h): the echo-path trace's ring; perf builds with MT_TRACE only. */
+int16_t mt_pb_trace_control(MtDrv *d, MtAnyPb *pb) {
+    MacPtr32 a;
+    MtTraceBlk *blk;
+    (void)d;
+    memcpy(&a, (const uint8_t *)pb + 28, 4);
+    blk = (MtTraceBlk *)mt_os_ptr(a);
+    return blk ? mt_trace_control(blk) : MT_TRACE_PARAMERR;
+}
+#endif
+
 int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
     int16_t cs = pb->hdr.csCode, r;
     int sv;
@@ -246,6 +266,10 @@ int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
 #ifdef MT_TUNE
     else if (cs == MT_CS_TUNE)
         r = mt_pb_tune_control(d, pb);          /* private: timing levers (perf builds only) */
+#endif
+#ifdef MT_TRACE
+    else if (cs == MT_CS_TRACE)
+        r = mt_pb_trace_control(d, pb);         /* private: the echo-path trace (perf builds with MT_TRACE) */
 #endif
     else if (answers_zero(cs))
         r = 0;
@@ -293,6 +317,9 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
 }
 
 void mt_pb_tick(MtDrv *d) {
+#ifdef MT_TRACE
+    mt_trace_ev(MT_TRACE_TICK, 0, 0, mt_os_ms(), 0);
+#endif
     int sv = mt_os_irq_save();
     if (d->in_core) {
         d->reenter_drops++;

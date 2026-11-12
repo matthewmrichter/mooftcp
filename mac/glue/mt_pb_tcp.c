@@ -20,6 +20,9 @@
  *    merged request. */
 #include <string.h>
 #include "mt_pb.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 #define LIVE  1
 #define DYING 2
@@ -572,7 +575,15 @@ static void tcp_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     if (s->used != LIVE || s->t != t) return;            /* released: nothing reaches the app */
     switch (ev) {
     case MT_TCP_EV_ESTABLISHED: on_established(s); break;
-    case MT_TCP_EV_DATA:        on_data(s, arg); break;
+    case MT_TCP_EV_DATA:
+#ifdef MT_TRACE
+        {                                                 /* perf builds: payload delivered inside mt_input */
+            mt_tcp_info in;
+            info(s, &in);
+            mt_trace_ev(MT_TRACE_DATA, 0, (uint16_t)(s - s->d->tcp), in.rcv_nxt - arg, arg);
+        }
+#endif
+        on_data(s, arg); break;
     case MT_TCP_EV_URGENT:      asr(s, mt_pb_event_code(ev), 0, 0); break;
     case MT_TCP_EV_CLOSING:     s->fin = 1; serve_reads(s, NULL); break;
     case MT_TCP_EV_ULP_TIMEOUT: asr(s, mt_pb_event_code(ev), 0, 0); break;

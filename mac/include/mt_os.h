@@ -68,6 +68,14 @@ typedef struct MtStreamAsr {
 /* Monotonic milliseconds (wraps at 2^32); the one clock every glue entry uses. */
 uint32_t mt_os_ms(void);
 
+#ifdef MT_TRACE
+/* Perf builds with the echo-path trace only (mac/glue/mt_trace.h): monotonic microseconds, wrapping at 2^32, cheap
+ * enough to read per event and legal in every context (the Mac: the Time Manager stopwatch, about 0.2 ms per read);
+ * and the address of the trace's EWrite completion routine (the Mac: an assembler stub in mt_trace_mac.c). */
+uint32_t mt_os_trace_us(void);
+uint32_t mt_os_trace_ew_compl(void);
+#endif
+
 /* The Toolbox tick count (low-memory Ticks, 60 Hz): for values an app compares with TickCount(),
  * e.g. ICMPEcho's echoRequestOut/echoReplyIn. */
 uint32_t mt_os_ticks(void);

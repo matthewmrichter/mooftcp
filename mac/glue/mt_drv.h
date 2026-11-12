@@ -11,6 +11,9 @@
 #include "mt_drv_logic.h"
 #include "mt_stackmark.h"
 #include "mt_view.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 struct MtDrv;
 
@@ -41,6 +44,10 @@ typedef struct MtRes {
 #ifdef MT_TUNE
     MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
                                   * above keeps its place for readers built without MT_TUNE */
+#endif
+#ifdef MT_TRACE
+    MtTrace        trace;        /* perf builds with MT_TRACE (task 18): the echo-path trace's ring and clock (mt_trace.h),
+                                  * read through Control MT_CS_TRACE; last, after the pump */
 #endif
 } MtRes;
 

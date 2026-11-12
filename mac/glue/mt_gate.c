@@ -2,6 +2,9 @@
 #include <stddef.h>
 #include "mt_gate.h"
 #include "mt_stackmark.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 static void barrier(void) { __asm__ volatile("" : : : "memory"); }
 
@@ -32,6 +35,9 @@ static void drain(MtGate *g)
             MtRxSlot *s = &g->slot[g->tail];
             g->n_rx++;
             mt_os_stack_mark();
+#ifdef MT_TRACE
+            mt_trace_gate_run(s);                   /* perf builds: a frame that waited for the owner */
+#endif
             g->rx(g->ctx, s->buf, s->len);
             barrier();
             g->tail = (uint16_t)((g->tail + 1u) % MT_GATE_SLOTS);
@@ -79,6 +85,9 @@ void mt_gate_poke(MtGate *g)
     uint32_t n = (uint32_t)((g->head + MT_GATE_SLOTS - g->tail) % MT_GATE_SLOTS);
     if (n > g->max_ring) g->max_ring = n;
     if (!g->open) { g->tail = g->head; g->drops++; return; }
+#ifdef MT_TRACE
+    mt_trace_gate_rx(g, g->depth != 0);         /* perf builds: the frame, before the core */
+#endif
     if (g->depth) { g->n_deferred++; return; }
     g->depth = 1;
     mt_os_stack_enter();
@@ -90,6 +99,9 @@ void mt_gate_tick(MtGate *g)
 {
     if (!g->open) return;
     g->tick_pending = 1;
+#ifdef MT_TRACE
+    if (g->depth) mt_trace_ev(MT_TRACE_TDEFER, 0, 0, 0, 0);
+#endif
     if (g->depth) { g->n_tick_deferred++; return; }
     g->depth = 1;
     mt_os_stack_enter();

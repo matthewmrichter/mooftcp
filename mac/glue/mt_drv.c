@@ -194,6 +194,10 @@ static long boot(void *drvr) {
     r->pump.on = MT_TXPUMP_BOOT;
     r->d->txpump = &r->pump.on;
 #endif
+#ifdef MT_TRACE
+    mt_trace_set(&r->trace);                     /* perf builds: the echo-path trace records from here on */
+    mt_trace_mac_start(&r->trace);               /* its stopwatch (a Time Manager task) and lap_us */
+#endif
 
     r->view.magic = MT_VIEW_MAGIC;
     r->view.version = MT_VIEW_VERSION;
@@ -218,6 +222,10 @@ static long boot(void *drvr) {
         mt_timer_close(&r->timer);
 #ifdef MT_TUNE
         mt_timer_close(&r->pump.tm);
+#endif
+#ifdef MT_TRACE
+        mt_trace_set(0);
+        mt_timer_close(&r->trace.clk);
 #endif
         mt_os_mac_set_gate(0);
         mt_os_mac_set_stack(0);
