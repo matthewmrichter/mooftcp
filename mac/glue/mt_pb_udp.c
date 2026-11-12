@@ -182,7 +182,7 @@ static int16_t do_release(MtUdpStream *s, MtAnyPb *pb) {
     pb->udp.csParam.create.rcvBuff = s->rbuf;                    /* the buffer goes back to the app */
     pb->udp.csParam.create.rcvBuffLen = s->rlen;
     s->used = 0;
-    mt_pb_udp_hi_lower(s->d);
+    mt_pb_hi_lower(s->d);
     return 0;
 }
 

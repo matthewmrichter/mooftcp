@@ -713,7 +713,7 @@ void mt_pb_tcp_free(MtDrv *d, MtStream *s) {
     s->t = NULL;
     for (i = 0; i < MT_SENDQ_MAX; i++) s->req[i].busy = 0;
     s->used = 0;
-    mt_pb_tcp_hi_lower(d);
+    mt_pb_hi_lower(d);
 }
 
 static int16_t do_release(MtDrv *d, MtStream *s, MtAnyPb *pb) {

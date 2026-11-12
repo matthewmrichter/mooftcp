@@ -26,12 +26,6 @@ _Static_assert(sizeof(MtEnetPB) == 58 && offsetof(MtEnetPB, csCode) == 26 &&
                offsetof(MtEnetPB, eBuffSize) == 34, "EParamBlock layout");
 #endif
 
-static void zero(void *p, size_t n)
-{
-    uint8_t *b = (uint8_t *)p;
-    while (n--) *b++ = 0;
-}
-
 static int16_t ctl_sync(MtEnet *e, MtEnetPB *pb)
 {
     pb->ioRefNum = e->refnum;
@@ -42,7 +36,7 @@ static int16_t ctl_sync(MtEnet *e, MtEnetPB *pb)
 static int16_t attach(MtEnet *e, uint16_t type)
 {
     MtEnetPB pb;
-    zero(&pb, sizeof pb);
+    memset(&pb, 0, sizeof pb);
     pb.csCode = E_ATTACH;
     pb.eProtType = (int16_t)type;
     pb.ePointer = (uint32_t)(uintptr_t)mt_enet_ph;
@@ -52,7 +46,7 @@ static int16_t attach(MtEnet *e, uint16_t type)
 static void detach(MtEnet *e, uint16_t type)
 {
     MtEnetPB pb;
-    zero(&pb, sizeof pb);
+    memset(&pb, 0, sizeof pb);
     pb.csCode = E_DETACH;
     pb.eProtType = (int16_t)type;
     (void)ctl_sync(e, &pb);
@@ -77,8 +71,8 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
     e->gate = gate;
 
     /* EGetInfo: the first six bytes returned are our Ethernet address (obs). */
-    zero(&pb, sizeof pb);
-    zero(info, sizeof info);
+    memset(&pb, 0, sizeof pb);
+    memset(info, 0, sizeof info);
     pb.csCode = E_GETINFO;
     pb.ePointer = (uint32_t)(uintptr_t)info;
     pb.eBuffSize = (int16_t)sizeof info;
@@ -144,7 +138,7 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb)
 {
     MtEnetPB k;
     (void)pb;
-    zero(&k, sizeof k);
+    memset(&k, 0, sizeof k);
     k.ioRefNum = refnum;
     return (int16_t)PBKillIOSync((ParmBlkPtr)&k);
 }

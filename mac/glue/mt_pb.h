@@ -207,7 +207,7 @@ struct MtDrv {
     uint8_t   ntcp, next_slot;
     uint8_t   nudp, next_uslot;
     uint8_t   tcp_hi;           /* one past the highest tcp[] slot in use (live or dying; 0: none), was a pad byte:
-                                 * the stream loops stop there (1.1d1; mt_pb_tcp_hi_lower) */
+                                 * the stream loops stop there (1.1d1; mt_pb_hi_lower) */
     uint16_t  echo_seq;
     uint16_t  rel_mask;         /* streams whose core release is deferred */
     uint32_t  now;
@@ -269,13 +269,8 @@ struct MtDrv {
 #endif
 };
 
-/* After a slot was freed (used = 0): tcp_hi / udp_hi drop past every free slot at the top. A create raises them. */
-static inline void mt_pb_tcp_hi_lower(MtDrv *d) {
-    while (d->tcp_hi && !d->tcp[d->tcp_hi - 1u].used) d->tcp_hi--;
-}
-static inline void mt_pb_udp_hi_lower(MtDrv *d) {
-    while (d->udp_hi && !d->udp[d->udp_hi - 1u].used) d->udp_hi--;
-}
+/* After a slot was freed (used = 0): tcp_hi and udp_hi drop past every free slot at the top. A create raises them. */
+void     mt_pb_hi_lower(MtDrv *d);
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
  * available from a completion routine nested this deep (MtDrv.depth) is queued and served from the

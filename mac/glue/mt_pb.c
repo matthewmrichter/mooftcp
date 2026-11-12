@@ -173,6 +173,18 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
     co_done(d, sv);
 }
 
+void mt_pb_hi_lower(MtDrv *d) {
+    uint8_t h = d->tcp_hi;
+    const MtStream *t = d->tcp + h;
+    const MtUdpStream *u;
+    while (h && !(--t)->used) h--;
+    d->tcp_hi = h;
+    h = d->udp_hi;
+    u = d->udp + h;
+    while (h && !(--u)->used) h--;
+    d->udp_hi = h;
+}
+
 /* Perform the core releases that were deferred while a glue frame was active. Also called by
  * the driver entry after it ran a completion routine itself (mt_pb_flush). */
 static void flush_deferred(MtDrv *d) {
@@ -426,7 +438,6 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         s->conn = conn;
         d->rel_mask &= (uint16_t)~(1u << i);
     }
-    mt_pb_tcp_hi_lower(d);
     for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
@@ -435,7 +446,7 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         memset(u, 0, sizeof *u);
         u->gen = gen;
     }
-    mt_pb_udp_hi_lower(d);
+    mt_pb_hi_lower(d);
     mt_pb_dns_goodbye(d, m, m_born);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];

@@ -93,7 +93,7 @@ static void tick_cb(void *ctx) {
     r->tm_shot = 0;
     /* 1.1d1: the timer fired before anything is due (it is re-armed only for earlier deadlines): no sweep, no tick
      * work; after_cb drains, runs the watchdog and arms the next deadline, as after any gate session */
-    if (shot && mt_drv_tick_idle(shot, mt_pb_next_deadline_ms(r->d))) return;
+    if (shot && mt_drv_tick_idle(1, mt_pb_next_deadline_ms(r->d))) return;
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -271,12 +271,8 @@ static int16_t link_up(MtRes *r) {
         (void)mt_pb_dhcp_start(r->d, &r->cfg, r->dhcp_hint, &r->view);
     else
 #endif
-        mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: arms the timer too */
-    r->view.linked = 1;
-    {
-        uint32_t now = mt_os_ms();
-        mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d), now, &r->tm_due);
-    }
+        mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: after_cb arms the timer */
+    r->view.linked = 1;                          /* (1.1d1: no second arm here; it would keep the same shot) */
     return 0;
 }
 

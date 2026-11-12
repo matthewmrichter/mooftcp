@@ -30,7 +30,7 @@ static int push(MtDrvPend *q, MtAnyPb *pb) {
  * on the 68000) and every pop still happens under the mask. A stale "empty" only misses a push that lands after the
  * look, and every push sets tick_pending, so the gate owner drains again before it lets go; a stale "not empty"
  * finds the ring empty under the mask. */
-static MtAnyPb *pop(MtDrvPend *q) {
+__attribute__((noinline)) static MtAnyPb *pop(MtDrvPend *q) {   /* one copy: three call sites */
     int m;
     MtAnyPb *pb;
     if (*(volatile const uint16_t *)&q->head == q->tail) return NULL;

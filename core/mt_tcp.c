@@ -339,7 +339,12 @@ void mt_tcp_release(mt_tcp *t) {
         memset(t, 0, sizeof *t);           /* used = 0, cb = NULL: no further callbacks */
         t->gen = gen;
     }
-    while (s->tcp_hi && !s->tcp[s->tcp_hi - 1u].used) s->tcp_hi--;
+    {
+        uint8_t h = s->tcp_hi;
+        const mt_tcp *e = s->tcp + h;
+        while (h && !(--e)->used) h--;
+        s->tcp_hi = h;
+    }
 }
 
 mt_tcp_state mt_tcp_get_state(const mt_tcp *t) { return (mt_tcp_state)t->state; }
