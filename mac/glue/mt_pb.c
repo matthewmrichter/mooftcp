@@ -2,6 +2,9 @@
  * TCP calls live in mt_pb_tcp.c. See mt_pb.h for the contract. */
 #include <string.h>
 #include "mt_pb.h"
+#ifdef MT_TEST_HOOKS
+#include "mt_int.h"                /* mt_next_deadline_scan: the reference scan (test builds) */
+#endif
 #ifdef MT_TUNE
 #include "mt_tune_abi.h"
 #endif
@@ -309,17 +312,31 @@ void mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len) {
     mt_os_irq_restore(sv);
 }
 
+/* 1.1d2 F7: the core's cached deadline, the glue's cached command timeouts (rebuilt here only when a change made
+ * them stale), the queued-reads kick and the MultiFinder sweep: O(1) unless a cache is stale. */
 uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     int sv = mt_os_irq_save();
     uint32_t c, g;
     d->now = mt_os_ms();
-    c = mt_next_deadline(d->s, d->now);
-    g = mt_pb_tcp_deadline(d);
-    if (g > c) g = c;
-    c = mt_pb_udp_deadline(d);
-    if (g > c) g = c;
-    c = mt_pb_ip_deadline(d);
-    if (g > c) g = c;
+    g = mt_next_deadline(d->s, d->now);
+    if (d->gdl_state == MT_PB_DL_STALE) {      /* rescan (an overdue timeout is held as now: still 0 later) */
+        uint32_t t;
+        c = mt_pb_tcp_deadline(d);
+        t = mt_pb_udp_deadline(d);
+        if (c > t) c = t;
+        t = mt_pb_ip_deadline(d);
+        if (c > t) c = t;
+        d->gdl_at = d->now + c;
+        d->gdl_state = c == MT_NO_DEADLINE ? MT_PB_DL_NONE : MT_PB_DL_AT;
+#ifdef MT_TEST_HOOKS
+        d->gdl_scans++;
+#endif
+    }
+    if (d->gdl_state == MT_PB_DL_AT) {
+        c = (int32_t)(d->gdl_at - d->now) > 0 ? d->gdl_at - d->now : 0;
+        if (g > c) g = c;
+    }
+    if (d->rcv_kick) g = 0;                     /* serve the queued reads at once */
     if (d->n_own) {                             /* MultiFinder owners: the periodic sweep (Task 12) */
         c = (int32_t)(d->own_dl - d->now) > 0 ? d->own_dl - d->now : 0;
         if (g > c) g = c;
@@ -327,6 +344,26 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     mt_os_irq_restore(sv);
     return g;
 }
+
+#ifdef MT_TEST_HOOKS
+uint32_t mt_pb_next_deadline_scan(MtDrv *d) {
+    uint32_t c, g;
+    d->now = mt_os_ms();
+    g = mt_next_deadline_scan(d->s, d->now);
+    c = mt_pb_tcp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_udp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_ip_deadline(d);
+    if (g > c) g = c;
+    if (d->rcv_kick) g = 0;
+    if (d->n_own) {
+        c = (int32_t)(d->own_dl - d->now) > 0 ? d->own_dl - d->now : 0;
+        if (g > c) g = c;
+    }
+    return g;
+}
+#endif
 
 void mt_pb_tick(MtDrv *d) {
 #ifdef MT_TRACE
@@ -349,6 +386,7 @@ void mt_pb_tick(MtDrv *d) {
     mt_pb_ip_timers(d);
     mt_pb_tcp_after_core(d);
     flush_deferred(d);
+    mt_pb_dl_stale(d);                          /* F7: the timers may have moved anything: one rescan next query */
     mt_os_irq_restore(sv);
 }
 
@@ -437,6 +475,7 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         s->gen = gen;
         s->conn = conn;
         d->rel_mask &= (uint16_t)~(1u << i);
+        mt_pb_dl_stale(d);                      /* F7: its timeouts went with it */
     }
     for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *u = &d->udp[i];
@@ -445,12 +484,16 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         if (u->u) mt_udp_release(u->u);
         memset(u, 0, sizeof *u);
         u->gen = gen;
+        mt_pb_dl_stale(d);
     }
     mt_pb_hi_lower(d);
     mt_pb_dns_goodbye(d, m, m_born);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];
-        if (e->state && e->blk.ioCompletion && gone_p(&g, e->blk.ioCompletion, e->born)) e->state = 0;
+        if (e->state && e->blk.ioCompletion && gone_p(&g, e->blk.ioCompletion, e->born)) {
+            e->state = 0;
+            mt_pb_dl_stale(d);
+        }
     }
     mt_os_irq_restore(sv);
 }

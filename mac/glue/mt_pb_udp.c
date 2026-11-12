@@ -48,6 +48,7 @@ static void asr(MtUdpStream *s, uint16_t ev, MacPtr32 icmp) {
 
 static MtAnyPb *rq_take(MtUdpStream *s, uint8_t k) {
     MtAnyPb *pb = s->rq[k].pb;
+    if (s->rq[k].timed) mt_pb_dl_stale(s->d);             /* F7: the cached glue deadline stays exact */
     for (; k + 1 < s->rq_n; k++) s->rq[k] = s->rq[k + 1];
     s->rq_n--;
     return pb;
@@ -90,6 +91,7 @@ static int16_t do_read(MtDrv *d, MtUdpStream *s, MtAnyPb *pb) {
     s->rq[s->rq_n].pb = pb;                                      /* matrix 906: several, FIFO */
     s->rq[s->rq_n].timed = (uint8_t)(tmo != 0);                  /* 0 = no timeout (906) */
     s->rq[s->rq_n].dl = d->now + MS(tmo);
+    if (tmo) mt_pb_dl_stale(d);                                  /* F7: a timeout armed */
     s->rq_n++;
     pb->hdr.ioResult = inProgress;
     return inProgress;
@@ -177,6 +179,7 @@ static int16_t do_release(MtUdpStream *s, MtAnyPb *pb) {
     mt_udp_release(s->u);                    /* first: the core stops using the app's buffer */
     s->u = NULL;
     s->used = RELEASING;                     /* the handle is invalid from here on */
+    mt_pb_dl_stale(s->d);                    /* F7: its read timeouts leave the scan */
     s->loan_n = 0;                           /* outstanding loans are forgotten: the buffer is the app's */
     while (s->rq_n) complete(s, rq_take(s, 0), connectionTerminated);   /* matrix 906 */
     pb->udp.csParam.create.rcvBuff = s->rbuf;                    /* the buffer goes back to the app */

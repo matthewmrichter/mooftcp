@@ -267,7 +267,22 @@ struct MtDrv {
     volatile uint8_t *txpump;   /* perf builds: the link's transmit pump switch (MtEnetPump.on, mt_enet.h), set by the
                                  * driver at boot; NULL = no pump (Control 0x4D55 then refuses txpump 1) */
 #endif
+    /* 1.1d2 F7: the glue's command timeouts (timed TCP/UDP reads and passive opens of live streams, ICMP echoes
+     * waiting) cached like the core's deadline (mt_int.h "the cached deadline"): gdl_at is the earliest while
+     * gdl_state is MT_PB_DL_AT; appended last so every earlier offset stays (MoofDiag, MfEcho). */
+    uint32_t  gdl_at;
+    uint8_t   gdl_state;        /* MT_PB_DL_STALE / AT / NONE */
+#ifdef MT_TEST_HOOKS
+    uint32_t  gdl_scans;        /* rescans done (tests) */
+#endif
 };
+
+/* The glue's cached deadline, kept exact by marking it stale at every change to a command timeout (armed, served,
+ * timed out, a stream leaving LIVE, a gone owner's objects forgotten); mt_pb_next_deadline_ms rescans once after a
+ * change. A call that changes none (TCPSend, a TCPRcv served at once, frames that complete no read) costs no scan.
+ * mt_pb_tick marks it stale when it ends. */
+enum { MT_PB_DL_STALE = 0, MT_PB_DL_AT = 1, MT_PB_DL_NONE = 2 };
+static inline void mt_pb_dl_stale(MtDrv *d) { d->gdl_state = MT_PB_DL_STALE; }
 
 /* After a slot was freed (used = 0): tcp_hi and udp_hi drop past every free slot at the top. A create raises them. */
 void     mt_pb_hi_lower(MtDrv *d);
@@ -301,7 +316,10 @@ void     mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32
 
 int16_t  mt_pb_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
-uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE */
+uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE (O(1) unless a cache is stale) */
+#ifdef MT_TEST_HOOKS
+uint32_t mt_pb_next_deadline_scan(MtDrv *d);   /* the same by a full scan of the core and every glue table */
+#endif
 void     mt_pb_tick(MtDrv *d);
 /* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
  * forget every TCP and UDP stream whose receive buffer, ASR or any pending PB lies in the
@@ -374,7 +392,7 @@ void     mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t re
 int16_t  mt_pb_tcp_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_tcp_after_core(MtDrv *d);       /* close / send progress after input and ticks */
 void     mt_pb_tcp_timers(MtDrv *d);           /* expire command timeouts */
-uint32_t mt_pb_tcp_deadline(MtDrv *d);         /* earliest command timeout, ms from now */
+uint32_t mt_pb_tcp_deadline(MtDrv *d);         /* earliest command timeout, ms from now (a scan: F7 caches it) */
 void     mt_pb_tcp_free(MtDrv *d, MtStream *s);/* the deferred mt_tcp_release */
 int16_t  mt_pb_udp_control(MtDrv *d, MtAnyPb *pb);   /* csCodes 20..29 (mt_pb_udp.c) */
 void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */

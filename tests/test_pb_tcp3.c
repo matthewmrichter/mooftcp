@@ -183,6 +183,38 @@ static void stream_scans_bounded_by_highest_used_slot(void) {
     T_EQ(x.d->udp_hi, 0);
 }
 
+/* 1.1d2 F7: the glue's command timeouts are cached like the core's deadline. Queries rescan nothing until a timeout
+ * changes: queuing a timed read and serving it cost one rescan each, the queries in between none; the answer always
+ * equals the full scan (mt_pb_next_deadline_scan, test builds). */
+static void glue_deadline_cached(void) {
+    pbt x;
+    StreamPtr a;
+    TCPiopb *r;
+    pbt_conn cc;
+    uint32_t sc;
+    pbt_init(&x, 1);
+    a = pbt_est(&x, 0, 0, &cc);
+    T_CHECK(a != 0);
+    T_EQ(mt_pb_next_deadline_ms(x.d), mt_pb_next_deadline_scan(x.d));
+    sc = x.d->gdl_scans;
+    T_EQ(mt_pb_next_deadline_ms(x.d), mt_pb_next_deadline_scan(x.d));
+    T_EQ(x.d->gdl_scans, sc);                             /* nothing changed: no rescan */
+    r = pbt_rcv(&x, a, 10, 1);                            /* a read with a 1 s timeout */
+    T_EQ(r->ioResult, inProgress);
+    T_EQ(mt_pb_next_deadline_ms(x.d), 1000);
+    T_EQ(mt_pb_next_deadline_scan(x.d), 1000);
+    T_EQ(x.d->gdl_scans, sc + 1);                         /* one rescan for the new timeout */
+    pbf_now += 100;
+    T_EQ(mt_pb_next_deadline_ms(x.d), 900);
+    T_EQ(x.d->gdl_scans, sc + 1);                         /* cached */
+    pbt_peer(&x, cc.lport, cc.ps, cc.ms, TF_ACK | TF_PSH, 8192, "hi", 2);   /* serves the read */
+    T_EQ(r->ioResult, 0);
+    T_EQ(mt_pb_next_deadline_ms(x.d), mt_pb_next_deadline_scan(x.d));
+    T_EQ(x.d->gdl_scans, sc + 2);                         /* its timeout went: one rescan */
+    T_EQ(mt_pb_next_deadline_ms(x.d), mt_pb_next_deadline_scan(x.d));
+    T_EQ(x.d->gdl_scans, sc + 2);
+}
+
 T_MAIN(data_arrival_after_partial_read, pending_small_read_then_data_arrival,
        small_reads_from_asr_drain_without_nesting, unconfigured_through_driver_entry_no_completion,
-       stream_scans_bounded_by_highest_used_slot)
+       stream_scans_bounded_by_highest_used_slot, glue_deadline_cached)

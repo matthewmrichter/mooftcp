@@ -29,6 +29,7 @@ static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 static void notify(MtDrv *d, MtEcho *e, int16_t err, const uint8_t *data, uint16_t len) {
     ICMPEchoInfo *info = &e->blk.icmpEchoInfo;
     MacPtr32 proc = e->blk.ioCompletion;      /* the app's icmpCompletion (copied at the request) */
+    mt_pb_dl_stale(d);                        /* F7: no longer waiting (only waiting echoes are notified) */
     e->state = ECHO_NOTIFY;
     if (!proc) {
         e->state = 0;
@@ -99,6 +100,7 @@ static int16_t do_echo(MtDrv *d, MtAnyPb *pb) {
     e->dl = d->now + (uint32_t)tmo * 1000u;
     e->born = d->own_ser;                                    /* owner serial at creation (mt_pb_in_gone) */
     e->state = ECHO_WAIT;
+    mt_pb_dl_stale(d);                                       /* F7: a timeout armed */
     return 0;                                                /* matrix A00: our PB completes 0 */
 }
 

@@ -78,9 +78,16 @@ static MtAnyPb *sq_pop(MtStream *s) {
 
 static MtAnyPb *rq_take(MtStream *s, uint8_t k) {
     MtAnyPb *pb = s->rq[k].pb;
+    if (s->rq[k].timed) mt_pb_dl_stale(s->d);             /* F7: the cached glue deadline stays exact */
     for (; k + 1 < s->rq_n; k++) s->rq[k] = s->rq[k + 1];
     s->rq_n--;
     return pb;
+}
+
+/* The passive open's command timeout is disarmed (F7: the cached glue deadline stays exact). */
+static void open_untime(MtStream *s) {
+    if (s->open_timed) mt_pb_dl_stale(s->d);
+    s->open_timed = 0;
 }
 
 static void ulp_apply(MtStream *s, int8_t vflags, int8_t value, int8_t action) {
@@ -104,7 +111,7 @@ static int fail_all(MtStream *s, int16_t open_err, int16_t close_err, uint16_t r
         int16_t e = s->open_err ? s->open_err : open_err;
         pb = s->open_pb;
         s->open_pb = NULL;
-        s->open_timed = 0;
+        open_untime(s);
         s->open_err = 0;
         complete(s, pb, e);
         if (!same(s, g, c)) return 0;
@@ -485,6 +492,7 @@ static int16_t do_rcv(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     s->rq[s->rq_n].pb = pb;                                             /* matrix 502: FIFO */
     s->rq[s->rq_n].timed = (uint8_t)(tmo != 0);                         /* 0 = forever (501b) */
     s->rq[s->rq_n].dl = d->now + MS(tmo);
+    if (tmo) mt_pb_dl_stale(d);                                         /* F7: a timeout armed */
     s->rq_n++;
     if (s->rq_n == 1 && unread(s) && can_serve(s, pb)) d->rcv_kick = 1;   /* too deep to serve now */
     pb->hdr.ioResult = inProgress;
@@ -515,7 +523,7 @@ static void on_established(MtStream *s) {
     s->d->n_opened++;                                    /* TCPStats.tcpConnOpened */
     if (!pb) return;
     s->open_pb = NULL;
-    s->open_timed = 0;
+    open_untime(s);
     s->open_err = 0;
     info(s, &in);
     pb->tcp.csParam.open.remoteHost = in.rip;            /* matrix 300 */
@@ -645,6 +653,7 @@ static int16_t do_open(MtDrv *d, MtStream *s, MtAnyPb *pb, int passive) {
         if (tmo) {                                             /* matrix 700/702: commandTimeoutValue */
             s->open_timed = 1;
             s->open_dl = d->now + MS(tmo);
+            mt_pb_dl_stale(d);
         }
     } else {                                                   /* commandTimeoutValue ignored (302c) */
         r = mt_tcp_open(s->t, rip, rport, lport, d->now);
@@ -713,6 +722,7 @@ void mt_pb_tcp_free(MtDrv *d, MtStream *s) {
     s->t = NULL;
     for (i = 0; i < MT_SENDQ_MAX; i++) s->req[i].busy = 0;
     s->used = 0;
+    mt_pb_dl_stale(d);                    /* F7: its timeouts (if any) leave the scan */
     mt_pb_hi_lower(d);
 }
 
@@ -720,6 +730,7 @@ static int16_t do_release(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     uint16_t reason = state_of(s) != MT_TCP_CLOSED ? TCPULPAbort : 0;   /* idle: no ASR (603/605) */
     uint8_t idx = (uint8_t)(s - d->tcp);
     s->used = DYING;                      /* the handle is invalid from here on */
+    mt_pb_dl_stale(d);                    /* F7: its timeouts (if any) leave the scan */
     if (d->depth == 0 && !d->in_core) {   /* core first: it stops reading the app's buffers */
         mt_tcp_release(s->t);
         s->t = NULL;
@@ -874,7 +885,7 @@ void mt_pb_tcp_timers(MtDrv *d) {
         if (s->used != LIVE) continue;
         if (s->open_timed && due(s->open_dl, d->now)) {          /* passive open: matrix 700 */
             mt_tcp_state st = state_of(s);
-            s->open_timed = 0;
+            open_untime(s);
             s->open_err = commandTimeout;
             if (s->open_pb) open_addrs(s, s->open_pb);
             mt_tcp_abort(s->t, d->now);       /* SYN_RCVD: TCPTerminate does the rest */
@@ -896,7 +907,6 @@ void mt_pb_tcp_timers(MtDrv *d) {
 uint32_t mt_pb_tcp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
-    if (d->rcv_kick) return 0;                             /* serve the queued reads at once */
     for (i = 0; i < d->tcp_hi; i++) {
         const MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;

@@ -595,6 +595,8 @@ static void check_invariants(void) {
     uint16_t i;
     int k, n;
     check_tcp_hi(g.s);
+    /* 1.1d2 F7: the cached deadline equals the full scan after every step (a valid cache is compared as is) */
+    if (mt_next_deadline(g.s, g.now) != mt_next_deadline_scan(g.s, g.now)) bad("cached core deadline differs from the full scan");
     for (i = 0; i < NT; i++) {                              /* every pending record is queued */
         for (k = 0, n = 0; k < RQ_PER; k++) n += g_rq[i][k].busy;
         if (g.t[i] && g.t[i]->used ? n != g.t[i]->sq_n : n != 0)
@@ -2113,6 +2115,8 @@ static void pb_invariants(void) {
     if (P.d->tcp_hi != thi || P.d->udp_hi != uhi) bad("glue tcp_hi / udp_hi is not one past the highest used slot");
     if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
     if (P.d->rel_mask) bad("deferred release left over");
+    /* 1.1d2 F7: the glue's cached deadline (and the core's under it) equals the full scan after every step */
+    if (mt_pb_next_deadline_ms(P.d) != mt_pb_next_deadline_scan(P.d)) bad("cached glue deadline differs from the full scan");
 #ifdef MT_TUNE
     fz_pump_invariants();
 #endif
@@ -2275,7 +2279,7 @@ static void pb_step(uint8_t *f) {
         mt_pb_tick(P.d);
         /* as before Task 3, up to 6 ticks may be needed (glue work after a tick can arm a core
          * timer that is already due); after that only the loopback term may read 0 */
-        if (k >= 5 && (dl_no_lo(P.d->s, P.d->now) == 0 || mt_pb_tcp_deadline(P.d) == 0 ||
+        if (k >= 5 && (dl_no_lo(P.d->s, P.d->now) == 0 || P.d->rcv_kick || mt_pb_tcp_deadline(P.d) == 0 ||
             mt_pb_udp_deadline(P.d) == 0 || mt_pb_ip_deadline(P.d) == 0)) {
             if (getenv("FZ_DEBUG"))
                 fprintf(stderr, "pb arp %u tcp %u dns %u now %u stall %u/%u; core %u glue tcp %u udp %u ip %u lo %u k %d\n",
