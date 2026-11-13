@@ -21,8 +21,9 @@ resource 'INIT' (0, sysheap, locked) {
     dontBreakAtEntry, $$read("MoofInit.flt");
 };
 
-/* DRVR: the 18-byte header (flags 0x5C00 = dNeedLock | dNeedGoodBye | dStatEnable |
- * dCtlEnable, as MacTCP's; delay, event mask, menu 0; entry offsets), the name ".ipp" (MacTCP's
+/* DRVR: the 18-byte header (flags 0x7C00 = dNeedLock | dNeedTime | dNeedGoodBye | dStatEnable | dCtlEnable:
+ * MacTCP's 0x5C00 plus dNeedTime since 1.1d2, delay 60 ticks: SystemTask's accRun Control about once a second is the
+ * heartbeat that re-arms a lost timer shot on a silent link, mt_entry_accrun; event mask, menu 0; entry offsets), the name ".ipp" (MacTCP's
  * exact name; the Device Manager compares names case-insensitively) padded to offset 24, then one
  * stub per entry: moveq #selector,d0 / bra.s 48. Offset 44 is the boot stub the INIT calls
  * (moveq #5,d0 / nop) and offset 48 the flat code (its first instruction is Retro68's entry
@@ -33,7 +34,7 @@ type 'DRVR' {
 };
 
 resource 'DRVR' (22, ".ipp", sysheap, locked) {
-    $"5C00 0000 0000 0000"          /* flags, delay, emask, menu */
+    $"7C00 003C 0000 0000"          /* flags, delay (60 ticks), emask, menu */
     $"0018 001C 0020 0024 0028"     /* open, prime, control, status, close */
     $"042E 6970 7000"               /* "\p.ipp", pad */
     $"7000 6014"                    /* 24 open:    moveq #0,d0; bra.s 48 */

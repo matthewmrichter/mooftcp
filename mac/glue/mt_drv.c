@@ -382,7 +382,12 @@ int16_t mt_drv_control(void *vpb, void *dce) {
     if (!r) { pb->hdr.ioResult = MT_PB_NOTOPEN; return MT_PB_NOTOPEN; }
     if ((r->enet.kill_req | r->enet.reattach_req) && !(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
         enet_service(r, pb);                      /* the watchdog asked; task time only */
-    res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
+    if (pb->hdr.csCode == MT_DRV_ACCRUN && !sr_irq()) {   /* 1.1d2 heartbeat (SystemTask): no sweep, no owner */
+        res = mt_entry_accrun(&r->entry);
+        pb->hdr.ioResult = res;
+    } else {
+        res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
+    }
     for (i = 0; i < n; i++) {
         MtAnyPb *x = (MtAnyPb *)extra[i];
         r->entry.n_adopted++;

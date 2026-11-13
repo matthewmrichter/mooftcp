@@ -71,6 +71,15 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* Queued PBs run only when the core may run (mt_entry_core_ok): a quit application's queued PBs are
  * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
  * (the timer and the gate's after-callback use this). */
+int16_t mt_entry_accrun(MtEntry *e) {
+    e->n_accrun++;
+    if (!e->gate->depth) {
+        mt_gate_enter(e->gate);
+        mt_gate_leave(e->gate);                  /* the after-callback: drain, watchdog, re-arm */
+    }
+    return 0;
+}
+
 int mt_entry_drain_ok(MtEntry *e, int why) {
     if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return 0;
     return mt_entry_drain(e);

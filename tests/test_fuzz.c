@@ -4,6 +4,8 @@
 #include "mt_util.h"
 #include "pbfake.h"
 #include "mt_timer.h"
+#include "mt_gate.h"
+#include "mt_pb_entry.h"
 #ifdef MT_TRACE
 #include "mt_trace.h"
 #endif
@@ -2213,6 +2215,9 @@ static MtTimer g_tm;
 static uint32_t g_tm_due;
 static MtTimerShot g_tm_sh;   /* only the lost-shot count: mt_timer_note_lost */
 static long g_tm_found;
+static MtGate g_hb_gate;       /* the accRun heartbeat's own gate session (mt_entry_accrun), after = fz_timer_after */
+static MtEntry g_hb_e;
+static long g_hb_n;
 static long g_tm_lost;
 
 static void pb_setup(uint32_t seed) {
@@ -2225,6 +2230,8 @@ static void pb_setup(uint32_t seed) {
     memset(&g_tm, 0, sizeof g_tm);
     g_tm_due = 0;
     memset(&g_tm_sh, 0, sizeof g_tm_sh);
+    memset(&g_hb_gate, 0, sizeof g_hb_gate);
+    memset(&g_hb_e, 0, sizeof g_hb_e);        /* re-bound to this seed's MtDrv at the first accRun */
     memset(&P, 0, sizeof P);
     memset(g_rq, 0, sizeof g_rq);               /* the core fuzzer's records: none here */
     memset(g_serial, 0, sizeof g_serial);
@@ -2291,6 +2298,19 @@ static void fz_timer_after(void) {
     }
 }
 
+static void fz_hb_after(void *ctx) { (void)ctx; fz_timer_after(); }
+
+/* 1.1d2 heartbeat in the op mix: accRun runs one gate session (the timer model's arm) and changes nothing else that
+ * the invariants see; it never records a MultiFinder owner. */
+static void fz_accrun(void) {
+    uint8_t own = P.d->n_own;
+    uint32_t calls = g_hb_e.n_calls;
+    if (!g_hb_e.d) { mt_entry_init(&g_hb_e, P.d, &g_hb_gate); g_hb_gate.after = fz_hb_after; g_hb_gate.open = 1; }
+    if (mt_entry_accrun(&g_hb_e) != 0) bad("accRun result");
+    if (P.d->n_own != own || g_hb_e.n_calls != calls) bad("accRun recorded an owner or counted a call");
+    g_hb_n++;
+}
+
 static void pb_step(uint8_t *f) {
     uint32_t d, dt;
     int k, live = 0;
@@ -2310,6 +2330,7 @@ static void pb_step(uint8_t *f) {
     if (rn(3) == 0) mt_pb_input(P.d, f, gen_pb_udp(f));
     if (rn(8) == 0) mt_pb_input(P.d, f, gen_pb_echo_reply(f));
     for (k = (int)rn(3); k > 0; k--) pb_action();
+    if (rn(6) == 0) fz_accrun();
 #ifdef MT_TUNE
     fz_pump_step();
 #endif
@@ -2360,6 +2381,7 @@ static void test_fuzz_pb(void) {
     long steps = getenv("FZ_STEPS") ? atol(getenv("FZ_STEPS")) : PB_STEPS;   /* FZ_STEPS=n steps per seed */
     g_tm_lost = 0;
     g_tm_found = 0;
+    g_hb_n = 0;
     for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
@@ -2398,6 +2420,7 @@ static void test_fuzz_pb(void) {
     T_CHECK(g_tm_lost > 0);     /* lost timer shots were injected (and re-armed: fz_timer_after) */
     if (getenv("FZ_DEBUG")) fprintf(stderr, "timer: lost %ld found %ld\n", g_tm_lost, g_tm_found);
     T_CHECK(g_tm_found > 0 && g_tm_found <= g_tm_lost);   /* and counted when found, never a live one */
+    T_CHECK(g_hb_n > 0);        /* accRun heartbeats ran in the op mix */
     T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
 #ifdef MT_TUNE
     if (getenv("FUZZ_VERBOSE"))

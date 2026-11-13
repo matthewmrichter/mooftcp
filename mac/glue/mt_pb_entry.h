@@ -44,7 +44,12 @@ int     mt_entry_sweep(MtEntry *e, int note, int why);
  * owner is gone and could not be swept now: drop the frame / skip the tick (MtDrv.n_dead_drops). */
 int     mt_entry_core_ok(MtEntry *e, int why);
 /* mt_entry_drain only when mt_entry_core_ok allows (the timer and the gate's after-callback). */
-int     mt_entry_drain_ok(MtEntry *e, int why);   /* nonzero if it ran a PB or a completion */
+int     mt_entry_drain_ok(MtEntry *e, int why);
+/* 1.1d2 heartbeat: accRun (csCode 65) from SystemTask, every ~60 ticks while the driver is open (DRVR dNeedTime,
+ * drvrDelay 60): one empty gate session, whose after-callback re-arms a lost timer shot even on a silent link with no
+ * application calling. Task time only. No per-call sweep, no MultiFinder owner record, no PB of its own: only what any
+ * gate leave does (drain queued PBs, watchdog, deadline query, keep-or-arm). Skipped while the gate is held. 0. */
+int16_t mt_entry_accrun(MtEntry *e);   /* nonzero if it ran a PB or a completion */
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
 int     mt_entry_drain(MtEntry *e);              /* nonzero if it ran a PB or a completion */
 

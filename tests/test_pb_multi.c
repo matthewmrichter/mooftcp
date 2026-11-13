@@ -16,6 +16,7 @@
 #include "mt_gate.h"
 #include "mt_drv_logic.h"
 #include "mt_pb_entry.h"
+#include "mt_timer.h"
 
 #define TRAP_SYNC  0xA004u
 #define TRAP_ASYNC (0xA004u | MT_DRV_TRAP_ASYNC)
@@ -1735,6 +1736,48 @@ static void fuzz_apps(void) {
     T_EQ(g_fail, 0);
 }
 
+/* 1.1d2 heartbeat: accRun (csCode 65, SystemTask every ~60 ticks with dNeedTime) runs one empty gate session, so the
+ * gate's after-callback re-arms a lost timer shot on a silent link with no application calling. Under MultiFinder it
+ * records no owner (the current partition is just whichever runs SystemTask) and runs no per-call sweep. The
+ * after-callback here is the driver's arm decision (mt_timer_plan) on a model of the shot. */
+static MtTimer g_ht;
+static MtTimerShot g_hs;
+static void hb_after(void *ctx) {
+    (void)ctx;
+    if (mt_timer_plan(&g_ht, &g_hs, mt_pb_next_deadline_ms(g_x.d), pbf_now)) g_ht.armed = 1;
+}
+static void accrun_heals_lost_shot_without_owner(void) {
+    uint32_t calls, after;
+    int a;
+    msetup();
+    a = launch();
+    (void)a;
+    memset(&g_ht, 0, sizeof g_ht);
+    memset(&g_hs, 0, sizeof g_hs);
+    g_g.after = hb_after;
+    g_g.open = 1;
+    g_ht.armed = 1;                                       /* a shot that never fired: lost */
+    g_hs.due = pbf_now;
+    pbf_now += 60000;                                     /* a silent minute: no frame, no call */
+    calls = g_e.n_calls;
+    after = g_g.n_after;
+    T_EQ(mt_entry_accrun(&g_e), 0);
+    T_EQ(g_g.n_after, after + 1);                         /* one gate session */
+    T_EQ(g_hs.lost, 1);                                   /* found and counted */
+    T_CHECK((int32_t)(g_hs.due - pbf_now) > 0);           /* re-armed: due in the future */
+    T_EQ(g_e.n_accrun, 1);
+    T_EQ(g_e.n_calls, calls);                             /* not counted as a call */
+    T_EQ(g_x.d->n_own, 0);                                /* no owner recorded for the current partition */
+    T_EQ(mt_entry_accrun(&g_e), 0);                       /* a healthy shot: kept, nothing counted */
+    T_EQ(g_hs.lost, 1);
+    g_g.depth = 1;                                        /* gate held (an interrupted session): nothing runs */
+    after = g_g.n_after;
+    T_EQ(mt_entry_accrun(&g_e), 0);
+    T_EQ(g_g.n_after, after);
+    g_g.depth = 0;
+    T_EQ(pbf_bad, 0);
+}
+
 T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_other_partitions,
        sweep_by_timer_when_nobody_calls, gone_apps_routines_never_run_before_the_sweep,
        sweep_with_loans_dns_echo_of_both_apps, new_app_in_dead_apps_partition_is_not_the_old_owner,
@@ -1748,4 +1791,5 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        interrupt_time_routine_is_never_abandoned, tenant_of_unswept_block_keeps_its_objects,
        unstick_waits_under_a_live_gate_frame, nested_context_pops_when_its_chain_returns,
        sync_calls_without_completion_track_nothing,
-       owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps)
+       owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps,
+       accrun_heals_lost_shot_without_owner)

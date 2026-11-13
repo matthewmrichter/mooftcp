@@ -96,6 +96,18 @@ static inline int mt_timer_note_lost(const MtTimer *t, MtTimerShot *sh, uint32_t
     return 1;
 }
 
+/* The arm decision of mt_timer_arm_deadline for the deadline d read at now: 0 = keep the pending shot, else the ms
+ * to arm it for (sh->due is then set). A lost shot is counted first (mt_timer_note_lost) and is never kept.
+ * Pure, host-tested. */
+static inline uint32_t mt_timer_plan(const MtTimer *t, MtTimerShot *sh, uint32_t d, uint32_t now)
+{
+    uint32_t ms = mt_timer_deadline_ms(d);
+    (void)mt_timer_note_lost(t, sh, now);
+    if (mt_timer_keep(t, sh->due, now, ms)) return 0;
+    sh->due = now + ms;
+    return ms;
+}
+
 /* The Time Manager steps mt_timer_arm takes before its PrimeTime (pure, host-tested with a model of the task). */
 #define MT_TIMER_RMV 1u
 #define MT_TIMER_INS 2u
