@@ -80,7 +80,7 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     MtRes *r = (MtRes *)ctx;
-    r->armed = 0;                                /* a frame after an early tick: after_cb queries the deadline */
+    mt_drv_note_work(&r->armed);                 /* a frame after an early tick: after_cb queries the deadline */
     /* MultiFinder: notice a quit application before the core writes into its receive buffers: every
      * frame, one header load per recorded owner (a load and a branch without MultiFinder; Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_RX)) return;   /* dropped (TCP
@@ -98,16 +98,20 @@ static void arm_next(MtRes *r, uint32_t now, uint32_t d) {
 
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    uint32_t now = mt_os_ms(), dl = mt_pb_next_deadline_ms(r->d);   /* O(1) since 1.1d2 (F7) */
+    uint32_t now = 0, dl = 0;
+    if (r->timer.in_cb) {                        /* only the Time Manager task's ticks can be early */
+        now = mt_os_ms();
+        dl = mt_pb_next_deadline_ms(r->d);       /* O(1) since 1.1d2 (F7) */
+    }
     /* 1.1d1: run from the Time Manager task (in_cb; a tick deferred behind a held gate runs in full, as before) before
      * anything is due (the timer is re-armed only for earlier deadlines): no sweep, no tick work. 1.1d2: the timer is
      * armed here with the deadline just read, and after_cb does not query it again unless its drain ran a PB */
     if (mt_drv_tick_idle(r->timer.in_cb, dl)) {
         arm_next(r, now, dl);
-        r->armed = 1;
+        mt_drv_note_early(&r->armed);
         return;
     }
-    r->armed = 0;
+    mt_drv_note_work(&r->armed);
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -120,10 +124,7 @@ static void after_cb(void *ctx) {
     uint32_t now;
     int ran = mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
                                                  * is still recorded (its queued PBs are not dropped yet) */
-    if (r->armed) {                              /* an early tick armed the timer already (tick_cb) */
-        r->armed = 0;
-        if (!ran) return;
-    }
+    if (!mt_drv_after_query(&r->armed, ran)) return;   /* an early tick armed the timer already (tick_cb) */
     now = mt_os_ms();
     arm_next(r, now, mt_pb_next_deadline_ms(r->d));
 }

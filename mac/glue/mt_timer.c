@@ -65,6 +65,7 @@ void mt_timer_cancel(MtTimer *t)
 void mt_timer_arm(MtTimer *t, uint32_t ms)
 {
     sr_t g;
+    unsigned st;
     if (ms == MT_TIMER_NONE) { mt_timer_cancel(t); return; }
     if (ms < 1) ms = 1;
     if (ms > 0x3FFFFFFFu) ms = 0x3FFFFFFFu;
@@ -72,15 +73,14 @@ void mt_timer_arm(MtTimer *t, uint32_t ms)
     /* Outside the callback: an armed task is removed and re-inserted. Inside it the task is
      * inactive, so PrimeTime alone is the documented reload, unless the callback already armed it
      * once (a second arm in the same callback): then it is active again and needs the same
-     * remove/insert. */
-    if (!t->in_cb || t->armed) {
-        if (t->inserted && t->armed) RmvTime((QElemPtr)t);
-        if (!t->inserted || t->armed) {
-            t->tmWakeUp = 0;
-            t->tmReserved = 0;
-            InsTime((QElemPtr)t);
-            t->inserted = 1;
-        }
+     * remove/insert. The decision is mt_timer_arm_steps (mt_timer.h, host-tested). */
+    st = mt_timer_arm_steps(t);
+    if (st & MT_TIMER_RMV) RmvTime((QElemPtr)t);
+    if (st & MT_TIMER_INS) {
+        t->tmWakeUp = 0;
+        t->tmReserved = 0;
+        InsTime((QElemPtr)t);
+        t->inserted = 1;
     }
     t->armed = 1;
     PrimeTime((QElemPtr)t, (long)ms);

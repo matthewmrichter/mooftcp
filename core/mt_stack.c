@@ -213,7 +213,7 @@ int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len) {
 
 /* Six-byte MAC compare inline (1.1d2: two memcmp calls per received frame before; mismatches leave at the first
  * differing byte). */
-static int mac_eq(const uint8_t *a, const uint8_t *b) {
+static inline int mac_eq(const uint8_t *a, const uint8_t *b) {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5];
 }
 

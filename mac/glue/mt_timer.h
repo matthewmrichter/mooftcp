@@ -68,10 +68,27 @@ static inline uint32_t mt_timer_deadline_ms(uint32_t d)
  * (the coarse clock, mt_os_ms), and a new shot would be `ms` after `now`: nonzero when due <= now + ms (wrap-safe).
  * Pure, host-tested. A shot kept this way fires no later than the new one would (both are exact-ms PrimeTimes from
  * a coarse "now": either may land up to one clock step before the coarse deadline, never later than one step
- * after it); when it fires early the tick finds nothing due (mt_drv_tick_idle) and the deadline is armed again. */
+ * after it); when it fires early the tick finds nothing due (mt_drv_tick_idle) and the deadline is armed again.
+ * 1.1d2 (liveness): a shot still marked armed but overdue by more than MT_TIMER_LOST_MS (two clock steps: a live one
+ * fires within one step of the coarse due time) is taken as lost and armed again, so a missed shot can never stop the
+ * timers for good (before, any due in the past counted as "fires in time"). */
+#define MT_TIMER_LOST_MS (2u * MT_TIMER_STEP_MS)
 static inline int mt_timer_keep(const MtTimer *t, uint32_t due, uint32_t now, uint32_t ms)
 {
-    return t->armed && (int32_t)(now + ms - due) >= 0;
+    return t->armed && (int32_t)(now + ms - due) >= 0 && (int32_t)(due - now) >= -(int32_t)MT_TIMER_LOST_MS;
+}
+
+/* The Time Manager steps mt_timer_arm takes before its PrimeTime (pure, host-tested with a model of the task). */
+#define MT_TIMER_RMV 1u
+#define MT_TIMER_INS 2u
+static inline unsigned mt_timer_arm_steps(const MtTimer *t)
+{
+    unsigned st = 0;
+    if (!t->in_cb || t->armed) {
+        if (t->inserted && t->armed) st |= MT_TIMER_RMV;
+        if (!t->inserted || t->armed) st |= MT_TIMER_INS;
+    }
+    return st;
 }
 
 int  mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx);   /* 0 or a Toolbox error */

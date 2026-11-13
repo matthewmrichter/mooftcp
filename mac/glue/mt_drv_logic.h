@@ -126,4 +126,16 @@ static inline int mt_drv_tick_idle(uint8_t in_cb, uint32_t next_ms) {
     return in_cb && next_ms != 0;
 }
 
+/* 1.1d2: the after-callback's deadline query, skipped after an early tick that armed the timer itself (MtRes.armed).
+ * mt_drv_note_early: the early tick armed the timer. mt_drv_note_work: anything else ran in the gate session (a frame,
+ * a full tick): the deadline may have moved. mt_drv_after_query: nonzero when the after-callback must query and arm
+ * (ran: its drain ran a queued PB or a completion); it always leaves `armed` 0, so the next session queries. */
+static inline void mt_drv_note_early(uint8_t *armed) { *armed = 1; }
+static inline void mt_drv_note_work(uint8_t *armed) { *armed = 0; }
+static inline int mt_drv_after_query(uint8_t *armed, int ran) {
+    int skip = *armed && !ran;
+    *armed = 0;
+    return !skip;
+}
+
 #endif /* MT_DRV_LOGIC_H */

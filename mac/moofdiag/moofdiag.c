@@ -369,7 +369,14 @@ int main(void)
               mt_enet_tx_quarantined(&m->enet), (unsigned long)m->enet.reattach_blocked,
               (unsigned long)m->enet.reattach_abandoned, (unsigned)m->enet.reattach_req,
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
-            P("timer: fired %lu armed %u\r", (unsigned long)m->timer.fired, m->timer.armed);
+            {   /* 1.1d2: enough to tell a stopped timer on hardware: a shot armed but due well in the past is lost
+                 * (mt_timer_keep re-arms it at the next gate session); the cached deadlines live in the core and the
+                 * glue and are not read from here (a query would rebuild them outside the gate) */
+                uint32_t now = mt_ms_from_ticks((uint32_t)TickCount());
+                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u\r",
+                  (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
+                  (unsigned long)m->tm_due, (unsigned long)now, (long)(int32_t)(m->tm_due - now), m->armed);
+            }
 #ifndef MT_TUNE
             (void)tune_ok;
 #else

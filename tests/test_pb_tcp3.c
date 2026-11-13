@@ -236,7 +236,23 @@ static void slot_by_multiply_equals_division(void) {
     }
 }
 
+/* 1.1d2 fix: a forged handle 15 bytes into the last slot (beyond any gen offset) is refused through stream_of, while
+ * the live handle of that slot is accepted. */
+static void forged_handle_in_last_slot_refused(void) {
+    pbt x;
+    StreamPtr h = 0, last;
+    uint8_t i, n;
+    pbt_init(&x, 1);
+    n = x.d->ntcp;
+    for (i = 0; i < n; i++) h = pbt_create(&x, 4096, 0, 0);   /* the slots fill in order: the last one is n - 1 */
+    T_CHECK(h == x.d->tcp[n - 1].handle);
+    last = mt_os_addr(&x.d->tcp[0]) + (uint32_t)(n - 1u) * (uint32_t)sizeof(MtStream);
+    T_EQ(pbt_simple(&x, TCPStatus, h), connectionDoesntExist);   /* found (no connection yet) */
+    T_EQ(pbt_simple(&x, TCPStatus, last + 15u), invalidStreamPtr);
+    T_EQ(pbt_simple(&x, TCPStatus, last + (uint32_t)sizeof(MtStream) - 1u), invalidStreamPtr);
+}
+
 T_MAIN(data_arrival_after_partial_read, pending_small_read_then_data_arrival,
        small_reads_from_asr_drain_without_nesting, unconfigured_through_driver_entry_no_completion,
        stream_scans_bounded_by_highest_used_slot, glue_deadline_cached,
-       slot_by_multiply_equals_division)
+       slot_by_multiply_equals_division, forged_handle_in_last_slot_refused)

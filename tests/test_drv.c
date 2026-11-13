@@ -630,6 +630,25 @@ static void tick_idle_only_for_early_timer_ticks(void) {
     T_CHECK(!mt_drv_tick_idle(t.in_cb, 0));               /* something is due */
 }
 
+/* 1.1d2 fix: the after-callback's query decision (mt_drv_after_query). An early tick arms the timer itself and sets
+ * `armed`; the after-callback then skips its query only when nothing ran in between. */
+static void after_query_sequences(void) {
+    uint8_t armed = 0;
+    mt_drv_note_early(&armed);                            /* early tick, then a frame, then after: query */
+    mt_drv_note_work(&armed);
+    T_CHECK(mt_drv_after_query(&armed, 0));
+    T_EQ(armed, 0);
+    mt_drv_note_early(&armed);                            /* early tick, then a queued PB (the drain ran it): query */
+    T_CHECK(mt_drv_after_query(&armed, 1));
+    T_EQ(armed, 0);
+    mt_drv_note_early(&armed);                            /* early tick alone: no second query */
+    T_CHECK(!mt_drv_after_query(&armed, 0));
+    T_EQ(armed, 0);                                       /* and the next session queries again */
+    T_CHECK(mt_drv_after_query(&armed, 0));
+    mt_drv_note_work(&armed);                             /* a full tick (or any session), then after: query */
+    T_CHECK(mt_drv_after_query(&armed, 0));
+}
+
 /* ---- final review fix 2: a chained 1-byte reader has bounded nesting ---- */
 
 static uint8_t g_rd[4096];
@@ -871,4 +890,4 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        goodbye_drops_streams_holding_app_routines_or_pbs,
        chained_buffer_emptying_reader_is_bounded, goodbye_drops_pbs_with_app_completion,
        entry_inline_completions_are_bounded, drain_masks_only_nonempty_rings,
-       tick_idle_only_for_early_timer_ticks)
+       tick_idle_only_for_early_timer_ticks, after_query_sequences)

@@ -87,4 +87,44 @@ static void timer_rearm_only_when_earlier(void)
     T_CHECK(!mt_timer_keep(&t, 1100, 1000, 500));                  /* fired: PrimeTime from the callback */
 }
 
-T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier)
+/* 1.1d2 fix: a pending shot overdue by more than MT_TIMER_LOST_MS is taken as lost (armed stays 1 but it never
+ * fired): re-arm, whatever the new deadline. Within the slack it is still kept (the coarse clock may pass it a
+ * little before the exact-ms shot fires). */
+static void timer_overdue_shot_rearmed(void)
+{
+    MtTimer t;
+    memset(&t, 0, sizeof t);
+    t.armed = 1;
+    T_CHECK(mt_timer_keep(&t, 1000, 1000, 500));                   /* due now: kept */
+    T_CHECK(mt_timer_keep(&t, 1000 - MT_TIMER_LOST_MS, 1000, 500)); /* at the slack: kept */
+    T_CHECK(!mt_timer_keep(&t, 1000 - MT_TIMER_LOST_MS - 1u, 1000, 500));   /* beyond: lost, re-arm */
+    T_CHECK(!mt_timer_keep(&t, 1000 - 600000u, 1000, MT_TIMER_MAX_MS));     /* long lost, no deadline: re-arm */
+    T_CHECK(!mt_timer_keep(&t, 0xFFFFFF00u, 0x100u, 500));         /* lost across the 2^32 wrap */
+}
+
+/* 1.1d2 fix: the Time Manager steps of mt_timer_arm (mt_timer_arm_steps), run against a model of the task: every arm,
+ * outside the callback, once inside it and again inside it, leaves the task inserted and primed with armed = 1. */
+static void timer_arm_steps_always_prime(void)
+{
+    MtTimer t;
+    int ins = 0, primed = 0, k, seq;
+    for (seq = 0; seq < 4; seq++) {
+        memset(&t, 0, sizeof t);
+        t.inserted = 1; ins = 1; primed = 0;                         /* mt_timer_init: InsTime */
+        for (k = 0; k < 6; k++) {
+            unsigned st;
+            int in_cb = (seq & 1) ? (k >= 2) : (k % 2);              /* mixes of task-time and in-callback arms */
+            if (k == 3 && (seq & 2)) { t.armed = 0; primed = 0; }    /* the shot fired in between */
+            t.in_cb = (uint8_t)in_cb;
+            st = mt_timer_arm_steps(&t);
+            if (st & MT_TIMER_RMV) { T_CHECK(ins); ins = 0; primed = 0; t.inserted = 0; }
+            if (st & MT_TIMER_INS) { T_CHECK(!ins); ins = 1; t.inserted = 1; }
+            T_CHECK(ins);                                            /* PrimeTime needs an inserted task */
+            if (primed) T_CHECK(0);                                  /* never PrimeTime an active task */
+            primed = 1; t.armed = 1;
+        }
+    }
+}
+
+T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier, timer_overdue_shot_rearmed,
+       timer_arm_steps_always_prime)

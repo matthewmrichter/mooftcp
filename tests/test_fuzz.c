@@ -3,6 +3,7 @@
 #include "mt_int.h"
 #include "mt_util.h"
 #include "pbfake.h"
+#include "mt_timer.h"
 #ifdef MT_TRACE
 #include "mt_trace.h"
 #endif
@@ -2207,6 +2208,11 @@ static void pb_full_canary_check(void) {
         if (!P.us[k].live) canary_check(P.us[k].buf, US_BUF, "receive buffer of a released UDP stream was written");
 }
 
+/* the timer model of fz_timer_fire / fz_timer_after (below) */
+static MtTimer g_tm;
+static uint32_t g_tm_due;
+static long g_tm_lost;
+
 static void pb_setup(uint32_t seed) {
     mt_limits lim;
     mt_link link;
@@ -2214,6 +2220,8 @@ static void pb_setup(uint32_t seed) {
     uint32_t n;
     int k;
     memset(&g, 0, sizeof g);
+    memset(&g_tm, 0, sizeof g_tm);
+    g_tm_due = 0;
     memset(&P, 0, sizeof P);
     memset(g_rq, 0, sizeof g_rq);               /* the core fuzzer's records: none here */
     memset(g_serial, 0, sizeof g_serial);
@@ -2250,10 +2258,36 @@ static void pb_setup(uint32_t seed) {
 #endif
 }
 
+/* 1.1d2 fix (timer liveness): a model of the driver's Time Manager shot, armed the way after_cb arms it
+ * (mt_timer_keep), fired when its time comes, and sometimes LOST (armed stays 1, no callback), as a shot that never
+ * fires would be. Invariant after every arm: whenever the core or the glue has a finite deadline, a shot is pending,
+ * due no later than the deadline (or the 17 ms step), and never overdue by more than MT_TIMER_LOST_MS. */
+
+static void fz_timer_fire(void) {
+    if (g_tm.armed && (int32_t)(g.now - g_tm_due) >= 0) {
+        if (rn(40) == 0) g_tm_lost++;                       /* lost: armed stays set, no callback */
+        else g_tm.armed = 0;                                /* fired (the tick itself is the fuzz's own) */
+    }
+}
+
+static void fz_timer_after(void) {
+    uint32_t d = mt_pb_next_deadline_ms(P.d), ms = mt_timer_deadline_ms(d);
+    if (!mt_timer_keep(&g_tm, g_tm_due, g.now, ms)) {
+        g_tm.armed = 1;
+        g_tm_due = g.now + ms;
+    }
+    if (d != MT_NO_DEADLINE) {
+        if (!g_tm.armed) bad("finite deadline without a pending timer shot");
+        else if ((int32_t)(g.now + ms - g_tm_due) < 0) bad("timer shot later than the deadline");
+        else if ((int32_t)(g_tm_due - g.now) < -(int32_t)MT_TIMER_LOST_MS) bad("timer shot overdue beyond the slack (lost shot kept)");
+    }
+}
+
 static void pb_step(uint8_t *f) {
     uint32_t d, dt;
     int k, live = 0;
     pbf_now = g.now;
+    fz_timer_fire();
     for (k = 0; k < PS_N; k++) live += P.ps[k].live;
     if (live < 3) act_create();
     if (rn(3)) {
@@ -2302,6 +2336,7 @@ static void pb_step(uint8_t *f) {
     pbf_now = g.now;
     if (mt_pb_next_deadline_ms(P.d) == 0) mt_pb_tick(P.d);
     pb_invariants();
+    fz_timer_after();
 }
 
 static void test_fuzz_pb(void) {
@@ -2315,6 +2350,7 @@ static void test_fuzz_pb(void) {
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
     long steps = getenv("FZ_STEPS") ? atol(getenv("FZ_STEPS")) : PB_STEPS;   /* FZ_STEPS=n steps per seed */
+    g_tm_lost = 0;
     for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
@@ -2350,6 +2386,7 @@ static void test_fuzz_pb(void) {
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
     T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
     T_CHECK(early > 0); T_CHECK(rx > 0);
+    T_CHECK(g_tm_lost > 0);     /* lost timer shots were injected (and re-armed: fz_timer_after) */
     T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
 #ifdef MT_TUNE
     if (getenv("FUZZ_VERBOSE"))
