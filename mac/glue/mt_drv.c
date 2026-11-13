@@ -93,7 +93,7 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
 static void arm_next(MtRes *r, uint32_t now, uint32_t d) {
     mt_enet_watchdog(&r->enet, now);             /* idle: one compare */
     d = mt_enet_wd_deadline(&r->enet, d, now);
-    mt_timer_arm_deadline(&r->timer, d, now, &r->tm_due);
+    mt_timer_arm_deadline(&r->timer, d, now, &r->shot);
 }
 
 static void tick_cb(void *ctx) {

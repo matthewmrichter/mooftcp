@@ -102,6 +102,28 @@ static void timer_overdue_shot_rearmed(void)
     T_CHECK(!mt_timer_keep(&t, 0xFFFFFF00u, 0x100u, 500));         /* lost across the 2^32 wrap */
 }
 
+/* 1.1d2 fix 2: a lost shot is counted (with the clock time) when it is found, so MoofDiag can show it after the next
+ * gate session has healed it; a live or a fired shot is not. */
+static void timer_lost_shot_counted(void)
+{
+    MtTimer t;
+    MtTimerShot sh;
+    memset(&t, 0, sizeof t);
+    memset(&sh, 0, sizeof sh);
+    sh.due = 1000;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 5000));                   /* not armed: fired, nothing lost */
+    t.armed = 1;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 1000 + MT_TIMER_LOST_MS)); /* within the slack */
+    T_EQ(sh.lost, 0);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1001 + MT_TIMER_LOST_MS));
+    T_EQ(sh.lost, 1);
+    T_EQ(sh.lost_at, 1001 + MT_TIMER_LOST_MS);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 9000));
+    T_EQ(sh.lost, 2);
+    T_EQ(sh.lost_at, 9000);
+    T_CHECK(!mt_timer_keep(&t, sh.due, 9000, 500));                /* and the same shot is re-armed */
+}
+
 /* 1.1d2 fix: the Time Manager steps of mt_timer_arm (mt_timer_arm_steps), run against a model of the task: every arm,
  * outside the callback, once inside it and again inside it, leaves the task inserted and primed with armed = 1. */
 static void timer_arm_steps_always_prime(void)
@@ -127,4 +149,4 @@ static void timer_arm_steps_always_prime(void)
 }
 
 T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier, timer_overdue_shot_rearmed,
-       timer_arm_steps_always_prime)
+       timer_arm_steps_always_prime, timer_lost_shot_counted)

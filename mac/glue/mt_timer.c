@@ -87,14 +87,15 @@ void mt_timer_arm(MtTimer *t, uint32_t ms)
     irq_on(g);
 }
 
-void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, uint32_t *due)
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, MtTimerShot *sh)
 {
     uint32_t ms = mt_timer_deadline_ms(d);
+    (void)mt_timer_note_lost(t, sh, now);        /* counted for MoofDiag; mt_timer_keep then re-arms it */
     /* No mask needed around the check: a shot that fires right after it was seen armed asks the gate for a tick,
      * and every tick ends in after_cb, which arms again (the driver calls this from after_cb only, the gate owner,
      * so *due has one writer). */
-    if (mt_timer_keep(t, *due, now, ms)) return;
-    *due = now + ms;
+    if (mt_timer_keep(t, sh->due, now, ms)) return;
+    sh->due = now + ms;
     mt_timer_arm(t, ms);
 }
 

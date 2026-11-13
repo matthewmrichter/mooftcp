@@ -2211,6 +2211,8 @@ static void pb_full_canary_check(void) {
 /* the timer model of fz_timer_fire / fz_timer_after (below) */
 static MtTimer g_tm;
 static uint32_t g_tm_due;
+static MtTimerShot g_tm_sh;   /* only the lost-shot count: mt_timer_note_lost */
+static long g_tm_found;
 static long g_tm_lost;
 
 static void pb_setup(uint32_t seed) {
@@ -2222,6 +2224,7 @@ static void pb_setup(uint32_t seed) {
     memset(&g, 0, sizeof g);
     memset(&g_tm, 0, sizeof g_tm);
     g_tm_due = 0;
+    memset(&g_tm_sh, 0, sizeof g_tm_sh);
     memset(&P, 0, sizeof P);
     memset(g_rq, 0, sizeof g_rq);               /* the core fuzzer's records: none here */
     memset(g_serial, 0, sizeof g_serial);
@@ -2271,7 +2274,12 @@ static void fz_timer_fire(void) {
 }
 
 static void fz_timer_after(void) {
-    uint32_t d = mt_pb_next_deadline_ms(P.d), ms = mt_timer_deadline_ms(d);
+    uint32_t d, ms;
+    fz_timer_fire();                                        /* a shot whose time came during the step fired (or was lost) */
+    d = mt_pb_next_deadline_ms(P.d);
+    ms = mt_timer_deadline_ms(d);
+    g_tm_sh.due = g_tm_due;
+    g_tm_found += mt_timer_note_lost(&g_tm, &g_tm_sh, g.now);   /* every find is an injected loss (exact clock here) */
     if (!mt_timer_keep(&g_tm, g_tm_due, g.now, ms)) {
         g_tm.armed = 1;
         g_tm_due = g.now + ms;
@@ -2351,6 +2359,7 @@ static void test_fuzz_pb(void) {
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
     long steps = getenv("FZ_STEPS") ? atol(getenv("FZ_STEPS")) : PB_STEPS;   /* FZ_STEPS=n steps per seed */
     g_tm_lost = 0;
+    g_tm_found = 0;
     for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
@@ -2387,6 +2396,8 @@ static void test_fuzz_pb(void) {
     T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
     T_CHECK(early > 0); T_CHECK(rx > 0);
     T_CHECK(g_tm_lost > 0);     /* lost timer shots were injected (and re-armed: fz_timer_after) */
+    if (getenv("FZ_DEBUG")) fprintf(stderr, "timer: lost %ld found %ld\n", g_tm_lost, g_tm_found);
+    T_CHECK(g_tm_found > 0 && g_tm_found <= g_tm_lost);   /* and counted when found, never a live one */
     T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
 #ifdef MT_TUNE
     if (getenv("FUZZ_VERBOSE"))

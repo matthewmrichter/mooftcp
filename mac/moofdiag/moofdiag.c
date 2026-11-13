@@ -373,9 +373,11 @@ int main(void)
                  * (mt_timer_keep re-arms it at the next gate session); the cached deadlines live in the core and the
                  * glue and are not read from here (a query would rebuild them outside the gate) */
                 uint32_t now = mt_ms_from_ticks((uint32_t)TickCount());
-                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u\r",
+                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u lost %lu last-lost %lu (%ld ms ago)\r",
                   (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
-                  (unsigned long)m->tm_due, (unsigned long)now, (long)(int32_t)(m->tm_due - now), m->armed);
+                  (unsigned long)m->shot.due, (unsigned long)now, (long)(int32_t)(m->shot.due - now), m->armed,
+                  (unsigned long)m->shot.lost, (unsigned long)m->shot.lost_at,
+                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L);
             }
 #ifndef MT_TUNE
             (void)tune_ok;
