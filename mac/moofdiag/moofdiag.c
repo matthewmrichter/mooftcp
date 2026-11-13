@@ -373,8 +373,8 @@ int main(void)
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
             if (pb.csParam[3] >= 1) {   /* rev 1 (mt_drv.h MT_STATUS_REV): enough to tell a stopped timer on hardware: a
                  * shot armed but due well in the past is lost (mt_timer_keep re-arms it at the next gate session); lost-max
-                 * is how late the latest-found one was found (tens of ms: coarse-clock drift of a long shot; seconds: a
-                 * real loss, found by a frame, a call or the heartbeat). The cached deadlines live in the core and the
+                 * is the most overdue of those finds (tens of ms: coarse-clock drift of a long shot; seconds: a real
+                 * loss, found by a frame, a call or the heartbeat). The cached deadlines live in the core and the
                  * glue and are not read from here (a query would rebuild them outside the gate) */
                 uint32_t now = mt_ms_from_ticks((uint32_t)TickCount());
                 P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u lost %lu last-lost %lu (%ld ms ago) lost-max %lu ms accrun %lu\r",
