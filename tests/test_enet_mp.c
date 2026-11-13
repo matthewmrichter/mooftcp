@@ -81,7 +81,7 @@ static void daynaport_status_error_no_control(void)
 /* (c) a MoofPort with another tune layout (6, 4, 0) or an older stats layout (7): left alone */
 static void moofport_other_versions_left_alone(void)
 {
-    static const uint16_t v[][2] = { { 8, 6 }, { 8, 4 }, { 8, 0 }, { 7, 5 }, { 0, 5 }, { 8, 0x0500 } };
+    static const uint16_t v[][2] = { { 8, 6 }, { 8, 4 }, { 8, 0 }, { 7, 5 }, { 1, 5 }, { 8, 0x0500 } };
     unsigned i;
     for (i = 0; i < sizeof v / sizeof v[0]; i++) {
         setup();
@@ -101,13 +101,15 @@ static void newer_stats_layout_with_tune_v5_applied(void)
     T_MEMEQ(pbf_enet_ctl_bytes, STEADYACK, 24);
 }
 
-/* a driver that answers noErr but fills nothing: the buffer was cleared, so it reads as version 0: no Control */
-static void noerr_without_data_left_alone(void)
+/* (b') the DaynaPORT driver in Snow answers the unknown Status with noErr and fills nothing (1.1d4 mem-check): the
+ * buffer was cleared, so it reads stats version 0: not MoofPort, no Control */
+static void noerr_without_data_is_not_moofport(void)
 {
     setup();
     pbf_enet_status_result = 0;
     pbf_enet_status_len = 0;
-    T_EQ(mt_enet_mp_tune(REF), MT_MP_VERSION);
+    T_EQ(mt_enet_mp_tune(REF), MT_MP_NONE);
+    T_EQ(pbf_enet_status_calls, 1);
     T_EQ(pbf_enet_ctl_calls, 0);
 }
 
@@ -164,5 +166,5 @@ static void reattach_sends_no_tune_calls(void)
 }
 
 T_MAIN(moofport_v5_gets_steadyack, daynaport_status_error_no_control, moofport_other_versions_left_alone,
-       newer_stats_layout_with_tune_v5_applied, noerr_without_data_left_alone, control_failure_reported,
+       newer_stats_layout_with_tune_v5_applied, noerr_without_data_is_not_moofport, control_failure_reported,
        each_open_applies_again, reattach_sends_no_tune_calls)

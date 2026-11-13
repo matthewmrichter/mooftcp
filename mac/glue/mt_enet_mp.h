@@ -9,6 +9,8 @@
  * the layout below are copied from it (MoofTCP never includes MoofPort's headers):
  *  - Detect: Status csCode 0x4D50 on .ENET0, ePointer = a buffer, eBuffSize = its size (at least the driver's
  *    sizeof(MpStats), 176 for stats version 8; 256 here). noErr = MoofPort; it fills MpStats (big-endian).
+ *    BUT the DaynaPORT driver answers noErr too, filling nothing (Snow, 1.1d4): the buffer is cleared first, so
+ *    it reads stats version 0 and is left alone; only the two version words decide.
  *    MpStats.version (uint16 at 0) >= 8 (fields are only ever appended) and MpStats.tune.version == 5.
  *  - Apply: Control csCode 0x4D54, ePointer = a 24-byte MpTune with every field set. The values last until the
  *    next driver reopen (close + open) or restart; opening an already-open driver keeps them.
@@ -59,7 +61,8 @@ _Static_assert(sizeof(MtMpStats) == 176, "MpStats is 176 bytes (MP_STATS_VERSION
 _Static_assert(MT_MP_STATS_BUF >= sizeof(MtMpStats), "Status buffer holds MpStats");
 
 /* What mt_enet_mp_tune did (MtRes.mp_tune; MoofDiag's enet line). */
-#define MT_MP_NONE     0             /* not MoofPort (Status refused: DaynaPORT, another driver) or not tried */
+#define MT_MP_NONE     0             /* not MoofPort (Status refused, or noErr with nothing filled: the DaynaPORT
+                                      * driver answers noErr in Snow) or not tried */
 #define MT_MP_APPLIED  1             /* MoofPort, tune version 5: steadyack applied (Control noErr) */
 #define MT_MP_VERSION  2             /* MoofPort, but a stats or tune layout this build does not know: left alone */
 #define MT_MP_CTLFAIL  3             /* MoofPort, tune version 5, but the Control call failed (nothing applied) */

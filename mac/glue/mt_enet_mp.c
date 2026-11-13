@@ -29,10 +29,14 @@ static const uint8_t steadyack[MT_MP_TUNE_SIZE] = {
 __attribute__((cold)) uint8_t mt_enet_mp_tune(int16_t refnum)
 {
     uint8_t st[MT_MP_STATS_BUF];
+    unsigned v;
     memset(st, 0, sizeof st);                    /* a driver that says noErr but fills nothing reads as version 0 */
     if (mt_os_enet_status(refnum, MT_MP_STATUS_STATS, st, (int16_t)sizeof st) != 0)
-        return MT_MP_NONE;                       /* DaynaPORT and other drivers: unknown Status csCode */
-    if (((unsigned)st[0] << 8 | st[1]) < MT_MP_STATS_VERSION ||
+        return MT_MP_NONE;                       /* other drivers: unknown Status csCode refused */
+    v = (unsigned)st[0] << 8 | st[1];
+    if (v == 0)
+        return MT_MP_NONE;                       /* noErr, nothing filled: the DaynaPORT driver (Snow, 1.1d4 mem-check) */
+    if (v < MT_MP_STATS_VERSION ||
         ((unsigned)st[MT_MP_STATS_TUNE_OFF] << 8 | st[MT_MP_STATS_TUNE_OFF + 1]) != MT_MP_TUNE_VERSION)
         return MT_MP_VERSION;                    /* a MoofPort whose tune layout this build does not know */
     return mt_os_enet_control(refnum, MT_MP_CTL_TUNE, steadyack) == 0 ? MT_MP_APPLIED : MT_MP_CTLFAIL;
