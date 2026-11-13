@@ -47,8 +47,13 @@ int     mt_entry_core_ok(MtEntry *e, int why);
 int     mt_entry_drain_ok(MtEntry *e, int why);
 /* 1.1d2 heartbeat (mt_pb_entry.c): accRun (csCode 65) from SystemTask, every ~60 ticks while the driver is open (DRVR dNeedTime,
  * drvrDelay 60): one empty gate session, whose after-callback re-arms a lost timer shot even on a silent link with no
- * application calling. Task time only. No per-call sweep, no MultiFinder owner record, no PB of its own: only what any
- * gate leave does (drain queued PBs, watchdog, deadline query, keep-or-arm). Skipped while the gate is held. 0. */
+ * .IPP call coming in. Task time only. No per-call sweep, no MultiFinder owner record, no PB of its own: only what any
+ * gate leave does (drain queued PBs, watchdog, deadline query, keep-or-arm). Skipped while the gate is held. 0.
+ * Residual: accRun comes only while some application calls SystemTask (directly or through WaitNextEvent). An application
+ * blocked in a synchronous .IPP call (the Device Manager spins on ioResult) calls nothing, so while it waits a lost shot
+ * is found only by the next incoming frame or another call; on a silent link the timers (RTO, delayed ACK, a deferred
+ * receive completion) wait until then. MtTimerShot.lost / lost_max (mt_timer.h, MoofDiag's timer: line) show whether
+ * lost shots happen and how late they were found. */
 int16_t mt_entry_accrun(MtEntry *e, uint32_t *count);   /* *count: the caller's heartbeat counter (MtRes.n_accrun) */
 /* The gate owner (tick / after callbacks): run the queued PBs, then complete the refused ones. */
 int     mt_entry_drain(MtEntry *e);              /* nonzero if it ran a PB or a completion */

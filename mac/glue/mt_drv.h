@@ -42,10 +42,11 @@ typedef struct MtRes {
      * view.mode stays 0), so readers of the view need no variant check. */
     mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
     MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
-    MtTimerShot    shot;         /* appended: shot.due (1.1d1's tm_due, at the same offset) is the absolute time (mt_os_ms)
-                                  * the timer's pending shot is for, valid while timer.armed; shot.lost / lost_at (1.1d2)
-                                  * count the lost shots mt_timer_arm_deadline found (MoofDiag's timer: line) */
-    uint32_t       n_accrun;     /* 1.1d2, appended: accRun heartbeats (SystemTask, DRVR dNeedTime; mt_entry_accrun) */
+    /* 1.1, appended (MT_STATUS_REV 1; readers check the revision first, see below) */
+    MtTimerShot    shot;         /* shot.due is the absolute time (mt_os_ms) the timer's pending shot is for, valid
+                                  * while timer.armed; shot.lost / lost_at / lost_max count the lost shots
+                                  * mt_timer_arm_deadline found and how late (MoofDiag's timer: line) */
+    uint32_t       n_accrun;     /* accRun heartbeats (SystemTask, DRVR dNeedTime; mt_entry_accrun) */
 #ifdef MT_TUNE
     MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
                                   * above keeps its place for readers built without MT_TUNE */
@@ -84,14 +85,25 @@ long    mt_drv_boot(void *drvr);
 MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
 
 /* Private Status csCode ('MT'): csParam (PB offset 28) receives the MtRes pointer, csParam+4 (PB
- * offset 32) receives MT_STATUS_VERSION (uint16), for the diagnostics app mac/moofdiag and the
- * control panel. A client checks the version (the second value, or MtRes.version, the block's first
- * word) BEFORE reading anything else; any layout change of MtRes that moves or removes a field bumps
- * it (new fields appended at the end keep the version). Every other Status call gets statusErr (-18).
+ * offset 32) receives MT_STATUS_VERSION (uint16), csParam+6 (PB offset 34) MT_STATUS_REV (uint16), for
+ * the diagnostics app mac/moofdiag and the control panel. A client checks the version (the second
+ * value, or MtRes.version, the block's first word) BEFORE reading anything else; any layout change of
+ * MtRes that moves or removes a field bumps it (new fields appended at the end keep the version, so
+ * every reader of version 1, 1.0's MoofDiag included, keeps reading the fields it knows). Every other
+ * Status call gets statusErr (-18).
  * Version 1 = Plan 3 Task 6 (adds version first, cfg_flags last; Task 1 stack marks, Task 2 stall
- * counter, Task 3 loopback counters and Task 5 watchdog counters are all kept). */
+ * counter, Task 3 loopback counters and Task 5 watchdog counters are all kept).
+ * The revision says which appended fields a version-1 block has; a reader clears offset 34 before the
+ * call (a driver older than the revision word leaves it alone) and reads an appended field only when
+ * the revision says it is there:
+ *   rev 0: MtRes ends at .view (1.0; also the 1.1 development drivers 1.1d1-1.1d3, whose appended
+ *          fields had another layout)
+ *   rev 1: .shot (due, lost, lost_at, lost_max) and .n_accrun (1.1)
+ * Opening failed (no address): the reader finds the block through the status view instead and has no
+ * revision; it reads rev 0. */
 #define MT_DRV_STATUS_RES 0x4D54
 #define MT_STATUS_VERSION 1
+#define MT_STATUS_REV     1
 
 #ifndef MT_NO_DHCP
 /* DHCP mode: the first open waits this long for the lease (DHCP-DESIGN.md section 4). */

@@ -80,19 +80,33 @@ static inline int mt_timer_keep(const MtTimer *t, uint32_t due, uint32_t now, ui
     return t->armed && (int32_t)(now + ms - due) >= 0 && (int32_t)(due - now) >= -(int32_t)MT_TIMER_LOST_MS;
 }
 
-/* The caller's record of the pending shot: its due time, and the lost shots found (mt_timer_note_lost). */
+/* The caller's record of the pending shot: its due time, and the lost shots found (mt_timer_note_lost).
+ * Telling the two kinds of find apart (lost_max): a long shot that drifted past the slack is found overdue by tens of
+ * ms (the coarse clock against the exact-ms PrimeTime); a shot the Time Manager really lost is found only when
+ * something next enters the driver, typically a second or more later (the accRun heartbeat runs about once a second).
+ *
+ * Who finds a lost shot: every gate leave (an application call, a received frame, a timer tick) and the accRun
+ * heartbeat (mt_pb_entry.h mt_entry_accrun). The heartbeat comes from SystemTask, so it runs only while some
+ * application calls SystemTask (directly or through WaitNextEvent); an application blocked in a synchronous .IPP call
+ * spins in the Device Manager and calls nothing. On a silent link (no broadcast, no ARP, a quiet peer) a lost shot
+ * is then found only by the next incoming frame or the next application call: until then the timers (RTO,
+ * delayed ACK, the deferred receive completion) wait. */
 typedef struct MtTimerShot {
     uint32_t due;               /* absolute time (the coarse clock) the pending shot is for; valid while t->armed */
     uint32_t lost;              /* shots found armed but overdue beyond MT_TIMER_LOST_MS (re-armed; see above) */
     uint32_t lost_at;           /* the clock time of the last such find */
+    uint32_t lost_max;          /* the largest overdue amount (ms past due) of those finds; 0 while lost is 0 */
 } MtTimerShot;
 
-/* Count a lost shot (armed, overdue beyond the slack) when it is found at `now`; nonzero if it was. Pure, host-tested. */
+/* Count a lost shot (armed, overdue beyond the slack) when it is found at `now`, and keep the largest overdue amount;
+ * nonzero if it was one. Pure, host-tested. */
 static inline int mt_timer_note_lost(const MtTimer *t, MtTimerShot *sh, uint32_t now)
 {
+    uint32_t over = now - sh->due;
     if (!t->armed || (int32_t)(sh->due - now) >= -(int32_t)MT_TIMER_LOST_MS) return 0;
     sh->lost++;
     sh->lost_at = now;
+    if (over > sh->lost_max) sh->lost_max = over;
     return 1;
 }
 

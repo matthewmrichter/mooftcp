@@ -360,9 +360,9 @@ int16_t mt_drv_status(void *vpb, void *dce) {
     (void)dce;
     if (pb->hdr.csCode == MT_DRV_STATUS_RES && g_res) {   /* private: diagnostics (MoofDiag) */
         uint32_t p = (uint32_t)(uintptr_t)g_res;
-        uint16_t v = MT_STATUS_VERSION;
+        uint16_t v[2] = { MT_STATUS_VERSION, MT_STATUS_REV };
         memcpy((uint8_t *)pb + 28, &p, 4);
-        memcpy((uint8_t *)pb + 32, &v, 2);
+        memcpy((uint8_t *)pb + 32, v, 4);
         return 0;
     }
     return -18;                                  /* statusErr: .IPP answers only Control */

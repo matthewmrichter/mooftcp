@@ -124,6 +124,35 @@ static void timer_lost_shot_counted(void)
     T_CHECK(!mt_timer_keep(&t, sh.due, 9000, 500));                /* and the same shot is re-armed */
 }
 
+/* Task 27: the largest overdue amount of the lost-shot finds is kept (MtTimerShot.lost_max), so a coarse-clock drift
+ * (tens of ms past due) can be told from a shot the Time Manager really lost (found seconds later); a find within the
+ * slack or of a fired shot leaves it alone, a smaller later find does not lower it, and it works across the 2^32 wrap. */
+static void timer_lost_max_overdue(void)
+{
+    MtTimer t;
+    MtTimerShot sh;
+    memset(&t, 0, sizeof t);
+    memset(&sh, 0, sizeof sh);
+    t.armed = 1;
+    sh.due = 1000;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 1000 + MT_TIMER_LOST_MS));  /* within the slack: nothing */
+    T_EQ(sh.lost_max, 0);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1051));                       /* drift: 51 ms past due */
+    T_EQ(sh.lost_max, 51);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 4000));                       /* a real loss: 3 s */
+    T_EQ(sh.lost_max, 3000);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1040));                       /* smaller: the maximum stays */
+    T_EQ(sh.lost_max, 3000);
+    T_EQ(sh.lost, 3);
+    t.armed = 0;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 900000));                    /* fired: not a find */
+    T_EQ(sh.lost_max, 3000);
+    t.armed = 1;
+    sh.due = 0xFFFFFF00u;
+    T_CHECK(mt_timer_note_lost(&t, &sh, 0x2000u));                    /* across the wrap: 0x2100 ms */
+    T_EQ(sh.lost_max, 0x2100u);
+}
+
 /* 1.1d2 fix: the Time Manager steps of mt_timer_arm (mt_timer_arm_steps), run against a model of the task: every arm,
  * outside the callback, once inside it and again inside it, leaves the task inserted and primed with armed = 1. */
 static void timer_arm_steps_always_prime(void)
@@ -149,4 +178,4 @@ static void timer_arm_steps_always_prime(void)
 }
 
 T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier, timer_overdue_shot_rearmed,
-       timer_arm_steps_always_prime, timer_lost_shot_counted)
+       timer_arm_steps_always_prime, timer_lost_shot_counted, timer_lost_max_overdue)

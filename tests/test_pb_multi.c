@@ -1415,6 +1415,58 @@ static void repeat_caller_takes_the_fast_path(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* Task 27 (F6): a drop of another owner outside the key holder's own call (the timer's sweep, another application's
+ * goodbye kiss) clears the key: the holder's next call takes the full path once, then the fast one again. */
+static void owner_drop_clears_the_fast_key(void) {
+    int a, b, c;
+    pbt_conn ca, cb, cc;
+    StreamPtr sa, sb, sc;
+    uint32_t fast;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    to(a);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_key_ok, 1);                           /* A holds the key */
+    fast = g_x.d->own_fast;
+    pbf_mf_quit(b);
+    tick(MT_PB_SWEEP_MS);                                 /* the timer drops B: nobody called */
+    T_EQ(g_x.d->n_gone_timer, 1);
+    T_EQ(g_x.d->n_own, 1);
+    T_EQ(g_x.d->own_key_ok, 0);
+    T_EQ(sync_status(sa), 0);                             /* full path */
+    T_EQ(g_x.d->own_fast, fast);
+    T_EQ(g_x.d->own_key_ok, 1);
+    T_EQ(sync_status(sa), 0);                             /* fast again */
+    T_EQ(g_x.d->own_fast, fast + 1);
+    c = launch();
+    sc = est(&cc);
+    T_CHECK(sc != 0);
+    T_EQ(g_x.d->n_own, 2);
+    to(a);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_key_ok, 1);
+    fast = g_x.d->own_fast;
+    to(c);
+    T_EQ(ecall(apb(-1, 0), 0), 0);                        /* C's goodbye kiss drops C's record */
+    T_EQ(g_x.d->n_own, 1);
+    T_EQ(g_x.d->own_key_ok, 0);
+    to(a);
+    T_EQ(sync_status(sa), 0);                             /* full path */
+    T_EQ(g_x.d->own_fast, fast);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_fast, fast + 1);
+    T_EQ(sync_status(sb), invalidStreamPtr);
+    T_EQ(sync_status(sc), invalidStreamPtr);
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
 /* The key covers the partition's identity: a different application in exactly the quit one's block (same size, same
  * A5, another name) is not the old owner, as on the full path; the goodbye kiss and a forget clear the key. */
 static void fast_path_tells_a_new_tenant_apart(void) {
@@ -1859,6 +1911,7 @@ static void accrun_heals_lost_shot_without_owner(void) {
     T_EQ(mt_entry_accrun(&g_e, &g_hn), 0);
     T_EQ(g_g.n_after, after + 1);                         /* one gate session */
     T_EQ(g_hs.lost, 1);                                   /* found and counted */
+    T_EQ(g_hs.lost_max, 60000);                           /* a minute overdue: a real loss, not clock drift */
     T_CHECK((int32_t)(g_hs.due - pbf_now) > 0);           /* re-armed: due in the future */
     T_EQ(g_hn, 1);
     T_EQ(g_e.n_calls, calls);                             /* not counted as a call */
@@ -1886,6 +1939,6 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        interrupt_time_routine_is_never_abandoned, tenant_of_unswept_block_keeps_its_objects,
        unstick_waits_under_a_live_gate_frame, nested_context_pops_when_its_chain_returns,
        sync_calls_without_completion_track_nothing, repeat_caller_takes_the_fast_path,
-       fast_path_tells_a_new_tenant_apart,
+       fast_path_tells_a_new_tenant_apart, owner_drop_clears_the_fast_key,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps,
        accrun_heals_lost_shot_without_owner)

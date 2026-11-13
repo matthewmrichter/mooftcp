@@ -264,7 +264,8 @@ int main(void)
             r = PBStatusSync((ParmBlkPtr)&pb);
             memcpy(&m, &pb.csParam[0], 4);
             if (r != 0) P("stack: MacTCP (no MoofTCP status)\r");   /* the harness reads this line to learn which stack is live */
-            P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
+            P("Status('MT') = %d block %08lx version %u rev %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2],
+              (unsigned)pb.csParam[3]);
         } else {
             /* Plan 4: the open failed (no address yet, e.g. DHCP without a server): Status needs an open
              * driver, so reach the block through the status view in the unit's dCtlStorage (mt_view.h) */
@@ -272,6 +273,7 @@ int main(void)
             const MtStatusView *v = drv && mt_units_is_moof(drv) ? mt_units_view_in(dce, MT_UNITS_MASK24) : NULL;
             if (v) m = (MtRes *)(void *)((const char *)v - offsetof(MtRes, view));
             pb.csParam[2] = MT_STATUS_VERSION;
+            pb.csParam[3] = 0;                       /* no Status call, no revision: the appended fields stay unread */
             r = m ? 0 : -1;
             if (!m) P("stack: MoofTCP unconfigured (status view not found)\r");
             P("open failed: block %08lx from the unit's status view\r", (unsigned long)s24(m));
@@ -369,15 +371,22 @@ int main(void)
               mt_enet_tx_quarantined(&m->enet), (unsigned long)m->enet.reattach_blocked,
               (unsigned long)m->enet.reattach_abandoned, (unsigned)m->enet.reattach_req,
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
-            {   /* 1.1d2: enough to tell a stopped timer on hardware: a shot armed but due well in the past is lost
-                 * (mt_timer_keep re-arms it at the next gate session); the cached deadlines live in the core and the
+            if (pb.csParam[3] >= 1) {   /* rev 1 (mt_drv.h MT_STATUS_REV): enough to tell a stopped timer on hardware: a
+                 * shot armed but due well in the past is lost (mt_timer_keep re-arms it at the next gate session); lost-max
+                 * is how late the latest-found one was found (tens of ms: coarse-clock drift of a long shot; seconds: a
+                 * real loss, found by a frame, a call or the heartbeat). The cached deadlines live in the core and the
                  * glue and are not read from here (a query would rebuild them outside the gate) */
                 uint32_t now = mt_ms_from_ticks((uint32_t)TickCount());
-                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u lost %lu last-lost %lu (%ld ms ago) accrun %lu\r",
+                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u lost %lu last-lost %lu (%ld ms ago) lost-max %lu ms accrun %lu\r",
                   (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
                   (unsigned long)m->shot.due, (unsigned long)now, (long)(int32_t)(m->shot.due - now), m->armed,
                   (unsigned long)m->shot.lost, (unsigned long)m->shot.lost_at,
-                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L, (unsigned long)m->n_accrun);
+                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L, (unsigned long)m->shot.lost_max,
+                  (unsigned long)m->n_accrun);
+            } else {   /* an older driver (rev 0): its block ends at .view (or has another 1.1d layout): MtTimer only */
+                P("timer: fired %lu armed %u in_cb %u inserted %u (driver status rev %u: no due/lost/accrun fields)\r",
+                  (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
+                  (unsigned)pb.csParam[3]);
             }
 #ifndef MT_TUNE
             (void)tune_ok;
