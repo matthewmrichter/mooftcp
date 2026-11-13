@@ -144,7 +144,8 @@ int mt_pb_unstick(MtDrv *d, const MtAppMem *cur, unsigned gate_below) {
 
 void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     uint8_t sv = d->co_gate, gen;
-    if (d->n_own && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
+    if (d->n_own && !mt_pb_owners_alive(d) &&  /* 1.1d3: every owner alive, nothing is gone (a load each) */
+        (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
         return;                                 /* its application quit (MultiFinder): the sweep forgets it */
     if (pb->hdr.ioCompletion) co_note(d);       /* no routine, nothing can quit inside it: skip the context
                                                  * (every sync call completes through here; round 5) */
@@ -165,7 +166,7 @@ void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
 void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason, MacPtr32 icmp) {
     uint8_t sv, gen;
     if (!a->proc) return;                       /* no notifyProc given: accepted (matrix 202b) */
-    if (d->n_own && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
+    if (d->n_own && !mt_pb_owners_alive(d) && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
     co_note(d);
     gen = d->co_gen;
     sv = d->co_gate;
@@ -576,7 +577,7 @@ static int quiet(const MtDrv *d, const MtAppMem *cur) {
 
 /* The input path's check (mt_drv.c rx_cb, before every frame while owners exist): every recorded
  * partition still there? Inline header loads only; the full sweep runs when one is gone. */
-int mt_pb_owners_alive(const MtDrv *d) {
+__attribute__((noinline)) int mt_pb_owners_alive(const MtDrv *d) {   /* one copy: per frame and call */
     const MtAppMem *o = d->own;
     uint8_t left = d->n_own, i;
     for (i = 0; left && i < MT_PB_OWNERS; i++, o++) {

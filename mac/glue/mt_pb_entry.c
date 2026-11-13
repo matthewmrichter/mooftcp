@@ -30,10 +30,11 @@ static int push(MtDrvPend *q, MtAnyPb *pb) {
  * on the 68000) and every pop still happens under the mask. A stale "empty" only misses a push that lands after the
  * look, and every push sets tick_pending, so the gate owner drains again before it lets go; a stale "not empty"
  * finds the ring empty under the mask. */
+static inline int idle(const MtDrvPend *q) { return *(volatile const uint16_t *)&q->head == q->tail; }
 __attribute__((noinline)) static MtAnyPb *pop(MtDrvPend *q) {   /* one copy: three call sites */
     int m;
     MtAnyPb *pb;
-    if (*(volatile const uint16_t *)&q->head == q->tail) return NULL;
+    if (idle(q)) return NULL;
     m = mt_os_mask();
     pb = (MtAnyPb *)mt_drv_pend_pop(q);
     mt_os_unmask(m);
@@ -239,7 +240,7 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     mt_pb_call_complete(d, pb, res);
     if (d->depth == 0) {                         /* the outermost frame: run what was deferred */
         MtAnyPb *x;
-        while ((x = pop(&e->doneq)) != NULL) mt_pb_call_complete(d, x, x->hdr.ioResult);
+        while (!idle(&e->doneq) && (x = pop(&e->doneq)) != NULL) mt_pb_call_complete(d, x, x->hdr.ioResult);
         mt_pb_flush(d);
     }
     return res;
@@ -264,7 +265,7 @@ int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
 }
 
 /* The gate is held, so a completion routine that calls the driver nests (call-out, depth). */
-int mt_entry_drain(MtEntry *e) {
+__attribute__((noinline)) static int drain(MtEntry *e) {
     MtDrv *d = e->d;
     MtAnyPb *pb;
     int ran = 0;
@@ -285,4 +286,11 @@ int mt_entry_drain(MtEntry *e) {
         }
         return ran;
     }
+}
+
+/* 1.1d3: all three rings empty (every gate session but a preempted one): no pop call and no register save at all. The
+ * same looks pop makes, so a push that lands after them is the same miss pop would have (tick_pending catches it). */
+int mt_entry_drain(MtEntry *e) {
+    if (idle(&e->doneq) && idle(&e->pend) && idle(&e->refq)) return 0;
+    return drain(e);
 }
