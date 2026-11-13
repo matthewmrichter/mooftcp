@@ -9,6 +9,7 @@ static void reap(MtEnet *e, MtEnetTx *c)
 {
     if (c->pb.ioResult < 0) { e->tx_err++; e->last_err = c->pb.ioResult; }
     if (c->wd_stage < 2 && e->tx_started) e->tx_started--;   /* quarantined ones left the count */
+    if (e->tx_live) e->tx_live--;
     c->started = 0;
     c->wd_stage = 0;
     c->wd_seen = 0;
@@ -77,15 +78,16 @@ void mt_enet_link_reset(MtEnet *e)
 
 void mt_enet_watchdog(MtEnet *e, uint32_t now)
 {
-    unsigned i;
+    MtEnetTx *c = e->tx;
+    uint8_t left = e->tx_live;                   /* 1.1d3: the started slots; the scan ends after the last one */
     if (!e->tx_started) return;                  /* idle: nothing handed to the driver */
     if (!e->wd_fresh && (int32_t)(now - e->wd_next) < 0) return;
     e->wd_fresh = 0;
     e->wd_next = now + MT_ENET_WD_SCAN_MS;
-    for (i = 0; i < MT_ENET_TXSLOTS; i++) {
-        MtEnetTx *c = &e->tx[i];
+    for (; left && c < e->tx + MT_ENET_TXSLOTS; c++) {
         uint32_t age;
         if (!c->started) continue;
+        left--;
         if (c->pb.ioResult <= 0) { reap(e, c); continue; }
         if (!c->wd_seen) { c->wd_seen = 1; c->wd_t0 = now; continue; }
         age = now - c->wd_t0;                    /* modular: right across the 2^32 wrap */

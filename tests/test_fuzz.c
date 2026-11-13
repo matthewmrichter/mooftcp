@@ -1260,6 +1260,7 @@ static void fz_pump_invariants(void) {
     }
     for (i = 0; i < MT_ENET_TXSLOTS; i++) st += FE.tx[i].started;
     if (st != FE.tx_started) bad("pump: tx_started differs from the started slots");
+    if (st != FE.tx_live) bad("pump: tx_live differs from the started slots");   /* 1.1d3: the watchdog's scan bound */
 }
 #endif
 

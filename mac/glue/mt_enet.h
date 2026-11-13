@@ -76,6 +76,8 @@ typedef struct MtEnet {
     uint8_t   attached;          /* bit 0: 0x0806, bit 1: 0x0800 */
     uint8_t   opened;
     uint8_t   tx_next;           /* round-robin search start */
+    uint8_t   tx_live;           /* 1.1d3 (was a pad byte): slots with started != 0, quarantined ones too (the
+                                  * watchdog's scan stops after the last of them); mt_enet_tx_mark_started, reap */
     int16_t   last_err;          /* last nonzero Device Manager result */
     uint32_t  tx_ok, tx_pad, tx_drop_busy, tx_drop_len, tx_drop_closed, tx_err;
     uint32_t  tx_stuck, tx_killed, reattach, reattach_fail;   /* watchdog (Plan 3 Task 5) */
@@ -104,6 +106,15 @@ static inline void mt_enet_tx_prep(const MtEnet *e, MtEnetTx *s, uint16_t n)
     s->pb.csCode = MT_ENET_CS_WRITE;
     s->pb.ioRefNum = e->refnum;
     s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+}
+
+/* A slot handed to the driver (or queued by the pump): the watchdog times it from its next scan (the first start
+ * after an idle spell asks for a fresh scan), the owner's reap counts its result. Owner context only. */
+static inline void mt_enet_tx_mark_started(MtEnet *e, MtEnetTx *s)
+{
+    s->started = 1;
+    e->tx_live++;
+    if (!e->tx_started++) e->wd_fresh = 1;
 }
 
 /* Open the driver, read the MAC, attach both handlers (rx frames go to `gate`). Frames can reach

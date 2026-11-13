@@ -127,8 +127,7 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
         e->tx_err++;
         return 1;
     }
-    s->started = 1;
-    if (!e->tx_started++) e->wd_fresh = 1;
+    mt_enet_tx_mark_started(e, s);
     e->tx_ok++;
     return 0;
 }

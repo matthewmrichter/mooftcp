@@ -21,9 +21,60 @@ static MtEnetTx *start(void)
     if (!s) return NULL;
     memset(&s->pb, 0, sizeof s->pb);
     s->pb.ioResult = 1;
-    s->started = 1;
-    if (!E.tx_started++) E.wd_fresh = 1;
+    mt_enet_tx_mark_started(&E, s);
     return s;
+}
+
+static unsigned started_slots(void)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) n += E.tx[i].started != 0;
+    return n;
+}
+
+/* 1.1d3: tx_live counts the started slots (quarantined ones too), so the scan stops after the last one. It follows
+ * every start, every reap (by the scan or by a claim) and a quarantine, and the scan still finds a slot started last
+ * in the highest place. */
+static void started_slots_counted_for_the_scan(void)
+{
+    MtEnetTx *s[MT_ENET_TXSLOTS];
+    unsigned i;
+    uint32_t t;
+    setup();
+    for (i = 0; i < 3; i++) s[i] = start();
+    T_EQ(E.tx_live, 3);
+    s[1]->pb.ioResult = 0;
+    mt_enet_watchdog(&E, 0);                               /* fresh scan: reaps s[1] */
+    T_EQ(E.tx_live, 2);
+    T_EQ(E.tx_live, started_slots());
+    s[0]->pb.ioResult = 0;
+    s[2]->pb.ioResult = -17;
+    for (i = 3; i < MT_ENET_TXSLOTS + 3; i++) T_CHECK(start() != NULL);   /* claims reap finished slots on the way */
+    T_EQ(E.tx_live, started_slots());
+    T_EQ(E.tx_err, 1);
+    T_EQ(E.tx_live, MT_ENET_TXSLOTS);
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) E.tx[i].pb.ioResult = 0;
+    mt_enet_watchdog(&E, 50);
+    mt_enet_watchdog(&E, 200);
+    T_EQ(E.tx_live, 0);
+    T_EQ(E.tx_started, 0);
+    setup();                                               /* a quarantined slot stays counted until it completes */
+    s[0] = start();
+    for (t = 0; t < 2 * MT_ENET_TX_STUCK_MS + 200; t += 50) mt_enet_watchdog(&E, t);
+    T_EQ(s[0]->wd_stage, 2);
+    T_EQ(E.tx_started, 0);
+    T_EQ(E.tx_live, 1);
+    E.tx_next = MT_ENET_TXSLOTS - 1;                       /* the next write lands in the last slot */
+    s[1] = start();
+    T_CHECK(s[1] == &E.tx[MT_ENET_TXSLOTS - 1]);
+    T_EQ(E.tx_live, 2);
+    mt_enet_watchdog(&E, t);                               /* fresh: the last slot is timed */
+    T_EQ(s[1]->wd_seen, 1);
+    s[0]->pb.ioResult = 0;
+    s[1]->pb.ioResult = 0;
+    mt_enet_watchdog(&E, t + 100);
+    T_EQ(E.tx_live, 0);
+    T_EQ(started_slots(), 0);
 }
 
 static void watchdog_idle_costs_nothing(void)
@@ -342,7 +393,7 @@ static void open_keeps_in_flight_slots(void)
         again = mt_enet_tx_claim(&E);
         T_CHECK(again && again != s);
         again->pb.ioResult = 1;
-        again->started = 1;
+        mt_enet_tx_mark_started(&E, again);
     }
     T_CHECK(mt_enet_tx_claim(&E) == NULL);                 /* s is never handed out */
     mt_enet_init(&E);
@@ -454,5 +505,6 @@ T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_closed_link_is_repaired_even_if_the_slot_completed,
        watchdog_blocked_on_a_closed_link_never_gives_up,
        watchdog_no_reattach_request_when_link_is_closed, watchdog_quarantine_keeps_started_count_exact,
+       started_slots_counted_for_the_scan,
        open_keeps_in_flight_slots, watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time,
        watchdog_scan_period, tx_prep_clears_the_whole_pb, watchdog_deadline_is_the_next_scan)

@@ -20,8 +20,7 @@ static void barrier(void) { __asm__ volatile("" : : : "memory"); }
 /* The slot is started: the watchdog times it and the owner's reap counts its result (owner context only). */
 static void count_started(MtEnet *e, MtEnetTx *s)
 {
-    s->started = 1;
-    if (!e->tx_started++) e->wd_fresh = 1;
+    mt_enet_tx_mark_started(e, s);
     e->tx_ok++;
 }
 
