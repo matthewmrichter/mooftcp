@@ -383,7 +383,7 @@ int16_t mt_drv_control(void *vpb, void *dce) {
     if ((r->enet.kill_req | r->enet.reattach_req) && !(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
         enet_service(r, pb);                      /* the watchdog asked; task time only */
     if (pb->hdr.csCode == MT_DRV_ACCRUN && !sr_irq()) {   /* 1.1d2 heartbeat (SystemTask): no sweep, no owner */
-        res = mt_entry_accrun(&r->entry);
+        res = mt_entry_accrun(&r->entry, &r->n_accrun);
         pb->hdr.ioResult = res;
     } else {
         res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());

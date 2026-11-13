@@ -377,7 +377,7 @@ int main(void)
                   (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
                   (unsigned long)m->shot.due, (unsigned long)now, (long)(int32_t)(m->shot.due - now), m->armed,
                   (unsigned long)m->shot.lost, (unsigned long)m->shot.lost_at,
-                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L, (unsigned long)m->entry.n_accrun);
+                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L, (unsigned long)m->n_accrun);
             }
 #ifndef MT_TUNE
             (void)tune_ok;

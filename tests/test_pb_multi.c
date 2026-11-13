@@ -1742,6 +1742,7 @@ static void fuzz_apps(void) {
  * after-callback here is the driver's arm decision (mt_timer_plan) on a model of the shot. */
 static MtTimer g_ht;
 static MtTimerShot g_hs;
+static uint32_t g_hn;      /* the heartbeat counter (MtRes.n_accrun in the driver) */
 static void hb_after(void *ctx) {
     (void)ctx;
     if (mt_timer_plan(&g_ht, &g_hs, mt_pb_next_deadline_ms(g_x.d), pbf_now)) g_ht.armed = 1;
@@ -1754,6 +1755,7 @@ static void accrun_heals_lost_shot_without_owner(void) {
     (void)a;
     memset(&g_ht, 0, sizeof g_ht);
     memset(&g_hs, 0, sizeof g_hs);
+    g_hn = 0;
     g_g.after = hb_after;
     g_g.open = 1;
     g_ht.armed = 1;                                       /* a shot that never fired: lost */
@@ -1761,18 +1763,18 @@ static void accrun_heals_lost_shot_without_owner(void) {
     pbf_now += 60000;                                     /* a silent minute: no frame, no call */
     calls = g_e.n_calls;
     after = g_g.n_after;
-    T_EQ(mt_entry_accrun(&g_e), 0);
+    T_EQ(mt_entry_accrun(&g_e, &g_hn), 0);
     T_EQ(g_g.n_after, after + 1);                         /* one gate session */
     T_EQ(g_hs.lost, 1);                                   /* found and counted */
     T_CHECK((int32_t)(g_hs.due - pbf_now) > 0);           /* re-armed: due in the future */
-    T_EQ(g_e.n_accrun, 1);
+    T_EQ(g_hn, 1);
     T_EQ(g_e.n_calls, calls);                             /* not counted as a call */
     T_EQ(g_x.d->n_own, 0);                                /* no owner recorded for the current partition */
-    T_EQ(mt_entry_accrun(&g_e), 0);                       /* a healthy shot: kept, nothing counted */
+    T_EQ(mt_entry_accrun(&g_e, &g_hn), 0);                       /* a healthy shot: kept, nothing counted */
     T_EQ(g_hs.lost, 1);
     g_g.depth = 1;                                        /* gate held (an interrupted session): nothing runs */
     after = g_g.n_after;
-    T_EQ(mt_entry_accrun(&g_e), 0);
+    T_EQ(mt_entry_accrun(&g_e, &g_hn), 0);
     T_EQ(g_g.n_after, after);
     g_g.depth = 0;
     T_EQ(pbf_bad, 0);

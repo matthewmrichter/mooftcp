@@ -2218,6 +2218,7 @@ static long g_tm_found;
 static MtGate g_hb_gate;       /* the accRun heartbeat's own gate session (mt_entry_accrun), after = fz_timer_after */
 static MtEntry g_hb_e;
 static long g_hb_n;
+static uint32_t g_hb_cnt;
 static long g_tm_lost;
 
 static void pb_setup(uint32_t seed) {
@@ -2306,7 +2307,7 @@ static void fz_accrun(void) {
     uint8_t own = P.d->n_own;
     uint32_t calls = g_hb_e.n_calls;
     if (!g_hb_e.d) { mt_entry_init(&g_hb_e, P.d, &g_hb_gate); g_hb_gate.after = fz_hb_after; g_hb_gate.open = 1; }
-    if (mt_entry_accrun(&g_hb_e) != 0) bad("accRun result");
+    if (mt_entry_accrun(&g_hb_e, &g_hb_cnt) != 0) bad("accRun result");
     if (P.d->n_own != own || g_hb_e.n_calls != calls) bad("accRun recorded an owner or counted a call");
     g_hb_n++;
 }

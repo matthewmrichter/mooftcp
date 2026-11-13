@@ -110,7 +110,6 @@ typedef struct MtEntry {
     uint32_t      n_compl_skipped;   /* refusals past MT_ENTRY_REFUSE_NEST: ioResult only */
     uint32_t      n_pend_dropped;    /* queued PBs of an application forgotten at its goodbye */
     uint32_t      n_compl_deferred;  /* results completed later because completions nested too deep */
-    uint32_t      n_accrun;          /* 1.1d2: accRun heartbeats (SystemTask, dNeedTime; mt_entry_accrun) */
 } MtEntry;
 
 /* accRun: the csCode SystemTask's periodic Control call carries (DRVR dNeedTime; 1.1d2 heartbeat, mt_entry_accrun). */

@@ -617,6 +617,42 @@ static void drain_masks_only_nonempty_rings(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* 1.1d2 heartbeat through the real entry and gate: a PB queued while the gate was held (a preempting caller; the
+ * queue asks the gate for a tick) is run in the accRun session, with no frame, timer shot or application call: the
+ * session's tick runs it as the driver's full tick_cb does (drain, mt_pb_tick), and the after-callback (the driver's
+ * after_cb drain, mt_entry_drain_ok) finds nothing left. accRun itself is no call (n_calls unchanged), no owner. */
+static void accrun_after_drain(void *ctx) { (void)ctx; (void)mt_entry_drain_ok(&g_e, MT_SWEEP_TIMER); }
+static void accrun_tick(void *ctx) { (void)ctx; (void)mt_entry_drain(&g_e); mt_pb_tick(g_x.d); }
+static void accrun_session_drains_queued_pb(void) {
+    StreamPtr s;
+    TCPiopb *st;
+    uint32_t n = 0, calls, after;
+    entry_setup();
+    g_g.after = accrun_after_drain;
+    g_g.tick = accrun_tick;
+    g_g.open = 1;
+    s = pbt_create(&g_x, 4096, 0, 0);
+    T_CHECK(s != 0);
+    st = pbt_pb(TCPStatus, s);
+    g_g.depth = 1;                                        /* preempted owner: the call is queued */
+    T_EQ(mt_entry_control(&g_e, (MtAnyPb *)st, TRAP_ASYNC, 1), 0);
+    T_EQ(g_e.pend.queued, 1);
+    g_g.depth = 0;
+    T_EQ(st->ioResult, inProgress);
+    calls = g_e.n_calls;
+    after = g_g.n_after;
+    T_EQ(mt_entry_accrun(&g_e, &n), 0);
+    T_EQ(n, 1);
+    T_EQ(g_g.n_after, after + 1);                         /* one session */
+    T_EQ(g_e.n_pend_run, 1);                              /* the queued PB ran in it */
+    T_EQ(st->ioResult, connectionDoesntExist);            /* and completed (no connection on the stream) */
+    T_EQ(ncompl(pbf_a(st)), 1);
+    T_EQ(g_e.n_calls, calls);
+    T_EQ(g_x.d->n_own, 0);
+    T_EQ(g_g.depth, 0);
+    T_EQ(pbf_bad, 0);
+}
+
 /* 1.1d1 F5: a tick inside the Time Manager task that finds nothing due skips the sweep and the tick work (the timer
  * is re-armed only for earlier deadlines, so it may fire before the current one); any other tick runs in full. */
 static void tick_idle_only_for_early_timer_ticks(void) {
@@ -890,4 +926,4 @@ T_MAIN(route_free_gate_runs, route_preempted_owner_queues_async_refuses_sync, ro
        goodbye_drops_streams_holding_app_routines_or_pbs,
        chained_buffer_emptying_reader_is_bounded, goodbye_drops_pbs_with_app_completion,
        entry_inline_completions_are_bounded, drain_masks_only_nonempty_rings,
-       tick_idle_only_for_early_timer_ticks, after_query_sequences)
+       tick_idle_only_for_early_timer_ticks, after_query_sequences, accrun_session_drains_queued_pb)

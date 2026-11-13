@@ -71,18 +71,20 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* Queued PBs run only when the core may run (mt_entry_core_ok): a quit application's queued PBs are
  * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
  * (the timer and the gate's after-callback use this). */
-int16_t mt_entry_accrun(MtEntry *e) {
-    e->n_accrun++;
+int mt_entry_drain_ok(MtEntry *e, int why) {
+    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return 0;
+    return mt_entry_drain(e);
+}
+
+/* 1.1d2 heartbeat (mt_pb_entry.h): one empty gate session from SystemTask's accRun, so the after-callback re-arms a
+ * lost timer shot on a silent link. No sweep, no owner record. */
+int16_t mt_entry_accrun(MtEntry *e, uint32_t *count) {
+    (*count)++;
     if (!e->gate->depth) {
         mt_gate_enter(e->gate);
         mt_gate_leave(e->gate);                  /* the after-callback: drain, watchdog, re-arm */
     }
     return 0;
-}
-
-int mt_entry_drain_ok(MtEntry *e, int why) {
-    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return 0;
-    return mt_entry_drain(e);
 }
 
 /* Glue frames left by a routine whose process quit inside it (Task 12 round 4): abandon them if that

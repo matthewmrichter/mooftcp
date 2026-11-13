@@ -42,9 +42,10 @@ typedef struct MtRes {
      * view.mode stays 0), so readers of the view need no variant check. */
     mt_ip4         dhcp_hint;    /* DHCP mode: the prefs address, sent as the requested address */
     MtStatusView   view;         /* status for the panel / MoofDiag (mt_view.h); DCE dCtlStorage -> here */
-    MtTimerShot    shot;         /* 1.1d1 appended tm_due, now shot.due (same offset): the absolute time (mt_os_ms) the
-                                  * timer's pending shot is for (valid while timer.armed); 1.1d2: shot.lost / lost_at,
-                                  * lost shots found by mt_timer_arm_deadline (MoofDiag's timer: line) */
+    MtTimerShot    shot;         /* appended: shot.due (1.1d1's tm_due, at the same offset) is the absolute time (mt_os_ms)
+                                  * the timer's pending shot is for, valid while timer.armed; shot.lost / lost_at (1.1d2)
+                                  * count the lost shots mt_timer_arm_deadline found (MoofDiag's timer: line) */
+    uint32_t       n_accrun;     /* 1.1d2, appended: accRun heartbeats (SystemTask, DRVR dNeedTime; mt_entry_accrun) */
 #ifdef MT_TUNE
     MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
                                   * above keeps its place for readers built without MT_TUNE */
