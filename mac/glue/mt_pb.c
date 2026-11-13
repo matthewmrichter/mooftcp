@@ -24,7 +24,8 @@ uint32_t mt_pb_size(const mt_limits *lim) {
     return DRV_ROUND((uint32_t)sizeof(MtDrv)) + mt_stack_size(lim);
 }
 
-MtDrv *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link *link,
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) MtDrv *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link *link,
                   uint32_t seed) {
     MtDrv *d = (MtDrv *)mem;
     uint32_t off = DRV_ROUND((uint32_t)sizeof(MtDrv));

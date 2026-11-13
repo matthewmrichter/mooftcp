@@ -37,7 +37,8 @@ void mt_timer_fire(MtTimer *t)
     t->in_cb = 0;
 }
 
-int mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx)
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx)
 {
     uint8_t *p = (uint8_t *)t;
     size_t i;
@@ -96,7 +97,8 @@ void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, MtTimerShot *sh
     if (ms) mt_timer_arm(t, ms);
 }
 
-void mt_timer_close(MtTimer *t)
+/* 1.1d3: runs only at close: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_timer_close(MtTimer *t)
 {
     sr_t g;
     g = irq_off();

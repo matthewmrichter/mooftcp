@@ -157,7 +157,8 @@ long mt_drv_boot(void *drvr) {
     return r;
 }
 
-static long boot(void *drvr) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) static long boot(void *drvr) {
     mt_limits lim;
     mt_link link;
     mt_ifconfig cfg;
@@ -269,7 +270,8 @@ static long boot(void *drvr) {
 /* The first successful open brings the link up: .ENET0 cannot be opened at INIT time (obs, Task 10:
  * the DaynaPORT driver's poll reads through CurStackBase, which is -1 until the first application
  * runs: address error at its offset 0x19F8). MacTCP also opens its LAP at driver open. */
-static int16_t link_up(MtRes *r) {
+/* 1.1d3: runs only at the first OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) static int16_t link_up(MtRes *r) {
     void *z;
     int e;
     if (r->enet.opened) return 0;
@@ -326,7 +328,8 @@ static int16_t dhcp_wait(MtRes *r) {
 }
 #endif
 
-int16_t mt_drv_open(void *pb, void *dce) {
+/* 1.1d3: runs only at OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int16_t mt_drv_open(void *pb, void *dce) {
     (void)pb; (void)dce;
     if (!g_res) return ipBadAddr;
 #ifndef MT_NO_DHCP

@@ -52,7 +52,8 @@ static void detach(MtEnet *e, uint16_t type)
     (void)ctl_sync(e, &pb);
 }
 
-int mt_enet_open(MtEnet *e, MtGate *gate)
+/* 1.1d3: runs only at the first OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_enet_open(MtEnet *e, MtGate *gate)
 {
     static const unsigned char *const names[2] = { (const unsigned char *)"\p.ENET0",
                                                    (const unsigned char *)"\p.ENET" };
@@ -163,7 +164,8 @@ int mt_os_enet_blocked(int16_t refnum)
  * OpenDriver. The transmit slots are not touched. Ruling (gate consistency): the handler context
  * and gate->open follow the handlers: ctx 0 while none is attached, gate stays open so the tick
  * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). */
-int mt_enet_reattach_io(MtEnet *e)
+/* 1.1d3: runs only at a repair: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_enet_reattach_io(MtEnet *e)
 {
     int16_t r;
     if (!e->gate) return MT_ENET_E_NODRIVER;
@@ -189,7 +191,8 @@ int mt_enet_reattach_io(MtEnet *e)
     return 0;
 }
 
-void mt_enet_close(MtEnet *e)
+/* 1.1d3: runs only at a close or a repair: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_enet_close(MtEnet *e)
 {
     if (e->attached & 2) detach(e, 0x0800);
     if (e->attached & 1) detach(e, 0x0806);

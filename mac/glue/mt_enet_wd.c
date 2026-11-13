@@ -109,7 +109,8 @@ void mt_enet_watchdog(MtEnet *e, uint32_t now)
     }
 }
 
-void mt_enet_service(MtEnet *e, uint32_t now)
+/* 1.1d3: runs only at a repair the watchdog asked for: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_enet_service(MtEnet *e, uint32_t now)
 {
     int16_t r;
     if (e->kill_req) {

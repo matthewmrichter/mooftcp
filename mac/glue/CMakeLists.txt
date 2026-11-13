@@ -43,4 +43,7 @@ target_link_libraries(mtdrv68k PUBLIC mtcore68k)
 target_compile_options(mtdrv68k PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=c99 -Wall -Wextra -Werror -O2>)
 set_source_files_properties(mt_pb_dns.c PROPERTIES COMPILE_OPTIONS -Os)   # 1.1d2: see mt_dns.c above
+# 1.1d3: the prefs reader runs once, at boot (mt_cfg_load from mt_drv_boot), and stays resident: built for size like
+# the resolver; buys back the per-call sweep's fast path (resident must not grow)
+set_source_files_properties(mt_cfg.c PROPERTIES COMPILE_OPTIONS -Os)
 set(MT_DRV_STUBS ${CMAKE_CURRENT_SOURCE_DIR}/mt_drv_stubs.s PARENT_SCOPE)
