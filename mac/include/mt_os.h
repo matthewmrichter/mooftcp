@@ -173,6 +173,12 @@ int  mt_os_app_alive(const MtAppMem *m);
  * May be called from the Time Manager tick / protocol handler (the watchdog runs in the gate). */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 
+/* Synchronous Status / Control on the Ethernet driver (refnum): csCode, ePointer = buf / ptr, eBuffSize = size
+ * (Control: 0); the OSErr. Task time only, at the driver open (mt_enet_mp.c: MoofPort's private tune calls). The Mac:
+ * PBStatusSync / PBControlSync (mt_enet.c); the host fake records them. */
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size);
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr);
+
 #ifdef MT_OS_MAC
 static inline void *mt_os_ptr(MacPtr32 a) { return (void *)a; }
 static inline MacPtr32 mt_os_addr(const void *p) { return (MacPtr32)p; }

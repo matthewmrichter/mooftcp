@@ -86,6 +86,17 @@ extern const void *pbf_dev_head;         /* head request of .ENET0's queue, for 
 extern int pbf_blocked_calls;
 extern int pbf_reattach_calls;           /* the fake mt_enet_reattach_io */
 extern int pbf_reattach_result;
+/* The Ethernet driver's synchronous Status / Control (mt_os_enet_status / mt_os_enet_control, used at the open for
+ * MoofPort's tune calls). Status: counts, records csCode and size, and on result 0 copies pbf_enet_status_data
+ * (pbf_enet_status_len bytes, at most the caller's size) into the buffer; returns pbf_enet_status_result. Control:
+ * counts, records csCode and the first PBF_ENET_CTL_REC bytes at ptr; returns pbf_enet_ctl_result. */
+#define PBF_ENET_CTL_REC 24
+extern int pbf_enet_status_calls, pbf_enet_ctl_calls;
+extern int16_t pbf_enet_status_result, pbf_enet_ctl_result;
+extern int16_t pbf_enet_status_cs, pbf_enet_status_size, pbf_enet_status_ref, pbf_enet_ctl_cs, pbf_enet_ctl_ref;
+extern uint8_t pbf_enet_status_data[256];
+extern int pbf_enet_status_len;
+extern uint8_t pbf_enet_ctl_bytes[PBF_ENET_CTL_REC];
 #ifdef MT_TUNE
 #include "mt_enet.h"
 /* The transmit pump's Toolbox side (mt_enet.h, perf builds): mt_enet_io_write counts, runs the hook (the driver:

@@ -6,9 +6,11 @@
 #ifdef MT_TRACE
 #include "mt_trace.h"
 #endif
-/* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
+/* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the services */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 int mt_os_enet_blocked(int16_t refnum);
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size);
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr);
 
 enum { E_ATTACH = 247, E_DETACH = 248, E_GETINFO = 252 };   /* EWrite: MT_ENET_CS_WRITE (mt_enet.h) */
 
@@ -143,6 +145,29 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb)
     return (int16_t)PBKillIOSync((ParmBlkPtr)&k);
 }
 
+/* mt_os.h: synchronous Status / Control with a buffer (MoofPort's private tune calls, mt_enet_mp.c). Run only at
+ * the driver open: cold, built for size (the resident driver must not grow). */
+__attribute__((cold)) int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size)
+{
+    MtEnetPB pb;
+    memset(&pb, 0, sizeof pb);
+    pb.ioRefNum = refnum;
+    pb.csCode = cs;
+    pb.ePointer = (uint32_t)(uintptr_t)buf;
+    pb.eBuffSize = size;
+    return (int16_t)PBStatusSync((ParmBlkPtr)&pb);
+}
+
+__attribute__((cold)) int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr)
+{
+    MtEnetPB pb;
+    memset(&pb, 0, sizeof pb);
+    pb.ioRefNum = refnum;
+    pb.csCode = cs;
+    pb.ePointer = (uint32_t)(uintptr_t)ptr;
+    return (int16_t)PBControlSync((ParmBlkPtr)&pb);
+}
+
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory globals */
 /* The DCE of .ENET0: is ANY request (ours or another client's) at the head of its queue? */
 int mt_os_enet_blocked(int16_t refnum)
@@ -163,7 +188,8 @@ int mt_os_enet_blocked(int16_t refnum)
 /* Detach both handlers, attach both again (task time, gate owned by the caller). No CloseDriver /
  * OpenDriver. The transmit slots are not touched. Ruling (gate consistency): the handler context
  * and gate->open follow the handlers: ctx 0 while none is attached, gate stays open so the tick
- * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). */
+ * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). No close/open, so a MoofPort
+ * driver keeps the steadyack tune the open applied (mt_enet_mp.h); it is not sent again here. */
 /* 1.1d3: runs only at a repair: cold, so GCC builds it for size (the resident driver must not grow) */
 __attribute__((cold)) int mt_enet_reattach_io(MtEnet *e)
 {

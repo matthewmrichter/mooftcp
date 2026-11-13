@@ -371,6 +371,10 @@ int main(void)
               mt_enet_tx_quarantined(&m->enet), (unsigned long)m->enet.reattach_blocked,
               (unsigned long)m->enet.reattach_abandoned, (unsigned)m->enet.reattach_req,
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
+            if (pb.csParam[3] >= 2)   /* rev 2 (1.1d4): what the .ENET0 open did to a MoofPort driver (mt_enet_mp.h) */
+                P("enet moofport: tune %u (%s)\r", (unsigned)m->mp_tune,
+                  m->mp_tune == MT_MP_APPLIED ? "steadyack applied" : m->mp_tune == MT_MP_VERSION ? "MoofPort, unknown version: left alone" :
+                  m->mp_tune == MT_MP_CTLFAIL ? "MoofPort refused the tune" : "not MoofPort");
             if (pb.csParam[3] >= 1) {   /* rev 1 (mt_drv.h MT_STATUS_REV): enough to tell a stopped timer on hardware: a
                  * shot armed but due well in the past is lost (mt_timer_keep re-arms it at the next gate session); lost-max
                  * is the most overdue of those finds (tens of ms: coarse-clock drift of a long shot; seconds: a real

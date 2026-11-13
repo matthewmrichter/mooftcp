@@ -4,9 +4,11 @@
 #define MT_DRV_H
 
 #include <stdint.h>
+#include <string.h>
 #include "mt.h"
 #include "mt_gate.h"
 #include "mt_enet.h"
+#include "mt_enet_mp.h"
 #include "mt_timer.h"
 #include "mt_drv_logic.h"
 #include "mt_stackmark.h"
@@ -47,6 +49,10 @@ typedef struct MtRes {
                                   * while timer.armed; shot.lost / lost_at / lost_max count the lost shots
                                   * mt_timer_arm_deadline found and how late (MoofDiag's timer: line) */
     uint32_t       n_accrun;     /* accRun heartbeats (SystemTask, DRVR dNeedTime; mt_entry_accrun) */
+    /* 1.1d4, appended (MT_STATUS_REV 2) */
+    uint8_t        mp_tune;      /* what the last .ENET0 open did to a MoofPort driver's poll settings: MT_MP_*
+                                  * (mt_enet_mp.h: 0 not MoofPort, 1 steadyack applied, 2 unknown version, 3 failed) */
+    uint8_t        pad_rev2;
 #ifdef MT_TUNE
     MtEnetPump     pump;         /* perf builds: the transmit pump (mt_enet.h), lever txpump; appended so every field
                                   * above keeps its place for readers built without MT_TUNE */
@@ -99,11 +105,29 @@ MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
  *   rev 0: MtRes ends at .view (1.0; also the 1.1 development drivers 1.1d1-1.1d3, whose appended
  *          fields had another layout)
  *   rev 1: .shot (due, lost, lost_at, lost_max) and .n_accrun (1.1)
+ *   rev 2: .mp_tune (1.1d4: MoofTCP switches a MoofPort .ENET0 to steadyack at the open, mt_enet_mp.h)
  * Opening failed (no address): the reader finds the block through the status view instead and has no
  * revision; it reads rev 0. */
 #define MT_DRV_STATUS_RES 0x4D54
 #define MT_STATUS_VERSION 1
-#define MT_STATUS_REV     1
+#define MT_STATUS_REV     2
+
+/* mt_drv_status's private call (above), plain C so the host tests run it: a Status PB (CntrlParam) with csCode
+ * MT_DRV_STATUS_RES and a booted block gets the block address at PB offset 28 and the version and revision at 32
+ * and 34 (0); anything else gets statusErr (-18) and the PB is left alone. */
+static inline int16_t mt_drv_status_res(void *pb, const void *res) {
+    uint8_t *b = (uint8_t *)pb;
+    int16_t cs;
+    memcpy(&cs, b + 26, 2);
+    if (cs == MT_DRV_STATUS_RES && res) {
+        uint32_t p = (uint32_t)(uintptr_t)res;
+        uint16_t v[2] = { MT_STATUS_VERSION, MT_STATUS_REV };
+        memcpy(b + 28, &p, 4);
+        memcpy(b + 32, v, 4);
+        return 0;
+    }
+    return -18;                                  /* statusErr: .IPP answers only Control */
+}
 
 #ifndef MT_NO_DHCP
 /* DHCP mode: the first open waits this long for the lease (DHCP-DESIGN.md section 4). */

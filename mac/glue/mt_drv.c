@@ -280,6 +280,8 @@ __attribute__((cold)) static int16_t link_up(MtRes *r) {
     mt_mac_zone_restore(z);
     r->enet_err = (int16_t)e;
     if (e) return ipBadLapErr;
+    r->mp_tune = mt_enet_mp_tune(r->enet.refnum);   /* 1.1d4: a MoofPort driver gets steadyack; any other driver,
+                                                  * version or error: nothing changes, the open goes on (mt_enet_mp.h) */
     memcpy(r->cfg.mac, r->enet.mac, 6);
 #ifndef MT_NO_DHCP
     if (r->view.mode)                            /* DHCP: the client starts; its DISCOVER leaves at the first tick */
@@ -356,16 +358,8 @@ int16_t mt_drv_prime(void *pb, void *dce) {
 }
 
 int16_t mt_drv_status(void *vpb, void *dce) {
-    MtAnyPb *pb = (MtAnyPb *)vpb;
     (void)dce;
-    if (pb->hdr.csCode == MT_DRV_STATUS_RES && g_res) {   /* private: diagnostics (MoofDiag) */
-        uint32_t p = (uint32_t)(uintptr_t)g_res;
-        uint16_t v[2] = { MT_STATUS_VERSION, MT_STATUS_REV };
-        memcpy((uint8_t *)pb + 28, &p, 4);
-        memcpy((uint8_t *)pb + 32, v, 4);
-        return 0;
-    }
-    return -18;                                  /* statusErr: .IPP answers only Control */
+    return mt_drv_status_res(vpb, g_res);        /* private: diagnostics (MoofDiag); every other csCode -18 */
 }
 
 int16_t mt_drv_control(void *vpb, void *dce) {

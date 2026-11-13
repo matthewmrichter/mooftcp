@@ -21,7 +21,7 @@
 # Exit status 0 only when every rule passes. Output also in build-mac/memcheck/MemCheck.out.
 # MT_LITE=1 checks MoofTCP Lite (build-mac-lite/, output build-mac-lite/memcheck/); same rules and caps.
 # Uses snow.sh, fresh-disk.sh, install-moof.sh, deploy.sh; starts scripts/testnet.py only when nothing
-# listens on 17007 (another session's testnet is shared, never killed).
+# listens on N+7 (17007 by default, --base N otherwise; another session's testnet is shared, never killed).
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -56,6 +56,7 @@ endif()
 # tests/pbfake.c (mt_os.h). Packed PB structs: taking a member's address is an error.
 file(GLOB MT_GLUE_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/mac/glue/mt_pb*.c)
 list(APPEND MT_GLUE_SRC ${CMAKE_SOURCE_DIR}/mac/glue/mt_gate.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_wd.c
+     ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_mp.c
      ${CMAKE_SOURCE_DIR}/mac/glue/mt_enet_pump.c ${CMAKE_SOURCE_DIR}/mac/glue/mt_trace.c)
 if(MT_GLUE_SRC)
   add_library(mtglue STATIC ${MT_GLUE_SRC} ${CMAKE_SOURCE_DIR}/tests/pbfake.c)

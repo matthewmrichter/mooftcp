@@ -48,6 +48,13 @@ void pbf_reset(void) {
     pbf_blocked_calls = 0;
     pbf_reattach_calls = 0;
     pbf_reattach_result = 0;
+    pbf_enet_status_calls = pbf_enet_ctl_calls = 0;
+    pbf_enet_status_result = -18;                /* statusErr: a driver without the private call (DaynaPORT) */
+    pbf_enet_ctl_result = 0;
+    pbf_enet_status_cs = pbf_enet_status_size = pbf_enet_status_ref = pbf_enet_ctl_cs = pbf_enet_ctl_ref = 0;
+    memset(pbf_enet_status_data, 0, sizeof pbf_enet_status_data);
+    pbf_enet_status_len = 0;
+    memset(pbf_enet_ctl_bytes, 0, sizeof pbf_enet_ctl_bytes);
 #ifdef MT_TUNE
     pbf_enet_io_calls = 0;
     pbf_enet_io_result = 0;
@@ -364,6 +371,32 @@ int mt_os_enet_blocked(int16_t refnum) {
     (void)refnum;
     pbf_blocked_calls++;
     return pbf_dev_head != NULL;                 /* any request at the head blocks */
+}
+
+int pbf_enet_status_calls, pbf_enet_ctl_calls;
+int16_t pbf_enet_status_result, pbf_enet_ctl_result;
+int16_t pbf_enet_status_cs, pbf_enet_status_size, pbf_enet_status_ref, pbf_enet_ctl_cs, pbf_enet_ctl_ref;
+uint8_t pbf_enet_status_data[256];
+int pbf_enet_status_len;
+uint8_t pbf_enet_ctl_bytes[PBF_ENET_CTL_REC];
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size) {
+    pbf_enet_status_calls++;
+    pbf_enet_status_ref = refnum;
+    pbf_enet_status_cs = cs;
+    pbf_enet_status_size = size;
+    if (pbf_enet_status_result == 0 && buf) {
+        int n = pbf_enet_status_len < size ? pbf_enet_status_len : size;
+        if (n > 0) memcpy(buf, pbf_enet_status_data, (size_t)n);
+    }
+    return pbf_enet_status_result;
+}
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr) {
+    pbf_enet_ctl_calls++;
+    pbf_enet_ctl_ref = refnum;
+    pbf_enet_ctl_cs = cs;
+    if (ptr) memcpy(pbf_enet_ctl_bytes, ptr, sizeof pbf_enet_ctl_bytes);
+    else pbf_bad++;
+    return pbf_enet_ctl_result;
 }
 
 int pbf_reattach_calls;
