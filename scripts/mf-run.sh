@@ -66,6 +66,8 @@ shortcfg="$shortT B$base U $rel $pend $xq $spin"
 if [ "$long" = A ]; then cfgA="$longcfg"; cfgB="$shortcfg"; else cfgA="$shortcfg"; cfgB="$longcfg"; fi
 
 cd "$ROOT"
+. "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite with the Lite tree's MfEcho and MoofDiag (a full MoofDiag
+                                  # only prints VARIANT MISMATCH against the Lite driver)
 out="$ROOT/build-mac/mf/$label"
 rm -rf "$out"; mkdir -p "$out"
 echo "== build"
@@ -115,7 +117,7 @@ put_apps() {
     hdel ":MoofTCP Test:MfEcho$x" 2>/dev/null || true
     hdel ":MoofTCP Test:MfEcho$x.out" 2>/dev/null || true
     hdel ":MoofTCP Test:MfEcho" 2>/dev/null || true
-    hcopy -m "$ROOT/build-mac/mfecho/MfEcho.bin" ":MoofTCP Test:"
+    hcopy -m "$ROOT/$BM/mfecho/MfEcho.bin" ":MoofTCP Test:"
     hrename ":MoofTCP Test:MfEcho" ":MoofTCP Test:MfEcho$x"
   done
   printf '%s' "$cfgA" > "$out/MfEchoA.cfg"; hcopy -t "$out/MfEchoA.cfg" ":MoofTCP Test:MfEchoA.cfg"
@@ -136,7 +138,7 @@ if [ -z "$keepdisk" ]; then
   scripts/fresh-disk.sh
   scripts/install-moof.sh >/dev/null
 fi
-scripts/deploy.sh build-mac/moofdiag/MoofDiag.bin --to ":MoofTCP Test:" >/dev/null
+scripts/deploy.sh "$BM/moofdiag/MoofDiag.bin" --to ":MoofTCP Test:" >/dev/null
 with_volume put_apps
 python3 -I scripts/mf-startup.py "$IMG" "$([ -n "$mf" ] && echo multifinder || echo finder)"
 
