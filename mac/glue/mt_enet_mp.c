@@ -1,5 +1,6 @@
 /* mt_enet_mp.c - put a MoofPort .ENET0 driver into "steadyack" at the open (see mt_enet_mp.h). Plain C, no Toolbox:
  * the two driver calls go through mt_os.h; host-tested (tests/test_enet_mp.c). */
+#include <string.h>
 #include "mt_enet_mp.h"
 #include "mt_os.h"
 
@@ -28,8 +29,7 @@ static const uint8_t steadyack[MT_MP_TUNE_SIZE] = {
 __attribute__((cold)) uint8_t mt_enet_mp_tune(int16_t refnum)
 {
     uint8_t st[MT_MP_STATS_BUF];
-    unsigned i;
-    for (i = 0; i < sizeof st; i++) st[i] = 0;   /* a driver that says noErr but fills nothing reads as version 0 */
+    memset(st, 0, sizeof st);                    /* a driver that says noErr but fills nothing reads as version 0 */
     if (mt_os_enet_status(refnum, MT_MP_STATUS_STATS, st, (int16_t)sizeof st) != 0)
         return MT_MP_NONE;                       /* DaynaPORT and other drivers: unknown Status csCode */
     if (((unsigned)st[0] << 8 | st[1]) < MT_MP_STATS_VERSION ||

@@ -359,7 +359,7 @@ int16_t mt_drv_prime(void *pb, void *dce) {
 
 int16_t mt_drv_status(void *vpb, void *dce) {
     (void)dce;
-    return mt_drv_status_res(vpb, g_res);        /* private: diagnostics (MoofDiag); every other csCode -18 */
+    return mt_drv_status_res(vpb, ((MtAnyPb *)vpb)->hdr.csCode, g_res);        /* private: diagnostics (MoofDiag); every other csCode -18 */
 }
 
 int16_t mt_drv_control(void *vpb, void *dce) {

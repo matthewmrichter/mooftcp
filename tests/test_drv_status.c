@@ -13,7 +13,7 @@ static void status_pb(int16_t cs)
     memcpy(PB + 26, &cs, 2);
 }
 
-static uint16_t rd16(int off) { uint16_t v; memcpy(&v, PB + off, 2); return v; }
+static int16_t rd16(int off) { int16_t v; memcpy(&v, PB + off, 2); return v; }
 static uint32_t rd32(int off) { uint32_t v; memcpy(&v, PB + off, 4); return v; }
 
 static void private_status_returns_block_version_and_revision(void)
@@ -21,7 +21,7 @@ static void private_status_returns_block_version_and_revision(void)
     static MtRes res;
     status_pb(MT_DRV_STATUS_RES);
     T_EQ(MT_DRV_STATUS_RES, 0x4D54);
-    T_EQ(mt_drv_status_res(PB, &res), 0);
+    T_EQ(mt_drv_status_res(PB, rd16(26), &res), 0);
     T_EQ(rd32(28), (uint32_t)(uintptr_t)&res);
     T_EQ(rd16(32), MT_STATUS_VERSION);
     T_EQ(rd16(32), 1);
@@ -40,11 +40,11 @@ static void other_status_calls_get_statuserr(void)
     memset(zero, 0, sizeof zero);
     for (i = 0; i < sizeof cs / sizeof cs[0]; i++) {
         status_pb(cs[i]);
-        T_EQ(mt_drv_status_res(PB, &res), -18);
+        T_EQ(mt_drv_status_res(PB, rd16(26), &res), -18);
         T_MEMEQ(PB + 28, zero, sizeof PB - 28);   /* csParam left alone */
     }
     status_pb(MT_DRV_STATUS_RES);            /* not booted: no block */
-    T_EQ(mt_drv_status_res(PB, NULL), -18);
+    T_EQ(mt_drv_status_res(PB, rd16(26), NULL), -18);
     T_MEMEQ(PB + 28, zero, sizeof PB - 28);
 }
 

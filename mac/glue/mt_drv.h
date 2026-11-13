@@ -112,13 +112,11 @@ MtRes  *mt_drv_res(void);        /* the resident block (NULL before boot) */
 #define MT_STATUS_VERSION 1
 #define MT_STATUS_REV     2
 
-/* mt_drv_status's private call (above), plain C so the host tests run it: a Status PB (CntrlParam) with csCode
- * MT_DRV_STATUS_RES and a booted block gets the block address at PB offset 28 and the version and revision at 32
- * and 34 (0); anything else gets statusErr (-18) and the PB is left alone. */
-static inline int16_t mt_drv_status_res(void *pb, const void *res) {
+/* mt_drv_status's private call (above), plain C so the host tests run it: a Status PB (CntrlParam) whose csCode
+ * (cs, PB offset 26) is MT_DRV_STATUS_RES, with a booted block, gets the block address at PB offset 28 and the
+ * version and revision at 32 and 34 (0); anything else gets statusErr (-18) and the PB is left alone. */
+static inline int16_t mt_drv_status_res(void *pb, int16_t cs, const void *res) {
     uint8_t *b = (uint8_t *)pb;
-    int16_t cs;
-    memcpy(&cs, b + 26, 2);
     if (cs == MT_DRV_STATUS_RES && res) {
         uint32_t p = (uint32_t)(uintptr_t)res;
         uint16_t v[2] = { MT_STATUS_VERSION, MT_STATUS_REV };
