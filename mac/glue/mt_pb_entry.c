@@ -106,6 +106,7 @@ int mt_entry_sweep(MtEntry *e, int note, int why) {
     MtDrv *d = e->d;
     int n;
     if (!note && !d->n_own) return 0;
+    if (note && mt_pb_sweep_quiet(d)) return 0;   /* 1.1d3 F6: the same caller, nothing changed (mt_pb.h) */
     n = mt_pb_sweep(d, note, drop_queues, e);
     if (why == MT_SWEEP_RX) d->n_gone_rx += (uint32_t)n;
     else if (why == MT_SWEEP_TIMER) d->n_gone_timer += (uint32_t)n;

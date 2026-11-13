@@ -272,8 +272,14 @@ struct MtDrv {
      * gdl_state is MT_PB_DL_AT; appended last so every earlier offset stays (MoofDiag, MfEcho). */
     uint32_t  gdl_at;
     uint8_t   gdl_state;        /* MT_PB_DL_STALE / AT / NONE */
+    uint8_t   own_key_ok;       /* 1.1d3 F6: own_key below is valid */
+    /* 1.1d3 F6 (appended): the last task-time caller the sweep found quiet (recorded, every owner alive, none
+     * overlapping it), by the raw inputs of its partition read (mt_os_app_same); valid while own_key_ok. Every owner
+     * table change (own_set, own_drop) and every forget clears own_key_ok (mt_pb_sweep_quiet). */
+    MtAppKey  own_key;
 #ifdef MT_TEST_HOOKS
     uint32_t  gdl_scans;        /* rescans done (tests) */
+    uint32_t  own_fast;         /* sweeps answered by mt_pb_sweep_quiet (tests) */
 #endif
 };
 
@@ -283,6 +289,7 @@ struct MtDrv {
  * mt_pb_tick marks it stale when it ends. */
 enum { MT_PB_DL_STALE = 0, MT_PB_DL_AT = 1, MT_PB_DL_NONE = 2 };
 static inline void mt_pb_dl_stale(MtDrv *d) { d->gdl_state = MT_PB_DL_STALE; }
+
 
 /* 1.1d2: the slot of a stream handle without a division (stream_of runs on every call; __udivsi3 is two divu.w on the
  * 68000). For an offset off < n * size <= 65535 from the first slot, (off * M) >> 16 with M = ceil(65536 / size) is
@@ -362,6 +369,11 @@ int      mt_pb_in_gone(const MtDrv *d, const MtAppMem *m, uint16_t m_born, MacPt
  * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
  * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
 int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
+/* 1.1d3 F6: the per-call sweep's fast path (mt_entry_sweep, task-time calls): 1 when the caller is the one the last
+ * quiet sweep kept (own_key: the same partition read, mt_os_app_same), the owner table has not changed since, and
+ * every recorded owner is still alive: exactly the case in which mt_pb_sweep would find the table quiet and return
+ * 0, without the partition read, the name hash and the identity compares. 0: take mt_pb_sweep. */
+int      mt_pb_sweep_quiet(MtDrv *d);
 #define MT_PB_SWEEP_NOTE_ONLY 2  /* note value: a task-time call while the gate is held (abandoned frames whose
                                   * release is postponed, or a nested call-out): record the caller, forget nothing */
 /* A routine (completion / ASR) run inline by the glue whose PROCESS quits from inside it (ExitToShell,

@@ -1363,6 +1363,97 @@ static void sync_calls_without_completion_track_nothing(void) {
     T_EQ(pbf_bad, 0);
 }
 
+/* 1.1d3 F6: a task-time call from the same partition as the last quiet one, with the owner table unchanged, skips
+ * the partition read and the identity compares (mt_pb_sweep_quiet): only the per-owner header loads remain. Test
+ * builds assert at every fast answer that the full path would have found the same (quiet). */
+static int16_t sync_status(StreamPtr s) {
+    TCPiopb *pb = (TCPiopb *)apb(TCPStatus, s);
+    pb->ioCompletion = 0;                                 /* a sync call without a routine (MoofBatch) */
+    return ecall(pb, 0);
+}
+static void repeat_caller_takes_the_fast_path(void) {
+    int a, b, c;
+    pbt_conn ca, cb;
+    StreamPtr sa, sb;
+    uint32_t fast;
+    msetup();
+    a = launch();
+    sa = est(&ca);
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sa && sb);
+    T_EQ(g_x.d->n_own, 2);
+    T_EQ(sync_status(sb), 0);                             /* quiet: the key is kept */
+    T_EQ(g_x.d->own_key_ok, 1);
+    fast = g_x.d->own_fast;
+    T_EQ(sync_status(sb), 0);
+    T_EQ(sync_status(sb), 0);
+    T_EQ(g_x.d->own_fast, fast + 2);                      /* the same caller again: fast */
+    to(a);                                                /* partition change: the full path */
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_fast, fast + 2);
+    T_EQ(sync_status(sa), 0);                             /* A's key now */
+    T_EQ(g_x.d->own_fast, fast + 3);
+    c = launch();                                         /* a new owner: recorded, the key goes */
+    T_EQ(sync_status(sa), 0);                             /* C calls (on A's stream): C recorded */
+    T_EQ(g_x.d->n_own, 3);
+    T_EQ(g_x.d->own_key_ok, 0);
+    to(a);
+    T_EQ(sync_status(sa), 0);                             /* full path once, then fast */
+    T_EQ(g_x.d->own_fast, fast + 3);
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_fast, fast + 4);
+    pbf_mf_quit(b);                                       /* another owner dies: never hidden by the fast path */
+    T_EQ(sync_status(sa), 0);
+    T_EQ(g_x.d->own_fast, fast + 4);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_gone_call, 1);                          /* swept at A's call, as before */
+    T_EQ(g_x.d->own_key_ok, 0);                           /* the drop cleared the key */
+    T_EQ(sync_status(sb), invalidStreamPtr);
+    (void)c;
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
+/* The key covers the partition's identity: a different application in exactly the quit one's block (same size, same
+ * A5, another name) is not the old owner, as on the full path; the goodbye kiss and a forget clear the key. */
+static void fast_path_tells_a_new_tenant_apart(void) {
+    int b, c;
+    pbt_conn cb;
+    StreamPtr sb;
+    MacPtr32 blo;
+    uint32_t fast;
+    msetup();
+    b = launch();
+    sb = est(&cb);
+    T_CHECK(sb != 0);
+    T_EQ(sync_status(sb), 0);
+    T_EQ(sync_status(sb), 0);
+    fast = g_x.d->own_fast;
+    T_CHECK(fast > 0);
+    blo = pbf_parts[b].lo;
+    pbf_mf_quit(b);
+    pbf_mf_forget(b);
+    c = pbf_mf_launch_at(blo, PART, 0);                   /* same place and size, another name */
+    g_compl[c] = pbf_mf_compl(c, compl_rec);
+    g_cur = c;
+    T_EQ(sync_status(sb), invalidStreamPtr);              /* the old owner's stream went at this call */
+    T_EQ(g_x.d->own_fast, fast);
+    T_EQ(g_x.d->n_own_gone, 1);
+    T_EQ(g_x.d->n_own, 1);
+    T_EQ(sync_status(sb), invalidStreamPtr);              /* quiet: C's key */
+    T_EQ(g_x.d->own_key_ok, 1);
+    mt_pb_forget(g_x.d, &g_x.d->own[0]);                  /* a forget clears it too */
+    T_EQ(g_x.d->own_key_ok, 0);
+    T_EQ(sync_status(sb), invalidStreamPtr);
+    T_EQ(g_x.d->own_key_ok, 1);
+    T_EQ(ecall(apb(-1, 0), 0), 0);                        /* C's goodbye kiss: its record and the key go */
+    T_EQ(g_x.d->n_own, 0);
+    T_EQ(g_x.d->own_key_ok, 0);
+    T_EQ(pbf_dead_calls, 0);
+    T_EQ(pbf_bad, 0);
+}
+
 /* ---- randomized: up to three applications launching, calling, quitting without a goodbye, a new one
  * reusing a dead one's memory, data for every connection (also the dead ones' before the sweep), ticks.
  * Invariants: no routine or PB of a quit partition is ever run (pbf_dead_calls), after a sweep tick no
@@ -1464,7 +1555,7 @@ static void rx_end(void) {
 typedef struct { int b, k; } fring_ent;
 static fring_ent g_ring[8];
 static int g_ring_n, g_in_hook;
-static unsigned long g_drained, g_reissued;
+static unsigned long g_drained, g_reissued, g_fast;
 static void fring_push(int b, int k) { if (g_ring_n < 8) { g_ring[g_ring_n].b = b; g_ring[g_ring_n].k = k; g_ring_n++; } }
 static void fdeliver(int b, int k) {             /* the caller holds the gate (depth 1) */
     if (!(g_x.d->n_own || g_x.d->depth) || mt_entry_core_ok(&g_e, MT_SWEEP_RX)) {
@@ -1726,14 +1817,16 @@ static void fuzz_apps(void) {
         g_unstuck += g_x.d->n_unstuck;
         g_wait += g_x.d->n_unstick_wait;
         g_apps += (unsigned long)g_nf;
+        g_fast += g_x.d->own_fast;
     }
     pbf_leave_hook = NULL;
     printf("fuzz_apps: %lu steps, %lu applications, %lu swept, %lu routines of quit applications skipped, "
            "%lu quits inside a routine (%lu of them inside the gate), %lu abandoned routine chains, %lu postponed, "
-           "%lu frames drained by another app's call, %lu calls re-issued from a routine\n", g_steps, g_apps, g_gone,
-           g_deadc, g_inroutine, g_ingate, g_unstuck, g_wait, g_drained, g_reissued);
+           "%lu frames drained by another app's call, %lu calls re-issued from a routine, %lu fast sweeps\n", g_steps,
+           g_apps, g_gone, g_deadc, g_inroutine, g_ingate, g_unstuck, g_wait, g_drained, g_reissued, g_fast);
     g_lax = 0;
     T_EQ(g_fail, 0);
+    T_CHECK(g_fast > 0);                                  /* 1.1d3 F6: the fast path ran (and was checked) */
 }
 
 /* 1.1d2 heartbeat: accRun (csCode 65, SystemTask every ~60 ticks with dNeedTime) runs one empty gate session, so the
@@ -1792,6 +1885,7 @@ T_MAIN(quit_one_app_keeps_other_apps_streams, goodbye_under_multifinder_spares_o
        routine_resuming_after_unstick_keeps_accounting, gate_held_while_abandoned_routines_process_quits,
        interrupt_time_routine_is_never_abandoned, tenant_of_unswept_block_keeps_its_objects,
        unstick_waits_under_a_live_gate_frame, nested_context_pops_when_its_chain_returns,
-       sync_calls_without_completion_track_nothing,
+       sync_calls_without_completion_track_nothing, repeat_caller_takes_the_fast_path,
+       fast_path_tells_a_new_tenant_apart,
        owner_table_full_and_system_heap_clients, sweep_waits_for_glue_frames, fuzz_apps,
        accrun_heals_lost_shot_without_owner)

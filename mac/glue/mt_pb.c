@@ -462,6 +462,7 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
     int sv = mt_os_irq_save();
     uint8_t i;
     Gone g;
+    d->own_key_ok = 0;                          /* 1.1d3 F6: every forget drops the sweep's fast key */
     g.d = d;
     g.m = m;
     g.m_born = m_born;
@@ -502,12 +503,14 @@ void mt_pb_forget(MtDrv *d, const MtAppMem *m) { forget_aged(d, m, d->own_ser); 
 
 /* See mt_pb.h "Owner table slots": lo first, so a concurrent reader sees an empty slot. */
 static void own_drop(MtDrv *d, uint8_t i) {
+    d->own_key_ok = 0;                          /* 1.1d3 F6: the table changes */
     *(volatile MacPtr32 *)&d->own[i].lo = 0;
     OWN_BARRIER();
     d->own[i].hi = d->own[i].h0 = d->own[i].name = 0;
     if (d->n_own) d->n_own--;
 }
 static void own_set(MtDrv *d, uint8_t i, const MtAppMem *m) {
+    d->own_key_ok = 0;                          /* 1.1d3 F6: the table changes */
     if (!++d->own_ser) d->own_ser = 1;          /* never 0: that is "age unknown" (mt_pb_in_gone) */
     d->own_born[i] = d->own_ser;
     d->own[i].hi = m->hi;
@@ -584,13 +587,32 @@ int mt_pb_owners_alive(const MtDrv *d) {
     return 1;
 }
 
+/* The fast answer is quiet()'s: the caller's MtAppMem is the one recorded when the key was kept (same inputs), so it
+ * is still known and overlaps no other owner (the table is unchanged); what remains is every owner alive, and the
+ * caller's own record is alive by the header word the key just compared. */
+int mt_pb_sweep_quiet(MtDrv *d) {
+    if (!d->own_key_ok || !mt_os_app_same(&d->own_key) || !mt_pb_owners_alive(d)) return 0;
+#ifdef MT_TEST_HOOKS
+    {
+        MtAppMem cur;
+        int part = mt_os_app_mem(&cur);
+        assert(part && quiet(d, &cur));          /* the full path agrees */
+        d->own_fast++;
+    }
+#endif
+    return 1;
+}
+
 int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx) {
     MtAppMem cur, gone;
     int sv, n = 0, part = 0, known = 0, can;
     uint8_t i, fr = MT_PB_OWNERS;
     uint16_t gone_born;
     if (!note && !d->n_own) return 0;            /* no MultiFinder caller recorded: nothing to watch */
-    if (note) part = mt_os_app_mem(&cur);        /* task time: the caller's own globals */
+    if (note) {                                  /* task time: the caller's own globals (and F6's key of them) */
+        d->own_key_ok = 0;
+        part = mt_os_app_mem_key(&cur, &d->own_key);
+    }
     if (!part && !d->n_own) return 0;
     if (!note) {                                 /* timer / input path (gate owner): every time */
         if (quiet(d, NULL)) {
@@ -598,6 +620,9 @@ int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), 
             return 0;
         }
     } else if (quiet(d, part ? &cur : NULL)) {
+        if (part && d->own_key.w[0]) d->own_key_ok = 1;   /* 1.1d3 F6: its next call may take the fast path. (An
+                                                 * interrupt-time sweep since quiet() can only have dropped a dead
+                                                 * owner, which leaves this caller quiet: the key stays right) */
         return 0;                                /* the common case: no gate round trip */
     } else if (note == MT_PB_SWEEP_NOTE_ONLY && !part) {
         return 0;

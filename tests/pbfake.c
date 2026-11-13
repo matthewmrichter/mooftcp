@@ -301,6 +301,25 @@ int mt_os_app_mem(MtAppMem *m) {
     return pbf_app_part != 0;
 }
 
+/* The fake's inputs are the pbf_app_* globals (what the tests and pbf_mf_switch set): the key holds all of them. */
+int mt_os_app_mem_key(MtAppMem *m, MtAppKey *k) {
+    int part = mt_os_app_mem(m);
+    memset(k, 0, sizeof *k);
+    if (part) {
+        k->w[0] = pbf_app_lo;
+        k->w[1] = pbf_app_hi;
+        k->w[2] = pbf_app_h0;
+        k->w[3] = pbf_app_name;
+        k->w[4] = (uint32_t)pbf_app_part;
+    }
+    return part;
+}
+
+int mt_os_app_same(const MtAppKey *k) {
+    return pbf_app_part && k->w[0] == pbf_app_lo && k->w[1] == pbf_app_hi && k->w[2] == pbf_app_h0 &&
+           k->w[3] == pbf_app_name && k->w[4] == (uint32_t)pbf_app_part;
+}
+
 const void *pbf_own_tab;
 void (*pbf_alive_hook)(void);
 

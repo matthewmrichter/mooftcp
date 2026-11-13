@@ -143,6 +143,15 @@ typedef struct MtAppMem {
 } MtAppMem;
 int  mt_os_app_mem(MtAppMem *m);
 
+/* 1.1d3 (F6): the raw inputs mt_os_app_mem read for a MultiFinder partition, so a repeat caller is recognised
+ * without the partition checks and the name hash (mt_pb_sweep_quiet). Opaque to the glue. mt_os_app_mem_key is
+ * mt_os_app_mem that also fills *k; k->w[0] == 0 means no key (no partition, or a name longer than the key keeps).
+ * mt_os_app_same(k) is 1 only if every input mt_os_app_mem reads equals the one in k now, so it would give exactly
+ * the same answer (1, the same MtAppMem). Task time only, as mt_os_app_mem. */
+typedef struct MtAppKey { uint32_t w[9]; } MtAppKey;
+int  mt_os_app_mem_key(MtAppMem *m, MtAppKey *k);
+int  mt_os_app_same(const MtAppKey *k);
+
 /* Nonzero while the MultiFinder partition recorded in *m (mt_os_app_mem returned 1) still exists:
  * the block header at m->lo - 8 still holds h0. MultiFinder disposes of the partition when the
  * application quits; the block becomes free (tag 0) or part of another block. A new partition of
