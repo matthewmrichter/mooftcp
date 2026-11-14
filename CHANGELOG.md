@@ -13,13 +13,15 @@ MoofTCP 1.1 switches on. Medians:
 
 | | 1.0 | 1.1 |
 |---|---|---|
-| Echo round trip, 1 byte | TBD-conf3b | TBD-conf3b |
-| Terminal burst, 2,000 bytes | TBD-conf3b | TBD-conf3b |
-| TCP receive, 1 MB | TBD-conf3b | TBD-conf3b |
-| TCP send, 4 sends queued | TBD-conf3b | TBD-conf3b |
+| Echo round trip, 1 byte | 53.6 ms | 41.4 ms |
+| Terminal burst, 2,000 bytes | 153.6 ms | 124.6 ms |
+| TCP receive, 1 MB | 45.3 KB/s | 55.6 KB/s |
 
-TBD-conf3b: one-at-a-time sends and AppleShare copies (result of the conf3b session). The figures were measured
-over Wi-Fi and vary with the network.
+Measured 2026-11-14 in one session of 10 pairs, with the AppleShare server's Wi-Fi power saving off. These three
+were better in all 10 pairs (the session the night before gave the same direction). Not significant in this
+session: TCP send with 4 sends queued (36.7 -> 41.0 KB/s), one-at-a-time sends (25.2 -> 23.9 KB/s) and AppleShare
+copies (too few pairs with the volume mounted). The network was noisy that day: stock MacTCP's one-at-a-time send
+ranged from 11 to 40 KB/s. The figures were measured over Wi-Fi and vary with the network.
 
 With the DaynaPORT driver the gain is small, because MoofTCP leaves DaynaPORT's driver as it is: echo about
 54.9 ms with MoofTCP 1.1 against 57.6 ms with 1.0 (two blocks on 2026-11-14; the 1.0 figure is from an earlier
@@ -50,8 +52,8 @@ session with different Wi-Fi settings, so this is not a clean comparison).
 
 ### Tested
 
-- On a real Mac Classic with the MoofPort driver (session conf3, 10 blocks) and with the DaynaPORT driver (session
-  m1rc, 2 blocks).
+- On a real Mac Classic with the MoofPort driver (sessions conf3 and conf3b, 10 blocks each) and with the DaynaPORT
+  driver (session m1rc, 2 blocks).
 - In the Snow emulator: the installer (install, switch to MacTCP and back, unattended), MultiFinder runs with two
   applications (full and Lite), ApiProbe against MacTCP's recorded answers, and the resident-memory check.
 - 47 host tests (45 for the Lite configuration), with AddressSanitizer and UBSan.
@@ -69,11 +71,13 @@ Install in the 1.0 Installer, and restart. Your `MoofTCP Prefs` settings are kep
 
 ### Network setup note: AppleShare at start-up
 
-AppleShare volumes set to open at start-up can fail to mount when the AppleShare server is itself on Wi-Fi with
-Wi-Fi power saving on: in tests, between about 1 in 7 and 1 in 3 boots. This is not caused by MoofTCP; AppleTalk does
-not use MoofTCP. AppleTalk's start-up lookups are multicast, and a power-saving Wi-Fi receiver misses most of them
-(it happened with the stock DaynaPORT driver too, and in 0 of 15 boots with power saving off). Turn power saving
-off on the server, use a wired server, or open the volume from the Chooser.
+AppleShare volumes set to open at start-up can fail to mount. At start-up AppleShare finds the server with
+AppleTalk multicast lookups (4 tries in about 2 seconds, no retry), and on Wi-Fi these are lost far more often than
+normal traffic. Measured on the test setup: with the server's Wi-Fi power saving on, about 1 in 7 to 1 in 3 boots
+failed; with it off, 0 of 15 at night but up to 1 in 3 at busy times of day. The stock MacTCP + DaynaPORT driver
+fails the same way, and in an interleaved test MacTCP + MoofPort failed 4 of 10 boots and MoofTCP 1.1 + MoofPort 1
+of 10. It is not caused by MoofTCP or MoofPort. Workaround: open the volume from the Chooser; to make it rarer,
+reduce multicast loss (a wired connection for the server, the server's Wi-Fi power saving off).
 
 ## 1.0 (first release)
 

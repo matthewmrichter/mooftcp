@@ -32,15 +32,18 @@ come from both together: MoofTCP 1.1's shorter path and
 MoofPort's "steadyack" timing, which MoofTCP 1.1 switches on.
 
                           1.0           1.1
-  Echo round trip         TBD-conf3b    TBD-conf3b
-  Terminal burst,         TBD-conf3b    TBD-conf3b
+  Echo round trip         53.6 ms       41.4 ms
+  Terminal burst,         153.6 ms      124.6 ms
     2,000 bytes
-  TCP receive, 1 MB       TBD-conf3b    TBD-conf3b
-  TCP send, 4 sends       TBD-conf3b    TBD-conf3b
-    queued
+  TCP receive, 1 MB       45.3 KB/s     55.6 KB/s
 
-TBD-conf3b: one-at-a-time sends and AppleShare copies. The
-figures were measured over Wi-Fi and vary with the network.
+Measured 2026-11-14, 10 pairs in one session, with the
+AppleShare server's Wi-Fi power saving off; these three were
+better in all 10 pairs. Not significant that day: TCP send
+with 4 sends queued (36.7 -> 41.0 KB/s), one-at-a-time sends
+(25.2 -> 23.9 KB/s) and AppleShare copies (too few pairs). The
+network was noisy that day, and the figures vary with the
+network.
 
 With the DaynaPORT driver the gain is small, because MoofTCP
 leaves that driver as it is: echo about 54.9 ms with 1.1
@@ -179,12 +182,14 @@ KNOWN LIMITS
 
 NETWORK SETUP NOTE: APPLESHARE AT START-UP
 
-AppleShare volumes set to open at start-up may not mount when
-the AppleShare server is itself on Wi-Fi with Wi-Fi power
-saving on: in tests, between about 1 boot in 7 and 1 in 3. This
-is not caused by MoofTCP; AppleTalk does not use MoofTCP.
-AppleTalk looks for the server with multicast packets at
-start-up, and a power-saving Wi-Fi receiver misses most of them
-(it happened with the DaynaPORT driver too, and in none of 15
-boots with power saving off). Turn power saving off on the
-server, wire the server, or open the volume from the Chooser.
+AppleShare volumes set to open at start-up may not mount. At
+start-up AppleShare finds the server with AppleTalk multicast
+lookups (4 tries in about 2 seconds, no retry). On Wi-Fi these
+are lost far more often than normal traffic. On the test
+setup, with the server's Wi-Fi power saving on, about 1 boot
+in 7 to 1 in 3 failed; with it off, none of 15 at night but up
+to 1 in 3 at busy times of day. Stock MacTCP with the DaynaPORT
+driver fails the same way. It is not caused by MoofTCP or
+MoofPort. Open the volume from the Chooser; to make it rarer,
+use a wired connection for the server or turn its Wi-Fi power
+saving off.
