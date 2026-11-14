@@ -6,25 +6,30 @@ A faster MoofTCP. The programs, settings file and installer work as in 1.0.
 
 ### Faster
 
-Measured on a real Mac Classic (System 6.0.8, 4 MB, BlueSCSI v2 Wi-Fi with MoofPort) on 2026-11-13: MoofTCP 1.1
-with MoofPort 1.1 against MoofTCP 1.0 with MoofPort 1.0, 10 paired blocks in one session, timed on the PC. Medians:
+Measured on a real Mac Classic (System 6.0.8, 4 MB, BlueSCSI v2 Wi-Fi), timed on the PC. The table compares
+MoofTCP 1.1 with MoofPort 1.1 against 1.0's behaviour (the MoofTCP 1.0 engine, with MoofPort at 1.0's settings).
+The gains come from both together: MoofTCP 1.1's shorter call path and MoofPort's `steadyack` timing, which
+MoofTCP 1.1 switches on. Medians:
 
 | | 1.0 | 1.1 |
 |---|---|---|
-| Echo round trip, 1 byte | 53.6 ms | about 44.5 ms |
-| Terminal burst, 2,000 bytes | 153.6 ms | about 131 ms |
-| TCP receive, 1 MB | 45.1 KB/s | about 54.8 KB/s |
-| TCP send, 4 sends queued | 38.0 KB/s | about 41.0 KB/s |
+| Echo round trip, 1 byte | TBD-conf3b | TBD-conf3b |
+| Terminal burst, 2,000 bytes | TBD-conf3b | TBD-conf3b |
+| TCP receive, 1 MB | TBD-conf3b | TBD-conf3b |
+| TCP send, 4 sends queued | TBD-conf3b | TBD-conf3b |
 
-These four were better in all 10 pairs. One-at-a-time sends and AppleShare copies showed no significant
-difference. The figures were measured over Wi-Fi and vary with the network.
+TBD-conf3b: one-at-a-time sends and AppleShare copies (result of the conf3b session). The figures were measured
+over Wi-Fi and vary with the network.
+
+With the DaynaPORT driver the gain is small, because MoofTCP leaves DaynaPORT's driver as it is: echo about
+54.9 ms with MoofTCP 1.1 against 57.6 ms with 1.0 (two blocks on 2026-11-14; the 1.0 figure is from an earlier
+session with different Wi-Fi settings, so this is not a clean comparison).
 
 ### Changed
 
-- A shorter path through every MacTCP call and every packet: less work per call, per timer tick and per frame
-  (the speed-up above).
+- A shorter path through every MacTCP call and every packet: less work per call, per timer tick and per frame.
 - When the Ethernet driver is MoofPort 1.1, MoofTCP switches it to MoofPort's `steadyack` timing when it opens the
-  driver. With any other driver (DaynaPORT, for example) it changes nothing.
+  driver. With any other driver (DaynaPORT, for example) it changes nothing (MoofDiag shows `tune 0`).
 - The timer recovers by itself if a Time Manager task is lost, and a once-a-second heartbeat from the system
   (`accRun`) backs it up.
 - A Control call with csCode 65 (`accRun`) from a program now returns 0; it returned -4 in 1.0.
@@ -43,15 +48,32 @@ difference. The figures were measured over Wi-Fi and vary with the network.
   before.
 - `scripts/release.sh` refuses to build a release with the perf or trace build switches set.
 
+### Tested
+
+- On a real Mac Classic with the MoofPort driver (session conf3, 10 blocks) and with the DaynaPORT driver (session
+  m1rc, 2 blocks).
+- In the Snow emulator: the installer (install, switch to MacTCP and back, unattended), MultiFinder runs with two
+  applications (full and Lite), ApiProbe against MacTCP's recorded answers, and the resident-memory check.
+- 47 host tests (45 for the Lite configuration), with AddressSanitizer and UBSan.
+
+### Going back to 1.0
+
+The 1.0 Installer does not replace a newer MoofTCP. To go back, click Remove in the 1.1rc1 Installer first, then
+Install in the 1.0 Installer, and restart. Your `MoofTCP Prefs` settings are kept.
+
 ### Known limitations
 
 - The timer heartbeat runs only while some program calls `SystemTask`. A program that waits in a synchronous
   MacTCP call on a quiet network calls nothing, so a lost timer task then waits for the next packet or call.
-- AppleShare volumes set to open at start-up can fail to mount when the AppleShare server is itself on Wi-Fi with
-  Wi-Fi power saving on. AppleTalk's start-up lookups are multicast, and a power-saving Wi-Fi receiver misses most
-  of them (about 1 in 7 boots with power saving on, 0 in 15 with it off; the stock DaynaPORT driver too). Turn
-  power saving off on the server, use a wired server, or open the volume from the Chooser.
 - The limits of 1.0 below still apply.
+
+### Network setup note: AppleShare at start-up
+
+AppleShare volumes set to open at start-up can fail to mount when the AppleShare server is itself on Wi-Fi with
+Wi-Fi power saving on: in tests, between about 1 in 7 and 1 in 3 boots. This is not caused by MoofTCP; AppleTalk does
+not use MoofTCP. AppleTalk's start-up lookups are multicast, and a power-saving Wi-Fi receiver misses most of them
+(it happened with the stock DaynaPORT driver too, and in 0 of 15 boots with power saving off). Turn power saving
+off on the server, use a wired server, or open the volume from the Chooser.
 
 ## 1.0 (first release)
 
