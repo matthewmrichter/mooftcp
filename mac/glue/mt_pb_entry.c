@@ -1,6 +1,16 @@
 /* mt_pb_entry.c - the .IPP Control entry: see mt_pb_entry.h. */
 #include "mt_pb_entry.h"
 #include "mt_os.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#include "mt_tune_abi.h"
+
+/* Perf builds with the trace: the private tune and trace calls are not part of what is measured. */
+static int traced(int16_t cs) { return cs != MT_CS_TRACE && cs != MT_CS_TUNE; }
+static uint8_t pb_bits(uint16_t trap, int irq) {
+    return (uint8_t)(((trap & MT_DRV_TRAP_ASYNC) ? MT_TRACE_A_ASYNC : 0) | (irq ? MT_TRACE_A_IRQ : 0));
+}
+#endif
 
 void mt_entry_init(MtEntry *e, struct MtDrv *d, MtGate *g) {
     memset(e, 0, sizeof *e);
@@ -16,9 +26,17 @@ static int push(MtDrvPend *q, MtAnyPb *pb) {
     return ok;
 }
 
-static MtAnyPb *pop(MtDrvPend *q) {
-    int m = mt_os_mask();
-    MtAnyPb *pb = (MtAnyPb *)mt_drv_pend_pop(q);
+/* Look before masking (1.1d1): an empty ring is skipped without a mask section. The look is one 16-bit load (atomic
+ * on the 68000) and every pop still happens under the mask. A stale "empty" only misses a push that lands after the
+ * look, and every push sets tick_pending, so the gate owner drains again before it lets go; a stale "not empty"
+ * finds the ring empty under the mask. */
+static inline int idle(const MtDrvPend *q) { return *(volatile const uint16_t *)&q->head == q->tail; }
+__attribute__((noinline)) static MtAnyPb *pop(MtDrvPend *q) {   /* one copy: three call sites */
+    int m;
+    MtAnyPb *pb;
+    if (idle(q)) return NULL;
+    m = mt_os_mask();
+    pb = (MtAnyPb *)mt_drv_pend_pop(q);
     mt_os_unmask(m);
     return pb;
 }
@@ -54,9 +72,20 @@ static void drop_queues(void *ctx, const MtAppMem *m) {
 /* Queued PBs run only when the core may run (mt_entry_core_ok): a quit application's queued PBs are
  * dropped by the sweep, which cannot run while a glue frame is active; until then nothing is drained
  * (the timer and the gate's after-callback use this). */
-void mt_entry_drain_ok(MtEntry *e, int why) {
-    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return;
-    mt_entry_drain(e);
+int mt_entry_drain_ok(MtEntry *e, int why) {
+    if ((e->d->n_own || e->d->depth) && !mt_entry_core_ok(e, why)) return 0;
+    return mt_entry_drain(e);
+}
+
+/* 1.1d2 heartbeat (mt_pb_entry.h): one empty gate session from SystemTask's accRun, so the after-callback re-arms a
+ * lost timer shot on a silent link. No sweep, no owner record. */
+int16_t mt_entry_accrun(MtEntry *e, uint32_t *count) {
+    (*count)++;
+    if (!e->gate->depth) {
+        mt_gate_enter(e->gate);
+        mt_gate_leave(e->gate);                  /* the after-callback: drain, watchdog, re-arm */
+    }
+    return 0;
 }
 
 /* Glue frames left by a routine whose process quit inside it (Task 12 round 4): abandon them if that
@@ -78,6 +107,7 @@ int mt_entry_sweep(MtEntry *e, int note, int why) {
     MtDrv *d = e->d;
     int n;
     if (!note && !d->n_own) return 0;
+    if (note && mt_pb_sweep_quiet(d)) return 0;   /* 1.1d3 F6: the same caller, nothing changed (mt_pb.h) */
     n = mt_pb_sweep(d, note, drop_queues, e);
     if (why == MT_SWEEP_RX) d->n_gone_rx += (uint32_t)n;
     else if (why == MT_SWEEP_TIMER) d->n_gone_timer += (uint32_t)n;
@@ -141,6 +171,11 @@ static int16_t refuse(MtEntry *e, MtAnyPb *pb, int async) {
         return MT_DRV_REFUSED;
     }
     e->refuse_nest++;
+#ifdef MT_TRACE
+    if (traced(pb->hdr.csCode))
+        mt_trace_ev(MT_TRACE_PBDONE, pb->hdr.ioCompletion != 0, (uint16_t)pb->hdr.csCode, mt_os_addr(pb),
+                    (uint32_t)(int32_t)MT_DRV_REFUSED);
+#endif
     mt_os_complete(pb, MT_DRV_REFUSED);
     e->refuse_nest--;
     return MT_DRV_REFUSED;
@@ -205,7 +240,7 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     mt_pb_call_complete(d, pb, res);
     if (d->depth == 0) {                         /* the outermost frame: run what was deferred */
         MtAnyPb *x;
-        while ((x = pop(&e->doneq)) != NULL) mt_pb_call_complete(d, x, x->hdr.ioResult);
+        while (!idle(&e->doneq) && (x = pop(&e->doneq)) != NULL) mt_pb_call_complete(d, x, x->hdr.ioResult);
         mt_pb_flush(d);
     }
     return res;
@@ -213,17 +248,28 @@ static int16_t entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
 
 int16_t mt_entry_control(MtEntry *e, MtAnyPb *pb, uint16_t trap, int irq) {
     int16_t r;
+#ifdef MT_TRACE
+    int16_t cs = pb->hdr.csCode;                 /* the PB may be reused by the time the call returns */
+    MacPtr32 a = mt_os_addr(pb);
+    if (traced(cs)) mt_trace_ev(MT_TRACE_PBIN, pb_bits(trap, irq), (uint16_t)cs, a, 0);
+#endif
     mt_os_stack_enter();                         /* stack-depth episode (no-op on the host) */
     r = entry_control(e, pb, trap, irq);
     mt_os_stack_leave();
+#ifdef MT_TRACE
+    if (traced(cs))
+        mt_trace_ev(MT_TRACE_PBOUT, pb_bits(trap, irq), (uint16_t)cs, a,
+                    (uint32_t)(uint16_t)r << 16 | (uint16_t)pb->hdr.ioResult);
+#endif
     return r;
 }
 
 /* The gate is held, so a completion routine that calls the driver nests (call-out, depth). */
-void mt_entry_drain(MtEntry *e) {
+__attribute__((noinline)) static int drain(MtEntry *e) {
     MtDrv *d = e->d;
     MtAnyPb *pb;
-    for (;;) {
+    int ran = 0;
+    for (;; ran = 1) {
         if ((pb = pop(&e->doneq)) != NULL) {        /* older results first */
             mt_pb_call_complete(d, pb, pb->hdr.ioResult);
             continue;
@@ -238,6 +284,13 @@ void mt_entry_drain(MtEntry *e) {
             mt_pb_call_complete(d, pb, MT_DRV_REFUSED);
             continue;
         }
-        return;
+        return ran;
     }
+}
+
+/* 1.1d3: all three rings empty (every gate session but a preempted one): no pop call and no register save at all. The
+ * same looks pop makes, so a push that lands after them is the same miss pop would have (tick_pending catches it). */
+int mt_entry_drain(MtEntry *e) {
+    if (idle(&e->doneq) && idle(&e->pend) && idle(&e->refq)) return 0;
+    return drain(e);
 }

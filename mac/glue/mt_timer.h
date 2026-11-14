@@ -64,11 +64,84 @@ static inline uint32_t mt_timer_deadline_ms(uint32_t d)
     return d < MT_TIMER_STEP_MS ? MT_TIMER_STEP_MS : d;
 }
 
+/* 1.1d1: the pending shot already fires in time. t is armed (primed, not yet fired) for the absolute ms time `due`
+ * (the coarse clock, mt_os_ms), and a new shot would be `ms` after `now`: nonzero when due <= now + ms (wrap-safe).
+ * Pure, host-tested. A shot kept this way fires no later than the new one would (both are exact-ms PrimeTimes from
+ * a coarse "now": either may land up to one clock step before the coarse deadline, never later than one step
+ * after it); when it fires early the tick finds nothing due (mt_drv_tick_idle) and the deadline is armed again.
+ * 1.1d2 (liveness): a shot still marked armed but overdue by more than MT_TIMER_LOST_MS (two clock steps) is taken as
+ * lost and armed again, so a missed shot can never stop the timers for good (before, any due in the past counted as
+ * "fires in time"). A short shot fires within about one step of its coarse due time; a long one (seconds, minutes)
+ * may drift past the slack because the exact-ms PrimeTime and the coarse Ticks clock disagree, and is then re-armed
+ * before it fires: harmless (one extra arm, the same deadline), but it also counts in MtTimerShot.lost below. */
+#define MT_TIMER_LOST_MS (2u * MT_TIMER_STEP_MS)
+static inline int mt_timer_keep(const MtTimer *t, uint32_t due, uint32_t now, uint32_t ms)
+{
+    return t->armed && (int32_t)(now + ms - due) >= 0 && (int32_t)(due - now) >= -(int32_t)MT_TIMER_LOST_MS;
+}
+
+/* The caller's record of the pending shot: its due time, and the lost shots found (mt_timer_note_lost).
+ * Telling the two kinds of find apart (lost_max): a long shot that drifted past the slack is found overdue by tens of
+ * ms (the coarse clock against the exact-ms PrimeTime); a shot the Time Manager really lost is found only when
+ * something next enters the driver, typically a second or more later (the accRun heartbeat runs about once a second).
+ *
+ * Who finds a lost shot: every gate leave (an application call, a received frame, a timer tick) and the accRun
+ * heartbeat (mt_pb_entry.h mt_entry_accrun). The heartbeat comes from SystemTask, so it runs only while some
+ * application calls SystemTask (directly or through WaitNextEvent); an application blocked in a synchronous .IPP call
+ * spins in the Device Manager and calls nothing. On a silent link (no broadcast, no ARP, a quiet peer) a lost shot
+ * is then found only by the next incoming frame or the next application call: until then the timers (RTO,
+ * delayed ACK, the deferred receive completion) wait. */
+typedef struct MtTimerShot {
+    uint32_t due;               /* absolute time (the coarse clock) the pending shot is for; valid while t->armed */
+    uint32_t lost;              /* shots found armed but overdue beyond MT_TIMER_LOST_MS (re-armed; see above) */
+    uint32_t lost_at;           /* the clock time of the last such find */
+    uint32_t lost_max;          /* the largest overdue amount (ms past due) of those finds; 0 while lost is 0 */
+} MtTimerShot;
+
+/* Count a lost shot (armed, overdue beyond the slack) when it is found at `now`, and keep the largest overdue amount;
+ * nonzero if it was one. Pure, host-tested. */
+static inline int mt_timer_note_lost(const MtTimer *t, MtTimerShot *sh, uint32_t now)
+{
+    uint32_t over = now - sh->due;
+    if (!t->armed || (int32_t)(sh->due - now) >= -(int32_t)MT_TIMER_LOST_MS) return 0;
+    sh->lost++;
+    sh->lost_at = now;
+    if (over > sh->lost_max) sh->lost_max = over;
+    return 1;
+}
+
+/* The arm decision of mt_timer_arm_deadline for the deadline d read at now: 0 = keep the pending shot, else the ms
+ * to arm it for (sh->due is then set). A lost shot is counted first (mt_timer_note_lost) and is never kept.
+ * Pure, host-tested. */
+static inline uint32_t mt_timer_plan(const MtTimer *t, MtTimerShot *sh, uint32_t d, uint32_t now)
+{
+    uint32_t ms = mt_timer_deadline_ms(d);
+    (void)mt_timer_note_lost(t, sh, now);
+    if (mt_timer_keep(t, sh->due, now, ms)) return 0;
+    sh->due = now + ms;
+    return ms;
+}
+
+/* The Time Manager steps mt_timer_arm takes before its PrimeTime (pure, host-tested with a model of the task). */
+#define MT_TIMER_RMV 1u
+#define MT_TIMER_INS 2u
+static inline unsigned mt_timer_arm_steps(const MtTimer *t)
+{
+    unsigned st = 0;
+    if (!t->in_cb || t->armed) {
+        if (t->inserted && t->armed) st |= MT_TIMER_RMV;
+        if (!t->inserted || t->armed) st |= MT_TIMER_INS;
+    }
+    return st;
+}
+
 int  mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx);   /* 0 or a Toolbox error */
 void mt_timer_arm(MtTimer *t, uint32_t ms);
-/* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed): the helper every
- * caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). */
-void mt_timer_arm_deadline(MtTimer *t, uint32_t d);
+/* Arm for a core deadline `d` (mt_next_deadline's value, MT_NO_DEADLINE allowed), computed at `now` (mt_os_ms):
+ * the helper every caller of the "re-query after every API call" rule uses (Task 10 reuses it as is). Since 1.1d1
+ * the Time Manager task is touched only when the deadline is earlier than the pending shot (mt_timer_keep); sh->due
+ * is the caller's record of that shot's absolute time (written here; one writer context: the gate owner). */
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, MtTimerShot *sh);   /* 1.1d2: counts lost shots */
 void mt_timer_cancel(MtTimer *t);
 void mt_timer_close(MtTimer *t);
 

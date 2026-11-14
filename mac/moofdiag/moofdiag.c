@@ -15,6 +15,7 @@
 #include <Menus.h>
 #include <TextEdit.h>
 #include <Memory.h>
+#include <Resources.h>
 #include <Files.h>
 #include <Devices.h>
 #include <stdio.h>
@@ -24,15 +25,92 @@
 #include "mt.h"
 #include "mt_drv.h"
 #include "diag_streams.h"
+#include "runid.h"
+#include "mt_tune_abi.h"
+#ifdef MT_TRACE
+#include "mt_trace_abi.h"
+#endif
+#pragma GCC diagnostic ignored "-Warray-bounds"   /* before mt_units.h: its low-memory reads are inlined into main */
 #include "mt_units.h"
 #include <stddef.h>
 
 QDGlobals qd;
 
-#pragma GCC diagnostic ignored "-Warray-bounds"
 #define UTABLE_BASE (*(uint8_t ***volatile *)0x11C)
 #define UNIT_COUNT  (*(volatile int16_t *)0x1D2)
 #define SYS_ZONE    (*(THz *)0x2A6)
+
+/* 1 if a run file (mac/common/runid.h) exists and starts with '!'. Only then is runid_name called: it would
+ * otherwise ask for an id in a dialog (DLOG 200), which MoofDiag has no resource for and which the unattended
+ * Snow runners (no run file) could not answer. */
+static int has_run_file(void)
+{
+    static const char *const names[2] = { RUNID_FILE, RUNID_FILE_OLD };
+    int k;
+    for (k = 0; k < 2; k++) {
+        short r;
+        long len = 1;
+        char c = 0;
+        if (FSOpen((ConstStr255Param)names[k], 0, &r) != noErr) continue;
+        if (FSRead(r, &len, &c) != noErr && len <= 0) c = 0;
+        FSClose(r);
+        return c == '!';
+    }
+    return 0;
+}
+
+/* The MoofTCP release version for the stack: line: the short string of 'vers' 1 in the "MoofTCP" file of the
+ * System Folder (the resident block carries none). "?" when the file or the resource cannot be read. The
+ * resource fork is opened read-only and closed again only if it was not open already (found by walking the
+ * FCB table: a second OpenResFile of an open fork returns the same refnum). */
+static void release_vers(char *out, size_t cap)
+{
+    static const unsigned char fname[] = "\pMoofTCP";
+    HParamBlockRec vp;
+    FCBPBRec fp;
+    Str255 nm, path;
+    short vref, res;
+    long dir;
+    int was_open = 0, idx;
+    Handle h;
+    short save = CurResFile();
+
+    strcpy(out, "?");
+    memset(&vp, 0, sizeof vp);
+    path[0] = 0;
+    vp.volumeParam.ioNamePtr = path;                         /* the boot volume's name */
+    vp.volumeParam.ioVRefNum = *(volatile short *)0x210;     /* BootDrive */
+    if (PBHGetVInfoSync(&vp) != noErr) return;
+    vref = vp.volumeParam.ioVRefNum;
+    dir = vp.volumeParam.ioVFndrInfo[0];                     /* the System Folder */
+    if (dir == 0) return;
+    for (idx = 1; idx < 64; idx++) {
+        memset(&fp, 0, sizeof fp);
+        nm[0] = 0;
+        fp.ioNamePtr = nm;
+        fp.ioVRefNum = vref;
+        fp.ioFCBIndx = idx;
+        if (PBGetFCBInfoSync(&fp) != noErr) break;
+        if (fp.ioFCBParID == dir && (fp.ioFCBFlags & 0x0200) && nm[0] == fname[0] && memcmp(nm + 1, fname + 1, nm[0]) == 0)
+            was_open = 1;
+    }
+    if (path[0] == 0 || path[0] > 27 + 1) return;
+    memcpy(path + 1 + path[0], ":System Folder:MoofTCP", 22);   /* OpenResFile: no OpenRFPerm trap before System 7 */
+    path[0] = (unsigned char)(path[0] + 22);
+    res = OpenResFile(path);
+    if (res < 0) return;
+    h = Get1Resource('vers', 1);
+    if (h && GetHandleSize(h) > 8) {
+        unsigned char *d = (unsigned char *)*h;
+        unsigned n = d[6];                                   /* 4 bytes number, region word, short string */
+        if (n > 0 && n < cap && 7 + n <= (unsigned)GetHandleSize(h)) {
+            memcpy(out, d + 7, n);
+            out[n] = 0;
+        }
+    }
+    if (!was_open) CloseResFile(res);
+    UseResFile(save);
+}
 
 static short outref = -1;
 static void P(const char *fmt, ...)
@@ -55,6 +133,52 @@ static void ip(char *b, uint32_t a)
     sprintf(b, "%lu.%lu.%lu.%lu", (unsigned long)(a >> 24), (unsigned long)(a >> 16 & 255),
             (unsigned long)(a >> 8 & 255), (unsigned long)(a & 255));
 }
+
+#ifdef MT_TRACE
+/* Perf builds with the echo-path trace (task 18): freeze the driver's ring, write every kept record as one line
+ *   TR <t_us> <event> <a hex> <b> <c hex> <d hex>
+ * (fields: mt_trace_abi.h), oldest first, then clear it (recording resumes). scripts/trace-echo.py reads them. The
+ * header line gives the counts and the clock's read cost; a driver without the trace answers the Control with -4. */
+static int16_t trace_call(short ref, MtTraceBlk *b, uint16_t op)
+{
+    CntrlParam cp;
+    void *bp = b;
+    memset(&cp, 0, sizeof cp);
+    b->version = MT_TRACE_ABI_VERSION;
+    b->op = op;
+    cp.ioCRefNum = ref;
+    cp.csCode = MT_CS_TRACE;
+    memcpy(&cp.csParam[0], &bp, 4);
+    return PBControlSync((ParmBlkPtr)&cp);
+}
+
+static void trace_dump(short ref)
+{
+    static const char *const nm[MT_TRACE_NEV] = { "?", "RX", "RXRUN", "DATA", "PBIN", "PBOUT", "PBDONE", "EWRITE",
+                                                    "EWDONE", "TICK", "TDEFER" };
+    static MtTraceRec buf[64];
+    MtTraceBlk b;
+    uint16_t kept, i;
+    int16_t e;
+    memset(&b, 0, sizeof b);
+    e = trace_call(ref, &b, MT_TRACE_OP_FREEZE);
+    if (e != 0) { P("trace: none (Control 0x4D56 = %d)\r", e); return; }
+    kept = b.got;
+    P("trace: version %u kept %u total %lu cap %u rec %u lap_us %lu now_us %lu clock %s\r", MT_TRACE_ABI_VERSION,
+      kept, (unsigned long)b.total, b.cap, b.rec_bytes, (unsigned long)b.lap_us, (unsigned long)b.now_us,
+      (b.flags & MT_TRACE_F_TMCLK) ? "timemgr" : "none");
+    for (b.first = 0; b.first < kept; b.first = (uint16_t)(b.first + b.got)) {
+        b.max = 64;
+        b.buf = (uint32_t)(uintptr_t)buf;
+        if (trace_call(ref, &b, MT_TRACE_OP_READ) != 0 || b.got == 0) break;
+        for (i = 0; i < b.got; i++)
+            P("TR %lu %s %02x %u %08lx %08lx\r", (unsigned long)buf[i].t, nm[buf[i].ev < MT_TRACE_NEV ? buf[i].ev : 0],
+              buf[i].a, buf[i].b, (unsigned long)buf[i].c, (unsigned long)buf[i].d);
+    }
+    e = trace_call(ref, &b, MT_TRACE_OP_CLEAR);
+    P("trace: %u records written, ring cleared (%d)\r", (unsigned)b.first, e);
+}
+#endif
 
 static void units(void)
 {
@@ -85,19 +209,23 @@ int main(void)
 {
     char line[160], a1[20], a2[20], a3[20], a4[20];
     Str255 ps;
+    unsigned char oname[40];
     size_t n;
     short ref = 0;
     OSErr r;
-    int pass = 0, unconf = 0;
+    int pass = 0, unconf = 0, opened = 0, tune_ok = 0;
     THz save;
     long sysfree, syszone;
 
     MaxApplZone();
     InitGraf(&qd.thePort); InitFonts(); InitWindows(); InitMenus(); TEInit(); InitDialogs(0);
     InitCursor();
-    Create((ConstStringPtr)"\pMoofDiag.out", 0, 'ttxt', 'TEXT');
-    if (FSOpen((ConstStringPtr)"\pMoofDiag.out", 0, &outref)) outref = -1;
-    else SetFPos(outref, fsFromLEOF, 0);   /* append: the soak runs MoofDiag several times; moofdiag-run.sh deletes the file first */
+    /* "MoofDiag-<id>.out" when the run file ("Agent Run", mac/common/runid.c) is "!<id>" or "!!<id>", else "MoofDiag.out" */
+    if (has_run_file()) runid_name("MoofDiag", ".out", oname);
+    else memcpy(oname, "\x0cMoofDiag.out", 13);
+    Create((ConstStringPtr)oname, 0, 'ttxt', 'TEXT');
+    if (FSOpen((ConstStringPtr)oname, 0, &outref)) outref = -1;
+    else SetEOF(outref, 0);                /* each run replaces the file: no stale tail from a longer earlier run */
     P("MoofDiag at tick %lu\r", (unsigned long)TickCount());
 
     save = GetZone();
@@ -110,6 +238,7 @@ int main(void)
     units();
     r = OpenDriver((ConstStringPtr)"\p.IPP", &ref);
     P("OpenDriver(.IPP) = %d refnum %d\r", r, ref);
+    if (r != 0 && r != -23004) P("stack: none (OpenDriver %d)\r", r);
     save = GetZone();
     SetZone(SYS_ZONE);
     sysfree = FreeMem();
@@ -117,16 +246,26 @@ int main(void)
     P("system zone after open: size %ld free %ld occupied %ld (no-network baseline: size 162100, occupied 149248)\r",
       syszone, sysfree, syszone - sysfree);
     if (r == -23004) unconf = 1;
+    opened = r == 0;
     if (r == 0 || unconf) {
         CntrlParam pb;
         MtRes *m = NULL;
         memset(&pb, 0, sizeof pb);
-        if (r == 0) {
+        const uint8_t *dce0 = NULL, *drv0 = r == 0 ? mt_units_find_ipp_dce(&dce0) : NULL;
+        if (r == 0 && drv0 && !mt_units_is_moof(drv0)) {
+            /* MacTCP's own driver is open: never send it our private Status code (the unit table says whose driver it
+             * is, as in the control panel). Under real MacTCP in Snow that call never returned and hung the run. */
+            P("stack: MacTCP (no MoofTCP status)\r");           /* the harness reads this line to learn which stack is live */
+            P("Status('MT') not sent: the unit's driver is not MoofTCP\r");
+            r = -1;
+        } else if (r == 0) {
             pb.ioCRefNum = ref;
             pb.csCode = MT_DRV_STATUS_RES;
             r = PBStatusSync((ParmBlkPtr)&pb);
             memcpy(&m, &pb.csParam[0], 4);
-            P("Status('MT') = %d block %08lx version %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2]);
+            if (r != 0) P("stack: MacTCP (no MoofTCP status)\r");   /* the harness reads this line to learn which stack is live */
+            P("Status('MT') = %d block %08lx version %u rev %u\r", r, (unsigned long)s24(m), (unsigned)pb.csParam[2],
+              (unsigned)pb.csParam[3]);
         } else {
             /* Plan 4: the open failed (no address yet, e.g. DHCP without a server): Status needs an open
              * driver, so reach the block through the status view in the unit's dCtlStorage (mt_view.h) */
@@ -134,8 +273,36 @@ int main(void)
             const MtStatusView *v = drv && mt_units_is_moof(drv) ? mt_units_view_in(dce, MT_UNITS_MASK24) : NULL;
             if (v) m = (MtRes *)(void *)((const char *)v - offsetof(MtRes, view));
             pb.csParam[2] = MT_STATUS_VERSION;
+            pb.csParam[3] = 0;                       /* no Status call, no revision: the appended fields stay unread */
             r = m ? 0 : -1;
+            if (!m) P("stack: MoofTCP unconfigured (status view not found)\r");
             P("open failed: block %08lx from the unit's status view\r", (unsigned long)s24(m));
+        }
+        if (r == 0 && m && pb.csParam[2] != MT_STATUS_VERSION)
+            P("stack: MoofTCP status%u unknown\r", (unsigned)pb.csParam[2]);
+        else if (r == 0 && m) {
+            char rv[40];
+            release_vers(rv, sizeof rv);
+            P("stack: MoofTCP %s %s\r", rv, m->variant == MT_RES_VARIANT_LITE ? "lite" : "full");
+            if (opened) {
+                /* a perf build (MT_TUNE) answers the private tune Control (mt_tune_abi.h) with its levers; a release
+                 * driver refuses it (-4), and then there is no tune: line. Only MoofTCP's own driver gets here. */
+                static uint16_t tb[MT_TW_N];
+                CntrlParam tp;
+                void *tbp = tb;
+                memset(&tp, 0, sizeof tp);
+                tb[MT_TW_VERSION] = MT_TUNE_ABI_VERSION;
+                tb[MT_TW_OP] = MT_TUNE_OP_GET;
+                tp.ioCRefNum = ref;
+                tp.csCode = MT_CS_TUNE;
+                memcpy(&tp.csParam[0], &tbp, 4);
+                if (PBControlSync((ParmBlkPtr)&tp) == 0) {
+                    tune_ok = 1;
+                    P("tune: rto_min=%u rto_init=%u delack=%u stall=%u quickack=%u txpump=%u\r", (unsigned)tb[MT_TW_RTO_MIN],
+                      (unsigned)tb[MT_TW_RTO_INIT], (unsigned)tb[MT_TW_DELACK], (unsigned)tb[MT_TW_STALL],
+                      (unsigned)tb[MT_TW_QUICKACK], (unsigned)tb[MT_TW_TXPUMP]);
+                }
+            }
         }
         if (r == 0 && m && (pb.csParam[2] != MT_STATUS_VERSION || m->version != MT_STATUS_VERSION)) {
             /* another layout: do not read a single field of it */
@@ -204,7 +371,40 @@ int main(void)
               mt_enet_tx_quarantined(&m->enet), (unsigned long)m->enet.reattach_blocked,
               (unsigned long)m->enet.reattach_abandoned, (unsigned)m->enet.reattach_req,
               (unsigned)m->enet.reattach_tries, (unsigned)m->enet.opened);
-            P("timer: fired %lu armed %u\r", (unsigned long)m->timer.fired, m->timer.armed);
+            if (pb.csParam[3] >= 2)   /* rev 2 (1.1d4): what the .ENET0 open did to a MoofPort driver (mt_enet_mp.h) */
+                P("enet moofport: tune %u (%s)\r", (unsigned)m->mp_tune,
+                  m->mp_tune == MT_MP_APPLIED ? "steadyack applied" : m->mp_tune == MT_MP_VERSION ? "MoofPort, unknown version: left alone" :
+                  m->mp_tune == MT_MP_CTLFAIL ? "MoofPort refused the tune" : "not MoofPort (DaynaPORT)");
+            if (pb.csParam[3] >= 1) {   /* rev 1 (mt_drv.h MT_STATUS_REV): enough to tell a stopped timer on hardware: a
+                 * shot armed but due well in the past is lost (mt_timer_keep re-arms it at the next gate session); lost-max
+                 * is the most overdue of those finds (tens of ms: coarse-clock drift of a long shot; seconds: a real
+                 * loss, found by a frame, a call or the heartbeat). The cached deadlines live in the core and the
+                 * glue and are not read from here (a query would rebuild them outside the gate) */
+                uint32_t now = mt_ms_from_ticks((uint32_t)TickCount());
+                P("timer: fired %lu armed %u in_cb %u inserted %u due %lu now %lu due-now %ld early-armed %u lost %lu last-lost %lu (%ld ms ago) lost-max %lu ms accrun %lu\r",
+                  (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
+                  (unsigned long)m->shot.due, (unsigned long)now, (long)(int32_t)(m->shot.due - now), m->armed,
+                  (unsigned long)m->shot.lost, (unsigned long)m->shot.lost_at,
+                  m->shot.lost ? (long)(int32_t)(now - m->shot.lost_at) : -1L, (unsigned long)m->shot.lost_max,
+                  (unsigned long)m->n_accrun);
+            } else {   /* an older driver (rev 0): its block ends at .view (or has another 1.1d layout): MtTimer only */
+                P("timer: fired %lu armed %u in_cb %u inserted %u (driver status rev %u: no due/lost/accrun fields)\r",
+                  (unsigned long)m->timer.fired, m->timer.armed, m->timer.in_cb, m->timer.inserted,
+                  (unsigned)pb.csParam[3]);
+            }
+#ifndef MT_TUNE
+            (void)tune_ok;
+#else
+            if (tune_ok)   /* a release driver's MtRes ends before .pump: read it only from a driver that answered the tune call */
+                P("txpump: on %u runs %lu issued %lu nested %lu max queue %u queued %u task fired %lu hold %u (with the pump, enet tx ok counts frames when queued)\r",
+                  (unsigned)m->pump.on, (unsigned long)m->pump.runs, (unsigned long)m->pump.issued,
+                  (unsigned long)m->pump.nested, (unsigned)m->pump.max_q,
+                  (unsigned)((m->pump.head - m->pump.tail) & (MT_ENET_PUMP_Q - 1u)), (unsigned long)m->pump.tm.fired,
+                  (unsigned)m->pump.hold);
+#endif
+#ifdef MT_TRACE
+            if (opened) trace_dump(ref);         /* perf builds with the trace: the TR lines (task 18) */
+#endif
             if (!(m->stk.flags & 1))
                 P("stack: not built with marks (rebuild with MT_EXTRA_CFLAGS=-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096)\r");
             else
@@ -249,7 +449,8 @@ int main(void)
     P("RESULT %s\r", pass ? "PASS" : unconf ? "UNCONFIGURED" : "FAIL");
     if (outref >= 0) { FSClose(outref); outref = -1; }
     FlushVol(0, 0);
-    sprintf(line, "MoofDiag %s. Results are in MoofDiag.out", pass ? "finished" : "FAIL");
+    if (runid_unattended()) return 0;      /* "!!" run file: nothing waits for a click */
+    sprintf(line, "MoofDiag %s. Results are in %.*s", pass ? "finished" : "FAIL", (int)oname[0], (char *)oname + 1);
     n = strlen(line);
     ps[0] = (unsigned char)n;
     memcpy(ps + 1, line, n);

@@ -170,7 +170,7 @@ static uint32_t app_name_hash(void)
     return h;
 }
 
-int mt_os_app_mem(MtAppMem *m)
+static int app_mem(MtAppMem *m, MtAppKey *k)
 {
     uint32_t lo = *(volatile uint32_t *)0x2AA, hi = *(volatile uint32_t *)0x10C;
     uint32_t a5 = *(volatile uint32_t *)0x904;
@@ -178,28 +178,60 @@ int mt_os_app_mem(MtAppMem *m)
     m->name = 0;                                  /* the hash is part of the identity only with a partition
                                                    * (the classic range is never recorded; keeps the per
                                                    * call-out cost of co_note at a few loads there) */
+    if (k) k->w[0] = 0;                           /* no key unless a partition is found below */
     if (hi > 0x00FFFFFFu) {                       /* 32-bit clean memory map: not System 6 on a Classic */
         m->lo = lo;
         m->hi = hi;
         return 0;
     }
-    lo &= 0x00FFFFFFu;
-    a5 &= 0x00FFFFFFu;
-    m->lo = lo;
+    m->lo = lo & 0x00FFFFFFu;
     m->hi = hi;
-    if (mf_running() && lo >= 0x1000u && !(lo & 1u)) {
-        uint32_t h0 = *(volatile const uint32_t *)(lo - 8u);
-        uint32_t tag = h0 >> 24, end = lo - 8u + (h0 & 0x00FFFFFFu);
-        uint32_t bklim = *(volatile const uint32_t *)lo & 0x00FFFFFFu;   /* Zone.bkLim, first field */
-        if (((tag & 0xC0u) == 0x80u || (tag & 0xC0u) == 0x40u) && end > lo && end <= hi &&
-            bklim > lo && bklim <= end && a5 > lo && a5 < end) {
+    if (mf_running() && m->lo >= 0x1000u && !(lo & 1u)) {
+        uint32_t p = m->lo, h0 = *(volatile const uint32_t *)(p - 8u), zb = *(volatile const uint32_t *)p;
+        uint32_t tag = h0 >> 24, end = p - 8u + (h0 & 0x00FFFFFFu);
+        uint32_t bklim = zb & 0x00FFFFFFu, a = a5 & 0x00FFFFFFu;   /* Zone.bkLim, first field */
+        if (((tag & 0xC0u) == 0x80u || (tag & 0xC0u) == 0x40u) && end > p && end <= hi &&
+            bklim > p && bklim <= end && a > p && a < end) {
             m->hi = end;
             m->h0 = h0;
             m->name = app_name_hash();
+            if (k && *(volatile const uint8_t *)0x910 < 16u) {   /* the name fits the key (16 bytes) */
+                const volatile uint32_t *nm = (const volatile uint32_t *)0x910;
+                k->w[0] = lo;
+                k->w[1] = hi;
+                k->w[2] = a5;
+                k->w[3] = h0;
+                k->w[4] = zb;
+                k->w[5] = nm[0];
+                k->w[6] = nm[1];
+                k->w[7] = nm[2];
+                k->w[8] = nm[3];
+            }
             return 1;
         }
     }
     return 0;
+}
+
+int mt_os_app_mem(MtAppMem *m) { return app_mem(m, NULL); }
+int mt_os_app_mem_key(MtAppMem *m, MtAppKey *k) { return app_mem(m, k); }
+
+/* Every input app_mem reads for a partition, raw: ApplZone, BufPtr, CurrentA5, the block header word and Zone.bkLim
+ * at ApplZone, CurApName's bytes 0..length (the words that hold them; a name of 16 bytes or more never has a key),
+ * and MultiFinder running. Equal inputs give the same answer, so a stricter compare (raw words, bytes past the
+ * name's end) only ever sends a caller down the full path. */
+int mt_os_app_same(const MtAppKey *k)
+{
+    const volatile uint32_t *nm = (const volatile uint32_t *)0x910;
+    uint32_t lo = *(volatile uint32_t *)0x2AA, n, i;
+    if (lo != k->w[0] || *(volatile uint32_t *)0x10C != k->w[1] || *(volatile uint32_t *)0x904 != k->w[2]) return 0;
+    lo &= 0x00FFFFFFu;                            /* a key is only taken for a checked partition: lo >= 0x1000, even */
+    if (*(volatile const uint32_t *)(lo - 8u) != k->w[3] || *(volatile const uint32_t *)lo != k->w[4]) return 0;
+    n = *(volatile const uint8_t *)0x910;
+    if (n >= 16u) return 0;
+    for (i = 0; i <= n / 4u; i++)
+        if (nm[i] != k->w[5 + i]) return 0;
+    return mf_running();
 }
 
 

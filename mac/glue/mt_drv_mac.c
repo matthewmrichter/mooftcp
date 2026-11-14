@@ -71,7 +71,8 @@ static const uint8_t *unit_driver(int16_t i) {
     return drv;
 }
 
-int mt_mac_unit_find(const uint8_t *pname) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_mac_unit_find(const uint8_t *pname) {
     int16_t i, n = UNIT_COUNT;
     for (i = 0; i < n; i++) {
         const uint8_t *drv = unit_driver(i), *nm;
@@ -87,7 +88,8 @@ int mt_mac_unit_find(const uint8_t *pname) {
 
 /* Grow the unit table to `want` entries (a new block in the system heap; the old one is left
  * alone: it may not be a heap block of its own). */
-static int grow_units(int16_t want) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) static int grow_units(int16_t want) {
     int16_t n = UNIT_COUNT, i;
     uint8_t ***old = UTABLE_BASE, ***nt;
     sr_t sr;
@@ -101,7 +103,8 @@ static int grow_units(int16_t want) {
     return 0;
 }
 
-int mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_mac_unit_install(void *drvr, int16_t want, int16_t *refnum) {
     const uint8_t *hdr = (const uint8_t *)strip24(drvr);
     Handle h;
     uint8_t *dce;
@@ -149,7 +152,8 @@ int mt_mac_dequeue(void *pb, void *dce, void **extra, int max) {
     return n;
 }
 
-void mt_mac_entropy(uint32_t *a, uint32_t *b) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_mac_entropy(uint32_t *a, uint32_t *b) {
     uint32_t t = LM_TICKS, tm = LM_TIME, m = LM_MOUSE, tc = (uint32_t)TickCount();
     const uint8_t *via = LM_VIA;
     uint32_t v = via ? ((uint32_t)via[0x0800] << 8 | via[0x0A00]) : 0;   /* VIA1 T1 counter */

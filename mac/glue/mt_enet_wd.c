@@ -4,13 +4,12 @@
 #include "mt_enet.h"
 #include "mt_os.h"
 
-#define NO_DEADLINE 0xFFFFFFFFu
-
 /* A finished slot (ioResult <= 0) that was started: count its error once, mark it free. */
 static void reap(MtEnet *e, MtEnetTx *c)
 {
     if (c->pb.ioResult < 0) { e->tx_err++; e->last_err = c->pb.ioResult; }
     if (c->wd_stage < 2 && e->tx_started) e->tx_started--;   /* quarantined ones left the count */
+    if (e->tx_live) e->tx_live--;
     c->started = 0;
     c->wd_stage = 0;
     c->wd_seen = 0;
@@ -47,10 +46,13 @@ int mt_enet_tx_quarantined(const MtEnet *e)
     return n;
 }
 
-uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d)
+uint32_t mt_enet_wd_deadline(const MtEnet *e, uint32_t d, uint32_t now)
 {
+    uint32_t w = e->wd_next - now;               /* wd_fresh (no scan yet) never reaches here from after_cb, which
+                                                 * runs the watchdog first; a stale wd_next only means "due" */
     if (!e->tx_started) return d;
-    return (d == NO_DEADLINE || d > MT_ENET_WD_SCAN_MS) ? MT_ENET_WD_SCAN_MS : d;
+    if ((int32_t)w < 0) w = 0;
+    return d < w ? d : w;
 }
 
 void mt_enet_init(MtEnet *e)
@@ -76,15 +78,16 @@ void mt_enet_link_reset(MtEnet *e)
 
 void mt_enet_watchdog(MtEnet *e, uint32_t now)
 {
-    unsigned i;
+    MtEnetTx *c = e->tx;
+    uint8_t left = e->tx_live;                   /* 1.1d3: the started slots; the scan ends after the last one */
     if (!e->tx_started) return;                  /* idle: nothing handed to the driver */
     if (!e->wd_fresh && (int32_t)(now - e->wd_next) < 0) return;
     e->wd_fresh = 0;
     e->wd_next = now + MT_ENET_WD_SCAN_MS;
-    for (i = 0; i < MT_ENET_TXSLOTS; i++) {
-        MtEnetTx *c = &e->tx[i];
+    for (; left && c < e->tx + MT_ENET_TXSLOTS; c++) {
         uint32_t age;
         if (!c->started) continue;
+        left--;
         if (c->pb.ioResult <= 0) { reap(e, c); continue; }
         if (!c->wd_seen) { c->wd_seen = 1; c->wd_t0 = now; continue; }
         age = now - c->wd_t0;                    /* modular: right across the 2^32 wrap */
@@ -106,7 +109,8 @@ void mt_enet_watchdog(MtEnet *e, uint32_t now)
     }
 }
 
-void mt_enet_service(MtEnet *e, uint32_t now)
+/* 1.1d3: runs only at a repair the watchdog asked for: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_enet_service(MtEnet *e, uint32_t now)
 {
     int16_t r;
     if (e->kill_req) {

@@ -37,7 +37,8 @@ void mt_timer_fire(MtTimer *t)
     t->in_cb = 0;
 }
 
-int mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx)
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_timer_init(MtTimer *t, mt_timer_cb cb, void *ctx)
 {
     uint8_t *p = (uint8_t *)t;
     size_t i;
@@ -65,6 +66,7 @@ void mt_timer_cancel(MtTimer *t)
 void mt_timer_arm(MtTimer *t, uint32_t ms)
 {
     sr_t g;
+    unsigned st;
     if (ms == MT_TIMER_NONE) { mt_timer_cancel(t); return; }
     if (ms < 1) ms = 1;
     if (ms > 0x3FFFFFFFu) ms = 0x3FFFFFFFu;
@@ -72,27 +74,31 @@ void mt_timer_arm(MtTimer *t, uint32_t ms)
     /* Outside the callback: an armed task is removed and re-inserted. Inside it the task is
      * inactive, so PrimeTime alone is the documented reload, unless the callback already armed it
      * once (a second arm in the same callback): then it is active again and needs the same
-     * remove/insert. */
-    if (!t->in_cb || t->armed) {
-        if (t->inserted && t->armed) RmvTime((QElemPtr)t);
-        if (!t->inserted || t->armed) {
-            t->tmWakeUp = 0;
-            t->tmReserved = 0;
-            InsTime((QElemPtr)t);
-            t->inserted = 1;
-        }
+     * remove/insert. The decision is mt_timer_arm_steps (mt_timer.h, host-tested). */
+    st = mt_timer_arm_steps(t);
+    if (st & MT_TIMER_RMV) RmvTime((QElemPtr)t);
+    if (st & MT_TIMER_INS) {
+        t->tmWakeUp = 0;
+        t->tmReserved = 0;
+        InsTime((QElemPtr)t);
+        t->inserted = 1;
     }
     t->armed = 1;
     PrimeTime((QElemPtr)t, (long)ms);
     irq_on(g);
 }
 
-void mt_timer_arm_deadline(MtTimer *t, uint32_t d)
+void mt_timer_arm_deadline(MtTimer *t, uint32_t d, uint32_t now, MtTimerShot *sh)
 {
-    mt_timer_arm(t, mt_timer_deadline_ms(d));
+    uint32_t ms = mt_timer_plan(t, sh, d, now);  /* a lost shot is counted (MoofDiag) and re-armed */
+    /* No mask needed around the check: a shot that fires right after it was seen armed asks the gate for a tick,
+     * and every tick ends in after_cb, which arms again (the driver calls this from after_cb only, the gate owner,
+     * so *due has one writer). */
+    if (ms) mt_timer_arm(t, ms);
 }
 
-void mt_timer_close(MtTimer *t)
+/* 1.1d3: runs only at close: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_timer_close(MtTimer *t)
 {
     sr_t g;
     g = irq_off();

@@ -68,6 +68,14 @@ typedef struct MtStreamAsr {
 /* Monotonic milliseconds (wraps at 2^32); the one clock every glue entry uses. */
 uint32_t mt_os_ms(void);
 
+#ifdef MT_TRACE
+/* Perf builds with the echo-path trace only (mac/glue/mt_trace.h): monotonic microseconds, wrapping at 2^32, cheap
+ * enough to read per event and legal in every context (the Mac: the Time Manager stopwatch, about 0.2 ms per read);
+ * and the address of the trace's EWrite completion routine (the Mac: an assembler stub in mt_trace_mac.c). */
+uint32_t mt_os_trace_us(void);
+uint32_t mt_os_trace_ew_compl(void);
+#endif
+
 /* The Toolbox tick count (low-memory Ticks, 60 Hz): for values an app compares with TickCount(),
  * e.g. ICMPEcho's echoRequestOut/echoReplyIn. */
 uint32_t mt_os_ticks(void);
@@ -135,6 +143,15 @@ typedef struct MtAppMem {
 } MtAppMem;
 int  mt_os_app_mem(MtAppMem *m);
 
+/* 1.1d3 (F6): the raw inputs mt_os_app_mem read for a MultiFinder partition, so a repeat caller is recognised
+ * without the partition checks and the name hash (mt_pb_sweep_quiet). Opaque to the glue. mt_os_app_mem_key is
+ * mt_os_app_mem that also fills *k; k->w[0] == 0 means no key (no partition, or a name longer than the key keeps).
+ * mt_os_app_same(k) is 1 only if every input mt_os_app_mem reads equals the one in k now, so it would give exactly
+ * the same answer (1, the same MtAppMem). Task time only, as mt_os_app_mem. */
+typedef struct MtAppKey { uint32_t w[9]; } MtAppKey;
+int  mt_os_app_mem_key(MtAppMem *m, MtAppKey *k);
+int  mt_os_app_same(const MtAppKey *k);
+
 /* Nonzero while the MultiFinder partition recorded in *m (mt_os_app_mem returned 1) still exists:
  * the block header at m->lo - 8 still holds h0. MultiFinder disposes of the partition when the
  * application quits; the block becomes free (tag 0) or part of another block. A new partition of
@@ -155,6 +172,12 @@ int  mt_os_app_alive(const MtAppMem *m);
  * in flight; `pb` is that PB (the Mac ignores it, the host fake records it). Returns the OSErr.
  * May be called from the Time Manager tick / protocol handler (the watchdog runs in the gate). */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
+
+/* Synchronous Status / Control on the Ethernet driver (refnum): csCode, ePointer = buf / ptr, eBuffSize = size
+ * (Control: 0); the OSErr. Task time only, at the driver open (mt_enet_mp.c: MoofPort's private tune calls). The Mac:
+ * PBStatusSync / PBControlSync (mt_enet.c); the host fake records them. */
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size);
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr);
 
 #ifdef MT_OS_MAC
 static inline void *mt_os_ptr(MacPtr32 a) { return (void *)a; }

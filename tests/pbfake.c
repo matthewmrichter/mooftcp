@@ -4,6 +4,9 @@
 #include "mt_gate.h"
 #include "mt_int.h"
 #include "mt_util.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 uint32_t pbf_now;
 pbf_ev pbf_log[PBF_LOG];
@@ -11,7 +14,7 @@ int pbf_nlog;
 int pbf_bad;
 int pbf_irq, pbf_irq_max, pbf_irq_calls;
 int pbf_in_int;
-int pbf_mask, pbf_mask_max;
+int pbf_mask, pbf_mask_max, pbf_mask_calls;
 MtGate *pbf_gate;
 void (*pbf_leave_hook)(void);
 MacPtr32 pbf_app_lo, pbf_app_hi;
@@ -45,11 +48,30 @@ void pbf_reset(void) {
     pbf_blocked_calls = 0;
     pbf_reattach_calls = 0;
     pbf_reattach_result = 0;
+    pbf_enet_status_calls = pbf_enet_ctl_calls = 0;
+    pbf_enet_status_result = -18;                /* statusErr: a driver without the private call (DaynaPORT) */
+    pbf_enet_ctl_result = 0;
+    pbf_enet_status_cs = pbf_enet_status_size = pbf_enet_status_ref = pbf_enet_ctl_cs = pbf_enet_ctl_ref = 0;
+    memset(pbf_enet_status_data, 0, sizeof pbf_enet_status_data);
+    pbf_enet_status_len = 0;
+    memset(pbf_enet_ctl_bytes, 0, sizeof pbf_enet_ctl_bytes);
+#ifdef MT_TUNE
+    pbf_enet_io_calls = 0;
+    pbf_enet_io_result = 0;
+    pbf_enet_io_hook = NULL;
+    pbf_pump_primes = 0;
+    pbf_enet_write_calls = 0;
+#endif
+#ifdef MT_TRACE
+    pbf_trace_us = 0;
+    pbf_trace_step = 1;
+    pbf_trace_mask_seen = 0;
+#endif
     pbf_bad = 0;
     pbf_irq = pbf_irq_max = pbf_irq_calls = 0;
     pbf_in_int = 0;
     pbf_a5 = 0x00A50000u;
-    pbf_mask = pbf_mask_max = 0;
+    pbf_mask = pbf_mask_max = pbf_mask_calls = 0;
     pbf_gate = NULL;
     pbf_leave_hook = NULL;
     fake_tx_hook = NULL;
@@ -266,6 +288,7 @@ int mt_os_in_interrupt(void) { return pbf_in_int > 0; }
 
 int mt_os_mask(void) {
     int prev = pbf_mask++;
+    pbf_mask_calls++;
     if (pbf_mask > pbf_mask_max) pbf_mask_max = pbf_mask;
     return prev;
 }
@@ -283,6 +306,25 @@ int mt_os_app_mem(MtAppMem *m) {
     m->h0 = pbf_app_part ? pbf_app_h0 : 0;
     m->name = pbf_app_name;
     return pbf_app_part != 0;
+}
+
+/* The fake's inputs are the pbf_app_* globals (what the tests and pbf_mf_switch set): the key holds all of them. */
+int mt_os_app_mem_key(MtAppMem *m, MtAppKey *k) {
+    int part = mt_os_app_mem(m);
+    memset(k, 0, sizeof *k);
+    if (part) {
+        k->w[0] = pbf_app_lo;
+        k->w[1] = pbf_app_hi;
+        k->w[2] = pbf_app_h0;
+        k->w[3] = pbf_app_name;
+        k->w[4] = (uint32_t)pbf_app_part;
+    }
+    return part;
+}
+
+int mt_os_app_same(const MtAppKey *k) {
+    return pbf_app_part && k->w[0] == pbf_app_lo && k->w[1] == pbf_app_hi && k->w[2] == pbf_app_h0 &&
+           k->w[3] == pbf_app_name && k->w[4] == (uint32_t)pbf_app_part;
 }
 
 const void *pbf_own_tab;
@@ -331,6 +373,32 @@ int mt_os_enet_blocked(int16_t refnum) {
     return pbf_dev_head != NULL;                 /* any request at the head blocks */
 }
 
+int pbf_enet_status_calls, pbf_enet_ctl_calls;
+int16_t pbf_enet_status_result, pbf_enet_ctl_result;
+int16_t pbf_enet_status_cs, pbf_enet_status_size, pbf_enet_status_ref, pbf_enet_ctl_cs, pbf_enet_ctl_ref;
+uint8_t pbf_enet_status_data[256];
+int pbf_enet_status_len;
+uint8_t pbf_enet_ctl_bytes[PBF_ENET_CTL_REC];
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size) {
+    pbf_enet_status_calls++;
+    pbf_enet_status_ref = refnum;
+    pbf_enet_status_cs = cs;
+    pbf_enet_status_size = size;
+    if (pbf_enet_status_result == 0 && buf) {
+        int n = pbf_enet_status_len < size ? pbf_enet_status_len : size;
+        if (n > 0) memcpy(buf, pbf_enet_status_data, (size_t)n);
+    }
+    return pbf_enet_status_result;
+}
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr) {
+    pbf_enet_ctl_calls++;
+    pbf_enet_ctl_ref = refnum;
+    pbf_enet_ctl_cs = cs;
+    if (ptr) memcpy(pbf_enet_ctl_bytes, ptr, sizeof pbf_enet_ctl_bytes);
+    else pbf_bad++;
+    return pbf_enet_ctl_result;
+}
+
 int pbf_reattach_calls;
 int pbf_reattach_result;                 /* what the fake detach/attach returns */
 int mt_enet_reattach_io(MtEnet *e) {
@@ -338,6 +406,69 @@ int mt_enet_reattach_io(MtEnet *e) {
     e->opened = pbf_reattach_result == 0;
     return pbf_reattach_result;
 }
+
+#ifdef MT_TUNE
+int pbf_enet_io_calls;
+int16_t pbf_enet_io_result;
+void (*pbf_enet_io_hook)(MtEnet *e, MtEnetTx *s);
+int pbf_pump_primes;
+int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s) {
+    pbf_enet_io_calls++;
+    s->pb.ioResult = 1;                          /* the Device Manager: in flight from here */
+    if (pbf_enet_io_hook) pbf_enet_io_hook(e, s);
+    if (pbf_enet_io_result < 0) s->pb.ioResult = pbf_enet_io_result;
+    return pbf_enet_io_result;
+}
+void mt_enet_pump_prime(MtEnetPump *p) { (void)p; pbf_pump_primes++; }
+int pbf_enet_write_calls;
+int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len) {   /* mt_enet.c's steps, Toolbox call faked */
+    MtEnet *e = (MtEnet *)ctx;
+    MtEnetTx *s;
+    uint16_t n;
+    int16_t r;
+    pbf_enet_write_calls++;
+    if (!e->opened) { e->tx_drop_closed++; return 1; }
+    if (!mt_enet_len_ok(len)) { e->tx_drop_len++; return 1; }
+    s = mt_enet_tx_claim(e);
+    if (!s) { e->tx_drop_busy++; return 1; }
+    memcpy(s->frame, frame, len);
+    n = mt_enet_pad(s->frame, len);
+    if (n != len) e->tx_pad++;
+    memset(&s->pb, 0, sizeof s->pb);
+    s->wds[0].len = n;
+    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
+    s->wds[1].len = 0;
+    s->wds[1].ptr = 0;
+    s->pb.csCode = 249;
+    s->pb.ioRefNum = e->refnum;
+    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+#ifdef MT_TRACE
+    mt_trace_ewrite(s, n, 0);                    /* as mt_enet.c */
+#endif
+    r = mt_enet_io_write(e, s);
+    if (r < 0) {
+        s->pb.ioResult = r;
+        e->last_err = r;
+        e->tx_err++;
+        return 1;
+    }
+    mt_enet_tx_mark_started(e, s);
+    e->tx_ok++;
+    return 0;
+}
+#endif
+
+#ifdef MT_TRACE
+uint32_t pbf_trace_us, pbf_trace_step;
+int pbf_trace_mask_seen;
+uint32_t mt_os_trace_us(void) {
+    uint32_t t = pbf_trace_us;
+    pbf_trace_mask_seen = pbf_mask;
+    pbf_trace_us += pbf_trace_step;
+    return t;
+}
+uint32_t mt_os_trace_ew_compl(void) { return PBF_TRACE_EWCOMPL; }
+#endif
 
 /* ---- harness ---- */
 

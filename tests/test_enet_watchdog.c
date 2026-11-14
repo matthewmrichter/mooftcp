@@ -21,9 +21,60 @@ static MtEnetTx *start(void)
     if (!s) return NULL;
     memset(&s->pb, 0, sizeof s->pb);
     s->pb.ioResult = 1;
-    s->started = 1;
-    if (!E.tx_started++) E.wd_fresh = 1;
+    mt_enet_tx_mark_started(&E, s);
     return s;
+}
+
+static unsigned started_slots(void)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) n += E.tx[i].started != 0;
+    return n;
+}
+
+/* 1.1d3: tx_live counts the started slots (quarantined ones too), so the scan stops after the last one. It follows
+ * every start, every reap (by the scan or by a claim) and a quarantine, and the scan still finds a slot started last
+ * in the highest place. */
+static void started_slots_counted_for_the_scan(void)
+{
+    MtEnetTx *s[MT_ENET_TXSLOTS];
+    unsigned i;
+    uint32_t t;
+    setup();
+    for (i = 0; i < 3; i++) s[i] = start();
+    T_EQ(E.tx_live, 3);
+    s[1]->pb.ioResult = 0;
+    mt_enet_watchdog(&E, 0);                               /* fresh scan: reaps s[1] */
+    T_EQ(E.tx_live, 2);
+    T_EQ(E.tx_live, started_slots());
+    s[0]->pb.ioResult = 0;
+    s[2]->pb.ioResult = -17;
+    for (i = 3; i < MT_ENET_TXSLOTS + 3; i++) T_CHECK(start() != NULL);   /* claims reap finished slots on the way */
+    T_EQ(E.tx_live, started_slots());
+    T_EQ(E.tx_err, 1);
+    T_EQ(E.tx_live, MT_ENET_TXSLOTS);
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) E.tx[i].pb.ioResult = 0;
+    mt_enet_watchdog(&E, 50);
+    mt_enet_watchdog(&E, 200);
+    T_EQ(E.tx_live, 0);
+    T_EQ(E.tx_started, 0);
+    setup();                                               /* a quarantined slot stays counted until it completes */
+    s[0] = start();
+    for (t = 0; t < 2 * MT_ENET_TX_STUCK_MS + 200; t += 50) mt_enet_watchdog(&E, t);
+    T_EQ(s[0]->wd_stage, 2);
+    T_EQ(E.tx_started, 0);
+    T_EQ(E.tx_live, 1);
+    E.tx_next = MT_ENET_TXSLOTS - 1;                       /* the next write lands in the last slot */
+    s[1] = start();
+    T_CHECK(s[1] == &E.tx[MT_ENET_TXSLOTS - 1]);
+    T_EQ(E.tx_live, 2);
+    mt_enet_watchdog(&E, t);                               /* fresh: the last slot is timed */
+    T_EQ(s[1]->wd_seen, 1);
+    s[0]->pb.ioResult = 0;
+    s[1]->pb.ioResult = 0;
+    mt_enet_watchdog(&E, t + 100);
+    T_EQ(E.tx_live, 0);
+    T_EQ(started_slots(), 0);
 }
 
 static void watchdog_idle_costs_nothing(void)
@@ -33,13 +84,15 @@ static void watchdog_idle_costs_nothing(void)
     for (t = 0; t < 10000; t += 7) mt_enet_watchdog(&E, t);
     T_EQ(pbf_kill_calls, 0);
     T_EQ(E.tx_stuck, 0);
-    T_EQ(mt_enet_wd_deadline(&E, 12345), 12345);          /* no cap while nothing is started */
-    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu), 0xFFFFFFFFu);
+    T_EQ(mt_enet_wd_deadline(&E, 12345, 0), 12345);          /* no cap while nothing is started */
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), 0xFFFFFFFFu);
     /* a finished write is reaped by the next scan, after which the watchdog idles again */
     {
         MtEnetTx *s = start();
         T_CHECK(s);
-        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu), MT_ENET_WD_SCAN_MS);
+        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), 0);    /* not scanned yet: due */
+        mt_enet_watchdog(&E, 0);
+        T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0), MT_ENET_WD_SCAN_MS);
         s->pb.ioResult = 0;
         mt_enet_watchdog(&E, 100);
         T_EQ(E.tx_started, 0);
@@ -122,7 +175,7 @@ static void watchdog_reattach_after_second_timeout(void)
     T_EQ(E.reattach_req, 1);
     T_EQ(mt_enet_tx_quarantined(&E), 1);
     T_EQ(E.tx_started, 0);                                 /* no longer watched: no more 100 ms ticks */
-    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu), 0xFFFFFFFFu);
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, t), 0xFFFFFFFFu);
     T_EQ(pbf_reattach_calls, 0);                           /* nothing at interrupt time */
     mt_enet_service(&E, 4500);                             /* first task-time entry: kill only */
     T_EQ(pbf_kill_calls, 1);
@@ -340,7 +393,7 @@ static void open_keeps_in_flight_slots(void)
         again = mt_enet_tx_claim(&E);
         T_CHECK(again && again != s);
         again->pb.ioResult = 1;
-        again->started = 1;
+        mt_enet_tx_mark_started(&E, again);
     }
     T_CHECK(mt_enet_tx_claim(&E) == NULL);                 /* s is never handed out */
     mt_enet_init(&E);
@@ -405,6 +458,45 @@ static void watchdog_scan_period(void)
     T_EQ(E.tx_started, 0);
 }
 
+/* 1.1d1 F5: while a write is watched the deadline is the next scan itself (wd_next), not 100 ms from every query:
+ * the timer is re-armed only when a deadline moves earlier, and a cap that moved with each query would. */
+static void watchdog_deadline_is_the_next_scan(void)
+{
+    setup();
+    T_CHECK(start() != NULL);
+    mt_enet_watchdog(&E, 1000);                             /* the first scan: the next is at 1100 */
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 1000), MT_ENET_WD_SCAN_MS);
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 1040), MT_ENET_WD_SCAN_MS - 40);   /* not pushed out */
+    T_EQ(mt_enet_wd_deadline(&E, 30, 1040), 30);            /* an earlier deadline wins */
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 1100), 0);    /* due */
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 1150), 0);    /* overdue: never negative */
+    E.wd_next = 0xFFFFFFF0u;                                /* across the 2^32 wrap */
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0xFFFFFFE0u), 16);
+    T_EQ(mt_enet_wd_deadline(&E, 0xFFFFFFFFu, 0x10u), 0);
+}
+
+/* 1.1d1 F4: the EWrite PB a transmit slot gets (mt_enet_write, the perf builds' pump): every byte of the old PB
+ * cleared (the driver keeps state in it: qLink, ioResult, ...), then csCode, refnum and the WDS of n bytes. */
+static void tx_prep_clears_the_whole_pb(void)
+{
+    MtEnetTx *s;
+    MtEnetPB want;
+    setup();
+    s = &E.tx[3];
+    memset(s, 0xA5, sizeof *s);
+    mt_enet_tx_prep(&E, s, 60);
+    memset(&want, 0, sizeof want);
+    want.csCode = MT_ENET_CS_WRITE;
+    want.ioRefNum = -48;
+    want.ePointer = (uint32_t)(uintptr_t)s->wds;
+    T_MEMEQ(&s->pb, &want, sizeof want);
+    T_EQ(s->wds[0].len, 60);
+    T_EQ(s->wds[0].ptr, (uint32_t)(uintptr_t)s->frame);
+    T_EQ(s->wds[1].len, 0);
+    T_EQ(s->wds[1].ptr, 0);
+    T_EQ(s->frame[0], 0xA5);                 /* the frame is the caller's: untouched */
+}
+
 T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_kills_after_timeout, watchdog_kill_not_repeated_when_service_is_late,
        watchdog_reattach_after_second_timeout, watchdog_reattach_cancelled_when_the_kill_freed_the_slot,
@@ -413,5 +505,6 @@ T_MAIN(watchdog_idle_costs_nothing, watchdog_ignores_slow_but_completing_write,
        watchdog_closed_link_is_repaired_even_if_the_slot_completed,
        watchdog_blocked_on_a_closed_link_never_gives_up,
        watchdog_no_reattach_request_when_link_is_closed, watchdog_quarantine_keeps_started_count_exact,
+       started_slots_counted_for_the_scan,
        open_keeps_in_flight_slots, watchdog_never_reuses_in_flight_slot, watchdog_wrap_safe_time,
-       watchdog_scan_period)
+       watchdog_scan_period, tx_prep_clears_the_whole_pb, watchdog_deadline_is_the_next_scan)

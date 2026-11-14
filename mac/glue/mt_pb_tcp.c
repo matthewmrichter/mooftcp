@@ -20,6 +20,9 @@
  *    merged request. */
 #include <string.h>
 #include "mt_pb.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 #define LIVE  1
 #define DYING 2
@@ -31,28 +34,23 @@ static int same(const MtStream *s, uint8_t gen, uint16_t conn) {
     return s->used != 0 && s->gen == gen && s->conn == conn;
 }
 
+typedef char mt_tcp_slot_ok[MT_PB_SLOT_OK(MT_PB_MAX_TCP, sizeof(MtStream)) ? 1 : -1];
+
 static MtStream *stream_of(MtDrv *d, StreamPtr h) {
     MacPtr32 base = mt_os_addr(&d->tcp[0]);
     uint32_t off = h - base, i;
     if (off >= (uint32_t)d->ntcp * (uint32_t)sizeof(MtStream)) return NULL;
-    i = off / (uint32_t)sizeof(MtStream);
-    if (d->tcp[i].used != LIVE || d->tcp[i].handle != h) return NULL;   /* stale or misaligned */
+    i = mt_pb_slot(off, MT_PB_SLOT_M(sizeof(MtStream)));                /* = off / sizeof(MtStream), see mt_pb.h */
+    if (i >= d->ntcp || d->tcp[i].used != LIVE || d->tcp[i].handle != h) return NULL;   /* stale or misaligned */
     return &d->tcp[i];
 }
 
 static void info(const MtStream *s, mt_tcp_info *in) { mt_tcp_get_info(s->t, in); }
 
-static mt_tcp_state state_of(const MtStream *s) {
-    mt_tcp_info in;
-    info(s, &in);
-    return in.state;
-}
+/* One field each (1.1d1): these run on every call and callback, mt_tcp_get_info fills the whole record. */
+static mt_tcp_state state_of(const MtStream *s) { return mt_tcp_get_state(s->t); }
 
-static uint32_t unread(const MtStream *s) {
-    mt_tcp_info in;
-    info(s, &in);
-    return in.rcv_avail - s->lent;
-}
+static uint32_t unread(const MtStream *s) { return mt_tcp_rcv_avail(s->t) - s->lent; }
 
 static void complete(MtStream *s, MtAnyPb *pb, int16_t err) { mt_pb_call_complete(s->d, pb, err); }
 
@@ -82,9 +80,16 @@ static MtAnyPb *sq_pop(MtStream *s) {
 
 static MtAnyPb *rq_take(MtStream *s, uint8_t k) {
     MtAnyPb *pb = s->rq[k].pb;
+    if (s->rq[k].timed) mt_pb_dl_stale(s->d);             /* F7: the cached glue deadline stays exact */
     for (; k + 1 < s->rq_n; k++) s->rq[k] = s->rq[k + 1];
     s->rq_n--;
     return pb;
+}
+
+/* The passive open's command timeout is disarmed (F7: the cached glue deadline stays exact). */
+static void open_untime(MtStream *s) {
+    if (s->open_timed) mt_pb_dl_stale(s->d);
+    s->open_timed = 0;
 }
 
 static void ulp_apply(MtStream *s, int8_t vflags, int8_t value, int8_t action) {
@@ -108,7 +113,7 @@ static int fail_all(MtStream *s, int16_t open_err, int16_t close_err, uint16_t r
         int16_t e = s->open_err ? s->open_err : open_err;
         pb = s->open_pb;
         s->open_pb = NULL;
-        s->open_timed = 0;
+        open_untime(s);
         s->open_err = 0;
         complete(s, pb, e);
         if (!same(s, g, c)) return 0;
@@ -489,6 +494,7 @@ static int16_t do_rcv(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     s->rq[s->rq_n].pb = pb;                                             /* matrix 502: FIFO */
     s->rq[s->rq_n].timed = (uint8_t)(tmo != 0);                         /* 0 = forever (501b) */
     s->rq[s->rq_n].dl = d->now + MS(tmo);
+    if (tmo) mt_pb_dl_stale(d);                                         /* F7: a timeout armed */
     s->rq_n++;
     if (s->rq_n == 1 && unread(s) && can_serve(s, pb)) d->rcv_kick = 1;   /* too deep to serve now */
     pb->hdr.ioResult = inProgress;
@@ -519,7 +525,7 @@ static void on_established(MtStream *s) {
     s->d->n_opened++;                                    /* TCPStats.tcpConnOpened */
     if (!pb) return;
     s->open_pb = NULL;
-    s->open_timed = 0;
+    open_untime(s);
     s->open_err = 0;
     info(s, &in);
     pb->tcp.csParam.open.remoteHost = in.rip;            /* matrix 300 */
@@ -572,7 +578,15 @@ static void tcp_cb(mt_tcp *t, mt_tcp_event ev, uint32_t arg, void *user) {
     if (s->used != LIVE || s->t != t) return;            /* released: nothing reaches the app */
     switch (ev) {
     case MT_TCP_EV_ESTABLISHED: on_established(s); break;
-    case MT_TCP_EV_DATA:        on_data(s, arg); break;
+    case MT_TCP_EV_DATA:
+#ifdef MT_TRACE
+        {                                                 /* perf builds: payload delivered inside mt_input */
+            mt_tcp_info in;
+            info(s, &in);
+            mt_trace_ev(MT_TRACE_DATA, 0, (uint16_t)(s - s->d->tcp), in.rcv_nxt - arg, arg);
+        }
+#endif
+        on_data(s, arg); break;
     case MT_TCP_EV_URGENT:      asr(s, mt_pb_event_code(ev), 0, 0); break;
     case MT_TCP_EV_CLOSING:     s->fin = 1; serve_reads(s, NULL); break;
     case MT_TCP_EV_ULP_TIMEOUT: asr(s, mt_pb_event_code(ev), 0, 0); break;
@@ -608,6 +622,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     d->next_slot = (uint8_t)((i + 1u) % d->ntcp);
     s->d = d;
     s->used = LIVE;
+    if (i >= d->tcp_hi) d->tcp_hi = (uint8_t)(i + 1u);
     s->born = d->own_ser;                                        /* owner serial at creation (mt_pb_in_gone) */
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->tcp.csParam.create.notifyProc;                  /* 0 is fine (matrix 202b) */
@@ -640,6 +655,7 @@ static int16_t do_open(MtDrv *d, MtStream *s, MtAnyPb *pb, int passive) {
         if (tmo) {                                             /* matrix 700/702: commandTimeoutValue */
             s->open_timed = 1;
             s->open_dl = d->now + MS(tmo);
+            mt_pb_dl_stale(d);
         }
     } else {                                                   /* commandTimeoutValue ignored (302c) */
         r = mt_tcp_open(s->t, rip, rport, lport, d->now);
@@ -704,17 +720,19 @@ static int16_t do_abort(MtDrv *d, MtStream *s) {
 
 void mt_pb_tcp_free(MtDrv *d, MtStream *s) {
     uint8_t i;
-    (void)d;
     if (s->t) mt_tcp_release(s->t);       /* no callbacks; the core forgets our requests */
     s->t = NULL;
     for (i = 0; i < MT_SENDQ_MAX; i++) s->req[i].busy = 0;
     s->used = 0;
+    mt_pb_dl_stale(d);                    /* F7: its timeouts (if any) leave the scan */
+    mt_pb_hi_lower(d);
 }
 
 static int16_t do_release(MtDrv *d, MtStream *s, MtAnyPb *pb) {
     uint16_t reason = state_of(s) != MT_TCP_CLOSED ? TCPULPAbort : 0;   /* idle: no ASR (603/605) */
     uint8_t idx = (uint8_t)(s - d->tcp);
     s->used = DYING;                      /* the handle is invalid from here on */
+    mt_pb_dl_stale(d);                    /* F7: its timeouts (if any) leave the scan */
     if (d->depth == 0 && !d->in_core) {   /* core first: it stops reading the app's buffers */
         mt_tcp_release(s->t);
         s->t = NULL;
@@ -798,7 +816,7 @@ static int16_t do_global_info(MtDrv *d, MtAnyPb *pb) {
     {
         uint8_t open = mt_tcp_count_open(d->s), n = 0, pass;
         for (pass = 0; pass < 2; pass++)
-            for (i = 0; i < d->ntcp && (pass || n < open); i++) {   /* pass 0 stops at the last connection */
+            for (i = 0; i < d->tcp_hi && (pass || n < open); i++) {   /* pass 0 stops at the last connection */
                 const MtStream *s = &d->tcp[i];
                 if (s->used != LIVE) continue;
                 if ((state_of(s) > MT_TCP_LISTEN) == (pass == 0)) d->cdb[n++] = s->handle;
@@ -840,10 +858,10 @@ void mt_pb_tcp_after_core(MtDrv *d) {
     uint8_t i;
     if (d->rcv_kick && d->depth < MT_PB_INLINE_MAX) {      /* reads queued by the nesting limit */
         d->rcv_kick = 0;
-        for (i = 0; i < d->ntcp; i++)
+        for (i = 0; i < d->tcp_hi; i++)
             if (d->tcp[i].used == LIVE && d->tcp[i].rq_n) (void)serve_reads(&d->tcp[i], NULL);
     }
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->close_pb && !s->close_deferred) {                 /* our FIN ACKed (matrix 600) */
@@ -864,12 +882,12 @@ static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 
 void mt_pb_tcp_timers(MtDrv *d) {
     uint8_t i, k;
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->open_timed && due(s->open_dl, d->now)) {          /* passive open: matrix 700 */
             mt_tcp_state st = state_of(s);
-            s->open_timed = 0;
+            open_untime(s);
             s->open_err = commandTimeout;
             if (s->open_pb) open_addrs(s, s->open_pb);
             mt_tcp_abort(s->t, d->now);       /* SYN_RCVD: TCPTerminate does the rest */
@@ -891,8 +909,7 @@ void mt_pb_tcp_timers(MtDrv *d) {
 uint32_t mt_pb_tcp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
-    if (d->rcv_kick) return 0;                             /* serve the queued reads at once */
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         const MtStream *s = &d->tcp[i];
         if (s->used != LIVE) continue;
         if (s->open_timed) {

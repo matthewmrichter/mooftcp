@@ -45,6 +45,7 @@ extern int pbf_bad;               /* misuse seen by the fake (bad pointer, unkno
 extern int pbf_irq, pbf_irq_max, pbf_irq_calls;
 extern int pbf_in_int;            /* what mt_os_in_interrupt reports */
 extern int pbf_mask, pbf_mask_max;      /* mt_os_mask depth (0 outside) and its maximum */
+extern int pbf_mask_calls;              /* mt_os_mask calls (each one an interrupt-mask section on the Mac) */
 extern MacPtr32 pbf_app_lo, pbf_app_hi; /* mt_os_app_mem range, [lo, hi) (default: all; classic mode) */
 extern void (*pbf_leave_hook)(void);   /* run at every outermost irq restore (gate leave) */
 extern struct MtGate *pbf_gate;           /* set: irq_save/restore move its depth (the Mac gate) */
@@ -85,6 +86,37 @@ extern const void *pbf_dev_head;         /* head request of .ENET0's queue, for 
 extern int pbf_blocked_calls;
 extern int pbf_reattach_calls;           /* the fake mt_enet_reattach_io */
 extern int pbf_reattach_result;
+/* The Ethernet driver's synchronous Status / Control (mt_os_enet_status / mt_os_enet_control, used at the open for
+ * MoofPort's tune calls). Status: counts, records csCode and size, and on result 0 copies pbf_enet_status_data
+ * (pbf_enet_status_len bytes, at most the caller's size) into the buffer; returns pbf_enet_status_result. Control:
+ * counts, records csCode and the first PBF_ENET_CTL_REC bytes at ptr; returns pbf_enet_ctl_result. */
+#define PBF_ENET_CTL_REC 24
+extern int pbf_enet_status_calls, pbf_enet_ctl_calls;
+extern int16_t pbf_enet_status_result, pbf_enet_ctl_result;
+extern int16_t pbf_enet_status_cs, pbf_enet_status_size, pbf_enet_status_ref, pbf_enet_ctl_cs, pbf_enet_ctl_ref;
+extern uint8_t pbf_enet_status_data[256];
+extern int pbf_enet_status_len;
+extern uint8_t pbf_enet_ctl_bytes[PBF_ENET_CTL_REC];
+#ifdef MT_TUNE
+#include "mt_enet.h"
+/* The transmit pump's Toolbox side (mt_enet.h, perf builds): mt_enet_io_write counts, runs the hook (the driver:
+ * it may deliver frames from inside, or change pbf_enet_io_result), then returns pbf_enet_io_result; 0 leaves the
+ * PB in flight (ioResult 1) until the test completes it. mt_enet_pump_prime only counts (the test runs the task). */
+extern int pbf_enet_io_calls;
+extern int16_t pbf_enet_io_result;
+extern void (*pbf_enet_io_hook)(MtEnet *e, MtEnetTx *s);
+extern int pbf_pump_primes;
+/* mt_enet_write (mt_enet.c on the Mac, the pump's lever-off path): the fake does what the Mac function does (claim,
+ * copy, pad, EWrite through mt_enet_io_write, count) and counts its calls. */
+extern int pbf_enet_write_calls;
+#endif
+#ifdef MT_TRACE
+/* The trace clock (mt_os_trace_us): returns pbf_trace_us, then advances it by pbf_trace_step (reset: 0 and 1);
+ * pbf_trace_mask_seen = mt_os_mask's depth at the last read. mt_os_trace_ew_compl returns PBF_TRACE_EWCOMPL. */
+extern uint32_t pbf_trace_us, pbf_trace_step;
+extern int pbf_trace_mask_seen;
+#define PBF_TRACE_EWCOMPL 0x00EE0000u
+#endif
 
 void     pbf_reset(void);         /* frees the address space, routines, log, clock */
 void    *pbf_alloc(uint32_t n);   /* zeroed, 8-aligned; NULL when full */

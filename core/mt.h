@@ -339,6 +339,10 @@ typedef struct { mt_tcp_state state; mt_ip4 lip, rip; uint16_t lport, rport;
   uint32_t unacked, send_queued, rcv_avail, snd_wnd, rcv_wnd, srtt_ms, rto_ms;
   uint32_t snd_una, snd_nxt, rcv_nxt, cwnd; uint16_t mss; } mt_tcp_info;
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *info);
+/* One field of mt_tcp_get_info each, for callers that need only that one (the PB glue checks the state and the
+ * unread count on every call): mt_tcp_get_state(t) == info.state, mt_tcp_rcv_avail(t) == info.rcv_avail. */
+mt_tcp_state mt_tcp_get_state(const mt_tcp *t);
+uint32_t     mt_tcp_rcv_avail(const mt_tcp *t);
 
 /* Data transfer. Latency rules: a send with nothing unacked leaves before mt_tcp_send_segs
  * returns (a loopback send is queued for the next mt_tick); in-order data is readable (and DATA
@@ -375,8 +379,31 @@ int      mt_tcp_urgent(const mt_tcp *t, uint32_t *bytes_to_mark);
  * inside mt_tick, and each hop of a self connection costs one tick. A full FIFO is a refusal
  * (ip_lo_drops; TCP stalls and retries as for a refused link.tx). 127/8 traffic carries the
  * 127 address as its source. Unconfigured stacks queue nothing. */
+
 void      mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now);
 void      mt_tick(mt_stack *s, uint32_t now);
-uint32_t  mt_next_deadline(const mt_stack *s, uint32_t now);   /* ms from now, or MT_NO_DEADLINE */
+/* ms from now, or MT_NO_DEADLINE. Not const since 1.1d2: the stack keeps its earliest deadline cached, and a query
+ * after a change that made the cache stale rebuilds it (one scan); otherwise the answer costs O(1). The rule above
+ * stands: re-query after every API call. */
+uint32_t  mt_next_deadline(mt_stack *s, uint32_t now);
+
+#ifdef MT_TUNE
+/* Perf builds only (compile option MT_TUNE; release builds do not have this): run-time TCP timing levers for
+ * unattended parameter sweeps. Defaults equal the release constants (RTO min/initial 1000 ms, delayed ACK
+ * 100 ms, link-busy retry 10 ms, 4 quick ACKs). */
+typedef struct {
+    uint16_t rto_min, rto_init;   /* ms: RTO floor; RTO before any RTT sample */
+    uint16_t delack_ms;           /* delayed-ACK time; 0 = ACK at once */
+    uint16_t stall_ms;            /* retry delay after the link refused a data/FIN segment */
+    uint8_t  quickack;            /* the first n data segments of a connection are ACKed at once; 255 = all */
+} mt_tune;
+/* Bounds: rto_min 100..5000, rto_init rto_min..10000, delack 0..500, stall 1..100, quickack 0..255.
+ * MT_ERR_INVAL (nothing changed) when out of range. Applies to timers armed from now on; running timers keep
+ * their deadline, and a connection's RTO already computed is not rewritten. The one exception: the SYN-RCVD
+ * give-up test (a half-open passive connection frees its listener once its RTO reaches 8 x rto_init, at most
+ * 60 s) reads the current rto_init, so a change reaches a half-open already in progress (perf only, bounded). */
+int       mt_tune_set(mt_stack *s, const mt_tune *t);
+void      mt_tune_get(const mt_stack *s, mt_tune *t);
+#endif
 
 #endif

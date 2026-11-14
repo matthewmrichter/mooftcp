@@ -46,6 +46,8 @@ is required for them. Steps 2-5 are only for the Snow emulator tests, which need
     cmake -S . -B build-lite -DMT_NO_DHCP=ON                                                   # Lite configuration
     scripts/build-mac.sh <Target>      # Retro68 in Docker -> build-mac/<dir>/<Target>.bin; MT_LITE=1 builds Lite in build-mac-lite/
                                        # Targets: MoofTCP, MoofInstaller, MoofDiag, HeapInfo, HeapInfoOpen, HeapInfoDNR, ApiProbe, KeyLat, ...
+    MT_TUNE=1 scripts/build-mac.sh <Target>   # perf build (build-mac-tune/): run-time TCP timing levers, Control 0x4D55, MoofTCPTune; never released
+                                       # (host: cmake -S . -B build-tune -DMT_TUNE=ON; scripts/tune-run.sh <preset> checks it in Snow)
     scripts/gate-check.sh              # every Mac target compiled -m68000 -O2 -Wall -Wextra -Werror (all configurations)
     scripts/check-all.sh [--snow]      # host ctest (full and Lite) + gate-check; --snow adds the emulator checks below
     scripts/release.sh [--force] <ver> # -> dist/MoofTCP-<ver>.{dsk,hqx,sit} (one installer with both builds); then

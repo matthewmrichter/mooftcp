@@ -458,6 +458,7 @@ static void dns_take(mt_stack *s, mt_dns_q *q, mt_dns_status st, dns_done *d) {
         q->out->status = st;
     }
     q->used = 0;
+    mt_dl_stale(s);                         /* F7: a query's deadline went (DNS changes are rare) */
 }
 static void dns_fire(const dns_done *d) {
     if (d->pcb) d->pcb(d->user, d->st, d->pbuf);
@@ -484,6 +485,7 @@ static int dns_rx(mt_stack *s, const mt_udp_dgram *g, dns_done *d) {
         q->id = dns_next_id(dn);
         q->tries = 0;
         q->t0 = s->now;
+        mt_dl_stale(s);
         if (dns_send(s, q, s->now) == MT_OK) return 0;
     }
     dns_take(s, q, st, d);
@@ -519,9 +521,11 @@ void mt_dns_timers(mt_stack *s, uint32_t now) {
             dns_fire(&d);
         } else if (el >= dns_sched[1] && q->tries < 2u) {
             q->tries = 2u;
+            mt_dl_stale(s);
             (void)dns_send(s, q, now);
         } else if (el >= dns_sched[0] && q->tries < 1u) {
             q->tries = 1u;
+            mt_dl_stale(s);
             (void)dns_send(s, q, now);
         }
     }
@@ -582,6 +586,7 @@ static int dns_launch(mt_stack *s, const char *name, size_t n, mt_dns_qtype qt, 
     q->id = dns_next_id(dn);
     q->dom = (uint8_t)(dl != 0);
     q->used = 1;
+    mt_dl_stale(s);
     if (dns_send(s, q, now) != MT_OK) { q->used = 0; return -MT_DNS_NO_SERVER; }
     if (qp) *qp = q;
     return MT_DNS_IN_PROGRESS;
@@ -646,8 +651,10 @@ void mt_dns_cancel(mt_stack *s, const void *target) {
     if (!target) return;
     for (i = 0; i < MT_DNS_SLOTS; i++) {
         mt_dns_q *q = &s->dns->q[i];
-        if (q->used && ((const void *)q->out == target || (const void *)q->pbuf == target))
+        if (q->used && ((const void *)q->out == target || (const void *)q->pbuf == target)) {
             q->used = 0;
+            mt_dl_stale(s);
+        }
     }
 }
 

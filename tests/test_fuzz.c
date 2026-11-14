@@ -3,6 +3,18 @@
 #include "mt_int.h"
 #include "mt_util.h"
 #include "pbfake.h"
+#include "mt_timer.h"
+#include "mt_gate.h"
+#include "mt_pb_entry.h"
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
+#ifdef MT_TUNE
+#include "mt_tune_abi.h"
+#define FZ_STALL_MAX 100u      /* the PB fuzzer moves the stall lever (largest allowed value) */
+#else
+#define FZ_STALL_MAX MT_TCP_STALL_MS
+#endif
 
 /* Stateful system fuzzer. One stack, one simulated peer that crafts frames from the stack's live
  * state (TCB sequence numbers, pending DNS ids, ...) and from raw mutations of those frames,
@@ -175,6 +187,13 @@ static int tcb_of_frame(const uint8_t *f, uint16_t len) {
     return -1;
 }
 
+#ifdef MT_TUNE
+/* PB fuzzer, perf builds: the link behind link.tx is the driver's transmit pump (mt_enet_tx_write) over the fake
+ * EWrite; 1 = the pump refused (closed, no free slot, EWrite refused at once on the direct path). */
+static int g_fe_live;
+static int fz_enet_tx(const uint8_t *f, uint16_t len);
+#endif
+
 static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
     int refuse, k;
     (void)ctx;
@@ -191,6 +210,9 @@ static int link_tx(void *ctx, const uint8_t *f, uint16_t len) {
         refuse = rn(50) == 0;                               /* 2% link errors */
         if (!refuse && rn(300) == 0) g.refuse_burst = (int)rn(8);
     }
+#ifdef MT_TUNE
+    if (!refuse && g_fe_live) refuse = fz_enet_tx(f, len);  /* the pump's own refusals count the same */
+#endif
     if (len >= 54 && mt_rd16(f + 12) == 0x0800 && f[23] == 6) {
         const uint8_t *th = f + 14 + ((f[14] & 15u) << 2);
         uint32_t seq = mt_rd32(th + 4);
@@ -564,10 +586,20 @@ static int arp_unresolved(mt_ip4 rip) {
     return 1;
 }
 
+/* 1.1d1 F2: the high-water marks are exact (one past the highest used slot) after every step. */
+static void check_tcp_hi(const mt_stack *s) {
+    uint16_t i, hi = 0;
+    for (i = 0; i < s->lim.max_tcp; i++) if (s->tcp[i].used) hi = (uint16_t)(i + 1u);
+    if (s->tcp_hi != hi) bad("core tcp_hi is not one past the highest used TCB");
+}
+
 static void check_invariants(void) {
     const uint8_t rp = (1u << MT_TT_RTO) | (1u << MT_TT_PERSIST);
     uint16_t i;
     int k, n;
+    check_tcp_hi(g.s);
+    /* 1.1d2 F7: the cached deadline equals the full scan after every step (a valid cache is compared as is) */
+    if (mt_next_deadline(g.s, g.now) != mt_next_deadline_scan(g.s, g.now)) bad("cached core deadline differs from the full scan");
     for (i = 0; i < NT; i++) {                              /* every pending record is queued */
         for (k = 0, n = 0; k < RQ_PER; k++) n += g_rq[i][k].busy;
         if (g.t[i] && g.t[i]->used ? n != g.t[i]->sq_n : n != 0)
@@ -577,6 +609,12 @@ static void check_invariants(void) {
         const mt_tcp *t = &g.s->tcp[i];
         if (!t->used) continue;
         if (t->rcvq.used > t->rcvq.size) bad("ring overflow");
+        {
+            mt_tcp_info in;
+            mt_tcp_get_info(t, &in);
+            if (mt_tcp_get_state(t) != in.state || mt_tcp_rcv_avail(t) != in.rcv_avail)
+                bad("one-field getters differ from mt_tcp_get_info");
+        }
         check_sendq(t);
         if (t->sq_n && t->state != MT_TCP_ESTABLISHED && t->state != MT_TCP_CLOSE_WAIT &&
             t->state != MT_TCP_FIN_WAIT_1 && t->state != MT_TCP_CLOSING &&
@@ -596,7 +634,7 @@ static void check_invariants(void) {
         if (t->flags2 & MT_T2_STALL) {
             g.stalls_seen++;
             if (!g.s->stall_on) bad("stalled TCB without the stall timer");
-            else if (mt_next_deadline(g.s, g.now) > MT_TCP_STALL_MS) bad("stall retry later than 10 ms");
+            else if (mt_next_deadline(g.s, g.now) > FZ_STALL_MAX) bad("stall retry later than the stall lever (10 ms; 100 under MT_TUNE)");
         }
         if (i < NT && g.rf_live[i]) {
             if (t->iss != g.rf_iss[i] || t->state < MT_TCP_ESTABLISHED || t->state == MT_TCP_TIME_WAIT) {
@@ -899,6 +937,9 @@ static void fuzz_setup(uint32_t seed) {
     g.rng = seed * 2654435761u + 1u;
     link.ctx = NULL;
     link.tx = link_tx;
+#ifdef MT_TUNE
+    g_fe_live = 0;                              /* the core fuzzer: link_tx alone */
+#endif
     mt_limits_default(&lim);
     g.s = mt_stack_init(g_arena, sizeof g_arena, &lim, &link, rnd());
     T_CHECK(g.s != NULL);
@@ -1098,6 +1139,130 @@ static struct {
     long ok_send, term_send, ok_rcv, ok_nocopy, ret_ok, tmo, asr_data, asr_term, asr_closing,
          defer_core, defer_call, imm_err, reenter, open_ok, merged, rx_bytes, lo_rx;
 } P;
+
+#ifdef MT_TUNE
+/* The transmit pump (mt_enet.h, lever txpump) between the core and the wire. The fuzzer is the driver (pbfake's
+ * mt_enet_io_write hook: fz_wire) and the Time Manager (mt_enet_pump_run from pb_step, and from inside link.tx as
+ * a task interrupting the core's output). Checked: every frame link.tx accepted reaches the wire exactly once and
+ * in acceptance order (a shadow FIFO of length + hash); queued frames always have a primed, idle pump; tx_started
+ * counts the started slots; a frame the driver delivers inside the pump's EWrite (nested input) is answered
+ * through the same FIFO. Act_tune switches the lever. */
+static MtEnet FE;
+static MtEnetPump FP;
+#define SH_N 64
+static struct {
+    uint32_t hash[SH_N];
+    uint16_t len[SH_N];
+    uint32_t head, tail;                        /* pushed at acceptance, popped at the EWrite */
+    uint8_t issued[MT_ENET_TXSLOTS];            /* the slot's EWrite is with the "driver" */
+    int top;                                    /* the pump runs from pb_step: frames may be delivered inside */
+    long n_direct, n_pumped, n_nested_in, n_io_refused, n_busy, n_runs_in_tx, n_closed, n_held_runs;
+} FZ;
+
+static uint32_t fz_hash(const uint8_t *f, uint16_t len) {
+    uint32_t h = 2166136261u;
+    uint16_t i;
+    for (i = 0; i < len; i++) h = (h ^ f[i]) * 16777619u;
+    return h;
+}
+
+static void fz_wire(MtEnet *e, MtEnetTx *s) {
+    static uint8_t nf[1514];
+    uint32_t k;
+    (void)e;
+    pbf_enet_io_result = rn(40) == 0 ? -17 : 0;  /* the driver refuses at once now and then */
+    if (FZ.head == FZ.tail) { bad("pump: EWrite of a frame link.tx never accepted"); return; }
+    k = FZ.tail++ % SH_N;
+    if (s->wds[0].len != mt_enet_padded_len(FZ.len[k]) || fz_hash(s->frame, FZ.len[k]) != FZ.hash[k])
+        bad("pump: frame on the wire out of order or changed");
+    if (pbf_enet_io_result == 0) FZ.issued[s - FE.tx] = 1;
+    else FZ.n_io_refused++;
+    if (FP.running) FZ.n_pumped++; else FZ.n_direct++;
+    if (FZ.top && rn(4) == 0 && !P.d->in_core) {   /* DaynaPORT: a frame delivered inside the pump's EWrite */
+        uint16_t n = gen_frame(nf);
+        FZ.n_nested_in++;
+        mt_pb_input(P.d, nf, n);
+    }
+}
+
+/* The pump's task runs (top: from pb_step, where the driver may deliver frames inside its EWrite). A closed link
+ * fails every queued slot without an EWrite (and refuses new frames meanwhile): those leave the shadow unwritten. */
+static void fz_run(int top) {
+    if (!FE.opened && !FP.hold) FZ.tail += (uint32_t)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
+    FZ.top = top;
+    mt_enet_pump_run(&FE, &FP);
+    FZ.top = 0;
+}
+
+static int fz_enet_tx(const uint8_t *f, uint16_t len) {
+    uint32_t at = FZ.head;
+    int r;
+    if (FZ.head - FZ.tail >= SH_N) { bad("pump: shadow FIFO overflow"); return 1; }
+    FZ.hash[at % SH_N] = fz_hash(f, len);
+    FZ.len[at % SH_N] = len;
+    FZ.head++;
+    r = mt_enet_tx_write(&FE, &FP, f, len);
+    if (r && FZ.tail <= at) {                   /* refused before any EWrite: never on the wire */
+        if (FZ.head != at + 1) bad("pump: shadow FIFO grew during link.tx");
+        FZ.head = at;
+        FZ.n_busy++;
+    }
+    if (!r && FP.armed && rn(8) == 0) {         /* the pump's task interrupts the core's output here */
+        FZ.n_runs_in_tx++;
+        fz_run(0);
+    }
+    return r;
+}
+
+static void fz_pump_setup(void) {
+    memset(&FZ, 0, sizeof FZ);
+    mt_enet_init(&FE);
+    memset(&FP, 0, sizeof FP);
+    FE.refnum = -48;
+    FE.opened = 1;
+    FP.on = (uint8_t)rn(2);
+    pbf_enet_io_hook = fz_wire;
+    P.d->txpump = &FP.on;
+    g_fe_live = 1;
+}
+
+static void fz_pump_step(void) {
+    unsigned i;
+    for (i = 0; i < MT_ENET_TXSLOTS; i++)       /* the driver completes issued writes */
+        if (FZ.issued[i] && rn(2)) {
+            FE.tx[i].pb.ioResult = rn(30) ? 0 : -1;
+            FZ.issued[i] = 0;
+#ifdef MT_TRACE
+            if (FE.tx[i].pb.ioCompletion != PBF_TRACE_EWCOMPL) bad("trace: an EWrite without the trace's completion routine");
+            mt_trace_ew_done(&FE.tx[i].pb);     /* what IODone calls */
+#endif
+        }
+    if (rn(400) == 0) { FE.opened = (uint8_t)!FE.opened; FZ.n_closed++; }   /* reattach window / failed open */
+    if (!FE.opened && rn(8) == 0) FE.opened = 1;
+    if (rn(60) == 0) {                          /* watchdog KillIO / reattach: the task fires during the hold */
+        mt_enet_pump_hold(&FP, 1);
+        if (rn(2)) { FZ.n_held_runs++; fz_run(0); }
+        mt_enet_pump_hold(&FP, 0);
+    }
+    if (FP.armed && rn(3) == 0) fz_run(1);      /* the pump's Time Manager task */
+}
+
+static void fz_pump_invariants(void) {
+    unsigned i, nq, st = 0;
+    uint8_t t;
+    if (FP.running) bad("pump: running flag left set");
+    nq = (unsigned)((FP.head - FP.tail) & (MT_ENET_PUMP_Q - 1u));
+    if (nq && !FP.armed) bad("pump: frames queued without a primed task");
+    if (nq != FZ.head - FZ.tail) bad("pump: queued frames differ from the frames accepted and not yet written");
+    for (t = FP.tail; t != FP.head; t = (uint8_t)((t + 1u) & (MT_ENET_PUMP_Q - 1u))) {
+        const MtEnetTx *s = &FE.tx[FP.q[t]];
+        if (s->pb.ioResult != 1 || !s->started || FZ.issued[FP.q[t]]) bad("pump: a queued slot is not ours");
+    }
+    for (i = 0; i < MT_ENET_TXSLOTS; i++) st += FE.tx[i].started;
+    if (st != FE.tx_started) bad("pump: tx_started differs from the started slots");
+    if (st != FE.tx_live) bad("pump: tx_live differs from the started slots");   /* 1.1d3: the watchdog's scan bound */
+}
+#endif
 
 static TCPiopb *pr_pb(prec *r) { return (TCPiopb *)r->blk; }
 static uint8_t *pr_buf(prec *r) { return r->blk + PR_PB; }
@@ -1773,6 +1938,139 @@ static void act_simple(int16_t cs) {
     if (!r->busy) pr_free(r);
 }
 
+#ifdef MT_TUNE
+/* The private tune Control call (perf builds): get, valid and out-of-range sets, bad versions and ops. The
+ * answer is 0 or -50, never anything else; a set that returns 0 reads back exactly. */
+static void act_tune(void) {
+    prec *r = pr_get();
+    uint16_t w[MT_TW_N], v[MT_TW_N];
+    uint8_t *blk;
+    MacPtr32 a;
+    int16_t res;
+    int want_ok;
+    if (!r) return;
+    blk = pr_buf(r);
+    w[MT_TW_VERSION] = rn(12) ? (rn(4) ? MT_TUNE_ABI_VERSION : MT_TUNE_ABI_V1) : (uint16_t)rn(4);
+    w[MT_TW_OP] = rn(10) ? (uint16_t)rn(2) : (uint16_t)rn(5);
+    w[MT_TW_RTO_MIN] = (uint16_t)(rn(8) ? 100 + rn(4901) : rn(6000));
+    w[MT_TW_RTO_INIT] = (uint16_t)(rn(8) ? w[MT_TW_RTO_MIN] + rn(10001u - w[MT_TW_RTO_MIN] > 0 ? 10001u - w[MT_TW_RTO_MIN] : 1) : rn(11000));
+    w[MT_TW_DELACK] = (uint16_t)(rn(8) ? rn(501) : rn(700));
+    w[MT_TW_STALL] = (uint16_t)(rn(8) ? 1 + rn(100) : rn(130));
+    w[MT_TW_QUICKACK] = (uint16_t)(rn(8) ? rn(256) : rn(300));
+    w[MT_TW_TXPUMP] = (uint16_t)(rn(8) ? rn(2) : rn(65536));   /* the transmit pump lever (version 2) */
+    memcpy(blk, w, sizeof w);
+    a = pbf_a(blk);
+    memcpy((uint8_t *)pr_pb(r) + 28, &a, 4);
+    res = issue_ex(r, MT_CS_TUNE, 0, -1, -1, 0);
+    want_ok = (w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION || w[MT_TW_VERSION] == MT_TUNE_ABI_V1) &&
+              (w[MT_TW_OP] == MT_TUNE_OP_GET || w[MT_TW_OP] == MT_TUNE_OP_SET);
+    if (res != 0 && res != MT_TUNE_PARAMERR) bad("tune control: result not 0 or -50");
+    if (!want_ok && res == 0) bad("tune control: bad version or op accepted");
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_SET && w[MT_TW_VERSION] == MT_TUNE_ABI_VERSION && w[MT_TW_TXPUMP] > 1)
+        bad("tune control: txpump > 1 accepted");
+    memcpy(v, blk, sizeof v);
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_SET) {
+        mt_tune t;
+        mt_tune_get(P.d->s, &t);
+        if (t.rto_min != w[MT_TW_RTO_MIN] || t.rto_init != w[MT_TW_RTO_INIT] || t.delack_ms != w[MT_TW_DELACK] ||
+            t.stall_ms != w[MT_TW_STALL] || t.quickack != w[MT_TW_QUICKACK]) bad("tune control: set did not read back");
+        if (FP.on != (w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : w[MT_TW_TXPUMP])) bad("tune control: txpump not applied");
+    }
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_GET &&
+        v[MT_TW_TXPUMP] != (w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : FP.on)) bad("tune control: get txpump wrong");
+    if (res == 0 && w[MT_TW_OP] == MT_TUNE_OP_GET &&
+        (v[MT_TW_RTO_MIN] < 100 || v[MT_TW_RTO_MIN] > 5000 || v[MT_TW_RTO_INIT] < v[MT_TW_RTO_MIN] ||
+         v[MT_TW_RTO_INIT] > 10000 || v[MT_TW_DELACK] > 500 || v[MT_TW_STALL] < 1 || v[MT_TW_STALL] > 100 ||
+         v[MT_TW_QUICKACK] > 255)) bad("tune control: get returned out-of-range values");
+    if (!r->busy) pr_free(r);
+}
+#endif
+
+#ifdef MT_TRACE
+/* The echo-path trace (perf builds with MT_TRACE): its ring records every event the fuzzer's calls, frames and ticks
+ * cause; Control MT_CS_TRACE is driven with good and bad blocks. FT.c counts the events seen (coverage). */
+static MtTrace FTR;
+static struct { uint32_t seen; long n[MT_TRACE_NEV]; long reads, freezes, clears; } FT;
+
+static void fz_trace_setup(void) {
+    memset(&FTR, 0, sizeof FTR);
+    mt_trace_set(&FTR);
+    pbf_trace_us = rnd();                       /* the clock may wrap during the run */
+    pbf_trace_step = 1 + rn(300);
+    FT.seen = 0;
+}
+
+static const MtTraceRec *ft_rec(uint32_t k) {   /* k-th kept record, oldest first */
+    uint32_t first = FTR.total < MT_TRACE_RECS ? 0 : FTR.next;
+    return &FTR.rec[(first + k) % MT_TRACE_RECS];
+}
+
+static void act_trace(void) {
+    prec *r = pr_get();
+    MtTraceBlk blk, out;
+    MtTraceRec *buf;
+    MacPtr32 a;
+    int16_t res;
+    uint32_t kept, n, i, total0;
+    int frozen0, want_ok;
+    if (!r) return;
+    memset(&blk, 0, sizeof blk);
+    blk.version = rn(16) ? MT_TRACE_ABI_VERSION : (uint16_t)rn(4);
+    blk.op = rn(12) ? (uint16_t)rn(4) : (uint16_t)rn(9);
+    blk.first = (uint16_t)(rn(4) ? rn(64) : rn(2 * MT_TRACE_RECS));
+    blk.max = (uint16_t)(1 + rn(PR_BUF / sizeof(MtTraceRec)));
+    buf = (MtTraceRec *)pr_buf(r);
+    blk.buf = rn(20) ? pbf_a(buf) : 0;
+    memcpy(pr_ds(r), &blk, sizeof blk);
+    a = pbf_a(pr_ds(r));
+    memcpy((uint8_t *)pr_pb(r) + 28, &a, 4);
+    total0 = FTR.total;
+    frozen0 = FTR.frozen;
+    res = issue_ex(r, MT_CS_TRACE, 0, -1, -1, 0);
+    memcpy(&out, pr_ds(r), sizeof out);
+    want_ok = blk.version == MT_TRACE_ABI_VERSION && blk.op <= MT_TRACE_OP_CLEAR &&
+              (blk.op != MT_TRACE_OP_READ || (frozen0 && blk.buf));
+    if (res != (want_ok ? 0 : MT_TRACE_PARAMERR)) bad("trace control: wrong result");
+    if (res == 0) {
+        if (out.cap != MT_TRACE_RECS || out.rec_bytes != 16 || out.total != FTR.total) bad("trace control: info wrong");
+        if (blk.op == MT_TRACE_OP_CLEAR) {
+            FT.clears++;
+            if (FTR.total != 0 || FTR.frozen) bad("trace control: clear left records or the freeze");
+            FT.seen = 0;
+        } else if (FTR.total != total0) bad("trace control: the trace call itself was recorded");
+        if (blk.op == MT_TRACE_OP_FREEZE) { FT.freezes++; if (!FTR.frozen) bad("trace control: not frozen"); }
+        if (blk.op == MT_TRACE_OP_READ) {
+            FT.reads++;
+            kept = FTR.total < MT_TRACE_RECS ? FTR.total : MT_TRACE_RECS;
+            n = blk.first < kept ? kept - blk.first : 0;
+            if (n > blk.max) n = blk.max;
+            if (out.got != n) bad("trace control: read count wrong");
+            for (i = 0; i < n && i < out.got; i++)
+                if (memcmp(&buf[i], ft_rec(blk.first + i), sizeof *buf) != 0) { bad("trace control: read differs"); break; }
+        }
+    }
+    if (!r->busy) pr_free(r);
+}
+
+static void fz_trace_invariants(void) {
+    uint32_t kept = FTR.total < MT_TRACE_RECS ? FTR.total : MT_TRACE_RECS, k, from;
+    if (pbf_mask != 0) bad("trace: interrupt mask left raised");
+    if (FTR.next != FTR.total % MT_TRACE_RECS) bad("trace: ring index differs from the count");
+    for (k = 0; k < kept; k++) {
+        const MtTraceRec *r = ft_rec(k);
+        if (r->ev < 1 || r->ev >= MT_TRACE_NEV) { bad("trace: unknown event"); break; }
+        if (k && (int32_t)(r->t - ft_rec(k - 1)->t) <= 0) { bad("trace: clock not increasing"); break; }
+        if (r->ev == MT_TRACE_DATA && r->d == 0) { bad("trace: DATA with no bytes"); break; }
+    }
+    from = FTR.total - FT.seen > kept ? FTR.total - kept : FT.seen;   /* new records since the last look */
+    for (k = from; k < FTR.total; k++) {
+        uint8_t ev = ft_rec(kept - (FTR.total - k))->ev;
+        if (ev < MT_TRACE_NEV) FT.n[ev]++;
+    }
+    FT.seen = FTR.total;
+}
+#endif
+
 static void pb_action(void) {
     switch (rn(30)) {
     case 16: act_ucreate(); break;
@@ -1783,6 +2081,12 @@ static void pb_action(void) {
     case 23: act_uother(); break;
     case 24: case 25: act_echo(); break;
     case 26: act_ipmisc(); break;
+#ifdef MT_TUNE
+    case 27: act_tune(); break;
+#endif
+#ifdef MT_TRACE
+    case 28: act_trace(); break;
+#endif
     case 0: act_create(); break;
     case 1: act_open(0); break;
     case 2: act_open(1); break;
@@ -1807,9 +2111,22 @@ static void pb_action(void) {
 
 static void pb_invariants(void) {
     int i, k;
+    uint8_t thi = 0, uhi = 0, q;
     if (pbf_irq != 0) bad("interrupt mask not restored");
+    check_tcp_hi(P.d->s);
+    for (q = 0; q < P.d->ntcp; q++) if (P.d->tcp[q].used) thi = (uint8_t)(q + 1u);
+    for (q = 0; q < P.d->nudp; q++) if (P.d->udp[q].used) uhi = (uint8_t)(q + 1u);
+    if (P.d->tcp_hi != thi || P.d->udp_hi != uhi) bad("glue tcp_hi / udp_hi is not one past the highest used slot");
     if (P.d->depth || P.d->in_core) bad("glue depth not back to 0");
     if (P.d->rel_mask) bad("deferred release left over");
+    /* 1.1d2 F7: the glue's cached deadline (and the core's under it) equals the full scan after every step */
+    if (mt_pb_next_deadline_ms(P.d) != mt_pb_next_deadline_scan(P.d)) bad("cached glue deadline differs from the full scan");
+#ifdef MT_TUNE
+    fz_pump_invariants();
+#endif
+#ifdef MT_TRACE
+    fz_trace_invariants();
+#endif
     if (pbf_bad) { bad("misuse seen by the fake OS (pointer, routine, irq nesting)"); pbf_bad = 0; }
     pb_udp_invariants();
     for (i = 0; i < PS_N; i++) {
@@ -1894,6 +2211,17 @@ static void pb_full_canary_check(void) {
         if (!P.us[k].live) canary_check(P.us[k].buf, US_BUF, "receive buffer of a released UDP stream was written");
 }
 
+/* the timer model of fz_timer_fire / fz_timer_after (below) */
+static MtTimer g_tm;
+static uint32_t g_tm_due;
+static MtTimerShot g_tm_sh;   /* only the lost-shot count: mt_timer_note_lost */
+static long g_tm_found;
+static MtGate g_hb_gate;       /* the accRun heartbeat's own gate session (mt_entry_accrun), after = fz_timer_after */
+static MtEntry g_hb_e;
+static long g_hb_n;
+static uint32_t g_hb_cnt;
+static long g_tm_lost;
+
 static void pb_setup(uint32_t seed) {
     mt_limits lim;
     mt_link link;
@@ -1901,6 +2229,11 @@ static void pb_setup(uint32_t seed) {
     uint32_t n;
     int k;
     memset(&g, 0, sizeof g);
+    memset(&g_tm, 0, sizeof g_tm);
+    g_tm_due = 0;
+    memset(&g_tm_sh, 0, sizeof g_tm_sh);
+    memset(&g_hb_gate, 0, sizeof g_hb_gate);
+    memset(&g_hb_e, 0, sizeof g_hb_e);        /* re-bound to this seed's MtDrv at the first accRun */
     memset(&P, 0, sizeof P);
     memset(g_rq, 0, sizeof g_rq);               /* the core fuzzer's records: none here */
     memset(g_serial, 0, sizeof g_serial);
@@ -1929,12 +2262,62 @@ static void pb_setup(uint32_t seed) {
     for (k = 0; k < US_N; k++) { P.us[k].buf = (uint8_t *)pbf_alloc(US_BUF); memset(P.us[k].buf, CAN2, US_BUF); }
     g.now = rn(2) ? 0xFFF00000u + rnd() % 0x100000u : rnd();
     pbf_now = g.now;
+#ifdef MT_TUNE
+    fz_pump_setup();
+#endif
+#ifdef MT_TRACE
+    fz_trace_setup();
+#endif
+}
+
+/* 1.1d2 fix (timer liveness): a model of the driver's Time Manager shot, armed the way after_cb arms it
+ * (mt_timer_keep), fired when its time comes, and sometimes LOST (armed stays 1, no callback), as a shot that never
+ * fires would be. Invariant after every arm: whenever the core or the glue has a finite deadline, a shot is pending,
+ * due no later than the deadline (or the 17 ms step), and never overdue by more than MT_TIMER_LOST_MS. */
+
+static void fz_timer_fire(void) {
+    if (g_tm.armed && (int32_t)(g.now - g_tm_due) >= 0) {
+        if (rn(40) == 0) g_tm_lost++;                       /* lost: armed stays set, no callback */
+        else g_tm.armed = 0;                                /* fired (the tick itself is the fuzz's own) */
+    }
+}
+
+static void fz_timer_after(void) {
+    uint32_t d, ms;
+    fz_timer_fire();                                        /* a shot whose time came during the step fired (or was lost) */
+    d = mt_pb_next_deadline_ms(P.d);
+    ms = mt_timer_deadline_ms(d);
+    g_tm_sh.due = g_tm_due;
+    g_tm_found += mt_timer_note_lost(&g_tm, &g_tm_sh, g.now);   /* every find is an injected loss (exact clock here) */
+    if (!mt_timer_keep(&g_tm, g_tm_due, g.now, ms)) {
+        g_tm.armed = 1;
+        g_tm_due = g.now + ms;
+    }
+    if (d != MT_NO_DEADLINE) {
+        if (!g_tm.armed) bad("finite deadline without a pending timer shot");
+        else if ((int32_t)(g.now + ms - g_tm_due) < 0) bad("timer shot later than the deadline");
+        else if ((int32_t)(g_tm_due - g.now) < -(int32_t)MT_TIMER_LOST_MS) bad("timer shot overdue beyond the slack (lost shot kept)");
+    }
+}
+
+static void fz_hb_after(void *ctx) { (void)ctx; fz_timer_after(); }
+
+/* 1.1d2 heartbeat in the op mix: accRun runs one gate session (the timer model's arm) and changes nothing else that
+ * the invariants see; it never records a MultiFinder owner. */
+static void fz_accrun(void) {
+    uint8_t own = P.d->n_own;
+    uint32_t calls = g_hb_e.n_calls;
+    if (!g_hb_e.d) { mt_entry_init(&g_hb_e, P.d, &g_hb_gate); g_hb_gate.after = fz_hb_after; g_hb_gate.open = 1; }
+    if (mt_entry_accrun(&g_hb_e, &g_hb_cnt) != 0) bad("accRun result");
+    if (P.d->n_own != own || g_hb_e.n_calls != calls) bad("accRun recorded an owner or counted a call");
+    g_hb_n++;
 }
 
 static void pb_step(uint8_t *f) {
     uint32_t d, dt;
     int k, live = 0;
     pbf_now = g.now;
+    fz_timer_fire();
     for (k = 0; k < PS_N; k++) live += P.ps[k].live;
     if (live < 3) act_create();
     if (rn(3)) {
@@ -1949,6 +2332,10 @@ static void pb_step(uint8_t *f) {
     if (rn(3) == 0) mt_pb_input(P.d, f, gen_pb_udp(f));
     if (rn(8) == 0) mt_pb_input(P.d, f, gen_pb_echo_reply(f));
     for (k = (int)rn(3); k > 0; k--) pb_action();
+    if (rn(6) == 0) fz_accrun();
+#ifdef MT_TUNE
+    fz_pump_step();
+#endif
     check_invariants();
     pb_invariants();
     if ((g.step & 63) == 0) pb_full_canary_check();
@@ -1957,7 +2344,7 @@ static void pb_step(uint8_t *f) {
         mt_pb_tick(P.d);
         /* as before Task 3, up to 6 ticks may be needed (glue work after a tick can arm a core
          * timer that is already due); after that only the loopback term may read 0 */
-        if (k >= 5 && (dl_no_lo(P.d->s, P.d->now) == 0 || mt_pb_tcp_deadline(P.d) == 0 ||
+        if (k >= 5 && (dl_no_lo(P.d->s, P.d->now) == 0 || P.d->rcv_kick || mt_pb_tcp_deadline(P.d) == 0 ||
             mt_pb_udp_deadline(P.d) == 0 || mt_pb_ip_deadline(P.d) == 0)) {
             if (getenv("FZ_DEBUG"))
                 fprintf(stderr, "pb arp %u tcp %u dns %u now %u stall %u/%u; core %u glue tcp %u udp %u ip %u lo %u k %d\n",
@@ -1980,6 +2367,7 @@ static void pb_step(uint8_t *f) {
     pbf_now = g.now;
     if (mt_pb_next_deadline_ms(P.d) == 0) mt_pb_tick(P.d);
     pb_invariants();
+    fz_timer_after();
 }
 
 static void test_fuzz_pb(void) {
@@ -1993,6 +2381,9 @@ static void test_fuzz_pb(void) {
     uint32_t first = getenv("FZ_SEED") ? (uint32_t)atoi(getenv("FZ_SEED")) : 1;
     uint32_t last = getenv("FZ_SEED") ? first : getenv("FZ_SEEDS") ? (uint32_t)atoi(getenv("FZ_SEEDS")) : PB_SEEDS;
     long steps = getenv("FZ_STEPS") ? atol(getenv("FZ_STEPS")) : PB_STEPS;   /* FZ_STEPS=n steps per seed */
+    g_tm_lost = 0;
+    g_tm_found = 0;
+    g_hb_n = 0;
     for (seed = first; seed <= last; seed++) {
         pb_setup(seed);
         if (!P.d) return;
@@ -2028,7 +2419,29 @@ static void test_fuzz_pb(void) {
     T_CHECK(ret > 0); T_CHECK(tmo > 0); T_CHECK(ad > 0); T_CHECK(at > 0); T_CHECK(ac > 0);
     T_CHECK(drc > 0); T_CHECK(drp > 0); T_CHECK(ie > 0); T_CHECK(re > 0); T_CHECK(mg > 0);
     T_CHECK(early > 0); T_CHECK(rx > 0);
+    T_CHECK(g_tm_lost > 0);     /* lost timer shots were injected (and re-armed: fz_timer_after) */
+    if (getenv("FZ_DEBUG")) fprintf(stderr, "timer: lost %ld found %ld\n", g_tm_lost, g_tm_found);
+    T_CHECK(g_tm_found > 0 && g_tm_found <= g_tm_lost);   /* and counted when found, never a live one */
+    T_CHECK(g_hb_n > 0);        /* accRun heartbeats ran in the op mix */
     T_CHECK(lo > 0); T_CHECK(lorx > 0);   /* the glue's loopback path (Task 3) was driven */
+#ifdef MT_TUNE
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb txpump (last seed): direct %ld pumped %ld nested input %ld refused at once %ld busy/closed %ld "
+                "task inside link.tx %ld link toggles %ld pump nested %lu max queue %u\n", FZ.n_direct, FZ.n_pumped,
+                FZ.n_nested_in, FZ.n_io_refused, FZ.n_busy, FZ.n_runs_in_tx, FZ.n_closed, (unsigned long)FP.nested,
+                (unsigned)FP.max_q);
+    T_CHECK(FZ.n_direct > 0); T_CHECK(FZ.n_pumped > 0); T_CHECK(FZ.n_nested_in > 0); T_CHECK(FZ.n_io_refused > 0);
+    T_CHECK(FZ.n_busy > 0); T_CHECK(FZ.n_runs_in_tx > 0); T_CHECK(FP.nested > 0); T_CHECK(FZ.n_held_runs > 0);
+#endif
+#ifdef MT_TRACE
+    if (getenv("FUZZ_VERBOSE"))
+        fprintf(stderr, "pb trace (all seeds): data %ld pbdone %ld ewrite %ld ewdone %ld tick %ld; control reads %ld "
+                "freezes %ld clears %ld\n", FT.n[MT_TRACE_DATA], FT.n[MT_TRACE_PBDONE], FT.n[MT_TRACE_EWRITE],
+                FT.n[MT_TRACE_EWDONE], FT.n[MT_TRACE_TICK], FT.reads, FT.freezes, FT.clears);
+    T_CHECK(FT.n[MT_TRACE_DATA] > 0); T_CHECK(FT.n[MT_TRACE_PBDONE] > 0); T_CHECK(FT.n[MT_TRACE_EWRITE] > 0);
+    T_CHECK(FT.n[MT_TRACE_EWDONE] > 0); T_CHECK(FT.n[MT_TRACE_TICK] > 0);
+    T_CHECK(FT.reads > 0); T_CHECK(FT.freezes > 0); T_CHECK(FT.clears > 0);
+#endif
 }
 
 /* The fuzzer's frame damage must always be detectable by TCP: 400000 mutations of one segment

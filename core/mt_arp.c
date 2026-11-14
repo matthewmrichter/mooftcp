@@ -30,6 +30,7 @@ static void arp_drop_pending(mt_stack *s, mt_arp_entry *e) {
     s->stats.arp_drops++;
     MT_LOG_DROPPED(s, MT_LOGL_ARP, __LINE__);
     e->state = MT_ARP_FREE;
+    mt_dl_stale(s);                    /* F7: every change to an entry's deadline (rare: not per frame) */
 }
 
 /* Frees e if it timed out; returns 1 when it did. */
@@ -41,6 +42,7 @@ static int arp_expired(mt_stack *s, mt_arp_entry *e, uint32_t now) {
     }
     if (e->state == MT_ARP_RESOLVED && !mt_time_before(now, e->t_stamp + ARP_RESOLVED_MS)) {
         e->state = MT_ARP_FREE;
+        mt_dl_stale(s);
         return 1;
     }
     return 0;
@@ -90,6 +92,7 @@ static void arp_pending_step(mt_stack *s, mt_arp_entry *e, uint32_t now) {
         do e->tries++;
         while (e->tries < ARP_MAX_TRIES &&
                !mt_time_before(now, e->t_stamp + (uint32_t)e->tries * ARP_RETRY_MS));
+        mt_dl_stale(s);
         arp_send(s, 1, bcast, zero, e->ip);
     }
 }
@@ -111,6 +114,7 @@ int mt_arp_resolve(mt_stack *s, mt_ip4 nexthop, uint8_t mac_out[6], uint32_t now
         e->state = MT_ARP_PENDING;
         e->t_stamp = now;
         e->tries = 0;
+        mt_dl_stale(s);
     }
     e->t_used = now;
     arp_pending_step(s, e, now);
@@ -129,6 +133,7 @@ void mt_arp_insert(mt_stack *s, mt_ip4 ip, const uint8_t mac[6], uint32_t now) {
     e->t_stamp = now;
     e->t_used = now;
     e->tries = 0;
+    mt_dl_stale(s);
     if (s->pend->len && s->pend->nexthop == ip) {
         mt_pending *p = s->pend;
         uint16_t n = p->len;

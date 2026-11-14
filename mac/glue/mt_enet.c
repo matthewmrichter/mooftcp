@@ -3,11 +3,16 @@
 #include <stddef.h>
 #include <string.h>
 #include "mt_enet.h"
-/* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the one service */
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
+/* mt_os.h cannot be included next to the Toolbox headers (duplicate enumerators): declare the services */
 int16_t mt_os_enet_kill(int16_t refnum, void *pb);
 int mt_os_enet_blocked(int16_t refnum);
+int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size);
+int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr);
 
-enum { E_ATTACH = 247, E_DETACH = 248, E_WRITE = 249, E_GETINFO = 252 };
+enum { E_ATTACH = 247, E_DETACH = 248, E_GETINFO = 252 };   /* EWrite: MT_ENET_CS_WRITE (mt_enet.h) */
 
 extern void mt_enet_ph(void);
 extern void mt_enet_ph_set_ctx(void *gate);
@@ -23,12 +28,6 @@ _Static_assert(sizeof(MtEnetPB) == 58 && offsetof(MtEnetPB, csCode) == 26 &&
                offsetof(MtEnetPB, eBuffSize) == 34, "EParamBlock layout");
 #endif
 
-static void zero(void *p, size_t n)
-{
-    uint8_t *b = (uint8_t *)p;
-    while (n--) *b++ = 0;
-}
-
 static int16_t ctl_sync(MtEnet *e, MtEnetPB *pb)
 {
     pb->ioRefNum = e->refnum;
@@ -39,7 +38,7 @@ static int16_t ctl_sync(MtEnet *e, MtEnetPB *pb)
 static int16_t attach(MtEnet *e, uint16_t type)
 {
     MtEnetPB pb;
-    zero(&pb, sizeof pb);
+    memset(&pb, 0, sizeof pb);
     pb.csCode = E_ATTACH;
     pb.eProtType = (int16_t)type;
     pb.ePointer = (uint32_t)(uintptr_t)mt_enet_ph;
@@ -49,13 +48,14 @@ static int16_t attach(MtEnet *e, uint16_t type)
 static void detach(MtEnet *e, uint16_t type)
 {
     MtEnetPB pb;
-    zero(&pb, sizeof pb);
+    memset(&pb, 0, sizeof pb);
     pb.csCode = E_DETACH;
     pb.eProtType = (int16_t)type;
     (void)ctl_sync(e, &pb);
 }
 
-int mt_enet_open(MtEnet *e, MtGate *gate)
+/* 1.1d3: runs only at the first OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_enet_open(MtEnet *e, MtGate *gate)
 {
     static const unsigned char *const names[2] = { (const unsigned char *)"\p.ENET0",
                                                    (const unsigned char *)"\p.ENET" };
@@ -74,8 +74,8 @@ int mt_enet_open(MtEnet *e, MtGate *gate)
     e->gate = gate;
 
     /* EGetInfo: the first six bytes returned are our Ethernet address (obs). */
-    zero(&pb, sizeof pb);
-    zero(info, sizeof info);
+    memset(&pb, 0, sizeof pb);
+    memset(info, 0, sizeof info);
     pb.csCode = E_GETINFO;
     pb.ePointer = (uint32_t)(uintptr_t)info;
     pb.eBuffSize = (int16_t)sizeof info;
@@ -119,14 +119,10 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
     memcpy(s->frame, frame, len);
     n = mt_enet_pad(s->frame, len);
     if (n != len) e->tx_pad++;
-    zero(&s->pb, sizeof s->pb);
-    s->wds[0].len = n;
-    s->wds[0].ptr = (uint32_t)(uintptr_t)s->frame;
-    s->wds[1].len = 0;
-    s->wds[1].ptr = 0;
-    s->pb.csCode = E_WRITE;
-    s->pb.ioRefNum = e->refnum;
-    s->pb.ePointer = (uint32_t)(uintptr_t)s->wds;
+    mt_enet_tx_prep(e, s, n);
+#ifdef MT_TRACE
+    mt_trace_ewrite(s, n, 0);    /* perf builds with the trace: the record and the trace's completion routine */
+#endif
     r = (int16_t)PBControlAsync((ParmBlkPtr)&s->pb);
     if (r < 0) {
         s->pb.ioResult = r;      /* refused at once: the slot is free again, counted here */
@@ -134,8 +130,7 @@ int mt_enet_write(void *ctx, const uint8_t *frame, uint16_t len)
         e->tx_err++;
         return 1;
     }
-    s->started = 1;
-    if (!e->tx_started++) e->wd_fresh = 1;
+    mt_enet_tx_mark_started(e, s);
     e->tx_ok++;
     return 0;
 }
@@ -145,9 +140,32 @@ int16_t mt_os_enet_kill(int16_t refnum, void *pb)
 {
     MtEnetPB k;
     (void)pb;
-    zero(&k, sizeof k);
+    memset(&k, 0, sizeof k);
     k.ioRefNum = refnum;
     return (int16_t)PBKillIOSync((ParmBlkPtr)&k);
+}
+
+/* mt_os.h: synchronous Status / Control with a buffer (MoofPort's private tune calls, mt_enet_mp.c). Run only at
+ * the driver open: cold, built for size (the resident driver must not grow). */
+__attribute__((cold)) int16_t mt_os_enet_status(int16_t refnum, int16_t cs, void *buf, int16_t size)
+{
+    MtEnetPB pb;
+    memset(&pb, 0, sizeof pb);
+    pb.ioRefNum = refnum;
+    pb.csCode = cs;
+    pb.ePointer = (uint32_t)(uintptr_t)buf;
+    pb.eBuffSize = size;
+    return (int16_t)PBStatusSync((ParmBlkPtr)&pb);
+}
+
+__attribute__((cold)) int16_t mt_os_enet_control(int16_t refnum, int16_t cs, const void *ptr)
+{
+    MtEnetPB pb;
+    memset(&pb, 0, sizeof pb);
+    pb.ioRefNum = refnum;
+    pb.csCode = cs;
+    pb.ePointer = (uint32_t)(uintptr_t)ptr;
+    return (int16_t)PBControlSync((ParmBlkPtr)&pb);
 }
 
 #pragma GCC diagnostic ignored "-Warray-bounds"   /* low-memory globals */
@@ -170,8 +188,10 @@ int mt_os_enet_blocked(int16_t refnum)
 /* Detach both handlers, attach both again (task time, gate owned by the caller). No CloseDriver /
  * OpenDriver. The transmit slots are not touched. Ruling (gate consistency): the handler context
  * and gate->open follow the handlers: ctx 0 while none is attached, gate stays open so the tick
- * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). */
-int mt_enet_reattach_io(MtEnet *e)
+ * keeps running the core's timers; a failure leaves opened = 0 (tx_drop_closed). No close/open, so a MoofPort
+ * driver keeps the steadyack tune the open applied (mt_enet_mp.h); it is not sent again here. */
+/* 1.1d3: runs only at a repair: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int mt_enet_reattach_io(MtEnet *e)
 {
     int16_t r;
     if (!e->gate) return MT_ENET_E_NODRIVER;
@@ -197,7 +217,8 @@ int mt_enet_reattach_io(MtEnet *e)
     return 0;
 }
 
-void mt_enet_close(MtEnet *e)
+/* 1.1d3: runs only at a close or a repair: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) void mt_enet_close(MtEnet *e)
 {
     if (e->attached & 2) detach(e, 0x0800);
     if (e->attached & 1) detach(e, 0x0806);
@@ -206,3 +227,17 @@ void mt_enet_close(MtEnet *e)
     mt_enet_ph_set_ctx(0);
     if (e->gate) e->gate->open = 0;
 }
+
+#ifdef MT_TUNE
+/* The transmit pump's Toolbox side (perf builds; mt_enet.h "transmit pump", mt_enet_pump.c). */
+int16_t mt_enet_io_write(MtEnet *e, MtEnetTx *s)
+{
+    (void)e;
+    return (int16_t)PBControlAsync((ParmBlkPtr)&s->pb);
+}
+
+void mt_enet_pump_prime(MtEnetPump *p)
+{
+    mt_timer_arm(&p->tm, MT_ENET_PUMP_MS);       /* PrimeTime; inside the task's own run too (mt_timer.h) */
+}
+#endif

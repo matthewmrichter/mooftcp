@@ -34,12 +34,40 @@ typedef struct {
     uint8_t acc_fin;             /* the FIN is accepted too */
 } seg;
 
-static uint32_t rel(uint32_t at, uint32_t now) { return mt_time_before(at, now) ? 0u : at - now; }
+/* ---- Timer state (1.1d2 F7: every change keeps the stack's cached deadline exact, mt_int.h) ---- */
+
+/* The ULP deadline (ulp_dl) counts while RTO or PERSIST is armed and ulp_ms is nonzero. */
+#define ULP_ON(t) (((t)->tmask & TM_RTO_PERSIST) && (t)->ulp_ms)
+
 static void tmr_set(mt_tcp *t, unsigned i, uint32_t at) {
+    uint8_t m = t->tmask, b = (uint8_t)(1u << i);
     t->tmr[i] = at;
-    t->tmask |= (uint8_t)(1u << i);
+    t->tmask = (uint8_t)(m | b);
+    if ((m & b) || (b & TM_RTO_PERSIST)) mt_dl_stale(t->st);   /* moved (the ACK clock re-arming the RTO: the
+                                                                * earliest one, usually), or RTO/PERSIST armed here
+                                                                * (the ULP deadline may count from here): rescan.
+                                                                * arm_rto, the send path, folds a new RTO in. */
+    else mt_dl_add(t->st, at);                                 /* TIME_WAIT / FIN_WAIT_2 / delayed ACK armed */
 }
-static void tmr_clr(mt_tcp *t, unsigned i) { t->tmask &= (uint8_t)~(1u << i); }
+
+static void tmr_clr(mt_tcp *t, unsigned i) {
+    uint8_t b = (uint8_t)(1u << i);
+    if (!(t->tmask & b)) return;
+    t->tmask &= (uint8_t)~b;
+    mt_dl_stale(t->st);
+}
+
+/* ulp_dl = at; a deadline that counts moved */
+static void ulp_at(mt_tcp *t, uint32_t at) {
+    if (ULP_ON(t)) mt_dl_stale(t->st);
+    t->ulp_dl = at;
+}
+
+/* Every timer off at once (terminate, reset, back to listen, release): the cache is rebuilt at the next query. */
+static void tmr_none(mt_tcp *t) {
+    if (t->tmask) mt_dl_stale(t->st);
+    t->tmask = 0;
+}
 
 static void fire(mt_tcp *t, mt_tcp_event ev, uint32_t arg) {
     if (t->used && t->cb) t->cb(t, ev, arg, t->user);
@@ -103,7 +131,7 @@ static void tcp_term(mt_tcp *t, mt_term_reason r) {
     if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
-    t->tmask = 0;
+    tmr_none(t);
     mt_tcp_set_state(t, MT_TCP_CLOSED);
     mt_log(t->st, MT_LOG_TCP_TERM, (uint8_t)r, t->lport);
     g = ++t->gen;
@@ -121,8 +149,8 @@ static void conn_reset(mt_tcp *t) {
     t->sq_off = 0;
     t->snd_una = t->snd_nxt = t->snd_max = t->snd_wnd = t->rcv_nxt = 0;
     t->snd_wl1 = t->snd_wl2 = t->iss = t->irs = 0;
-    t->tmask = 0;
-    t->rto = MT_TCP_RTO_INIT;
+    tmr_none(t);
+    t->rto = MT_RTO_INIT(t->st);
     t->srtt8 = t->rttvar4 = 0;
     t->dupacks = 0;
     t->flags &= MT_TF_ULPABORT;
@@ -179,9 +207,10 @@ mt_tcp *mt_tcp_create(mt_stack *s, uint8_t *buf, uint32_t buflen, mt_tcp_cb cb, 
     t->used = 1;
     t->ulp_ms = TCP_ULP_DEFAULT_S * 1000u;
     t->flags = MT_TF_ULPABORT;
-    t->rto = MT_TCP_RTO_INIT;
+    t->rto = MT_RTO_INIT(t->st);
     t->mss = TCP_MSS_DEFAULT;
     t->state = MT_TCP_CLOSED;       /* creation is not logged */
+    if (i >= s->tcp_hi) s->tcp_hi = (uint8_t)(i + 1u);
     return t;
 }
 
@@ -189,7 +218,10 @@ void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
     uint32_t ms = (uint32_t)seconds * 1000u;
     /* ulp_dl is always start + ulp_ms (set when the RTO/PERSIST timer armed, or pushed out by
      * progress), so while a timer is armed it moves with the new length. */
-    if (t->tmask & TM_RTO_PERSIST) t->ulp_dl += ms - t->ulp_ms;
+    if (t->tmask & TM_RTO_PERSIST) {
+        t->ulp_dl += ms - t->ulp_ms;
+        mt_dl_stale(t->st);                                 /* F7: the ULP deadline moved, appeared or went */
+    }
     t->ulp_ms = ms;
     if (abort) t->flags |= MT_TF_ULPABORT;
     else t->flags &= (uint8_t)~MT_TF_ULPABORT;
@@ -197,7 +229,7 @@ void mt_tcp_set_ulp_timeout(mt_tcp *t, uint16_t seconds, int abort) {
 
 static int port_busy(const mt_stack *s, const mt_tcp *self, uint16_t p) {
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         const mt_tcp *o = &s->tcp[i];
         if (o != self && o->used && o->state != MT_TCP_CLOSED && o->lport == p) return 1;
     }
@@ -224,7 +256,7 @@ int mt_tcp_open(mt_tcp *t, mt_ip4 rip, uint16_t rport, uint16_t lport, uint32_t 
         lport = p;
         s->tcp_eph = (uint16_t)(p == 65535u ? TCP_EPH_BASE : p + 1u);
     } else {
-        for (i = 0; i < s->lim.max_tcp; i++) {
+        for (i = 0; i < s->tcp_hi; i++) {
             const mt_tcp *o = &s->tcp[i];
             if (o != t && o->used && o->state != MT_TCP_CLOSED && o->state != MT_TCP_LISTEN &&
                 o->lport == lport && o->rport == rport && o->rip == rip)
@@ -281,10 +313,10 @@ static void send_rst(mt_tcp *t, uint32_t now) {
 }
 
 static void back_to_listen(mt_tcp *t) {
-    t->tmask = 0;
+    tmr_none(t);
     t->flags &= MT_TF_ULPABORT;
     t->flags2 = 0;
-    t->rto = MT_TCP_RTO_INIT;                              /* not the backed-off value of the dead half-open */
+    t->rto = MT_RTO_INIT(t->st);                              /* not the backed-off value of the dead half-open */
     mt_tcp_set_state(t, MT_TCP_LISTEN);
     t->rip = 0;
     t->rport = 0;
@@ -329,15 +361,26 @@ void mt_tcp_abort(mt_tcp *t, uint32_t now) {
 }
 
 void mt_tcp_release(mt_tcp *t) {
+    mt_stack *s = t->st;
     if (!t->used) return;
     send_rst(t, t->tnow);
-    if (t->flags & MT_TF_EST) t->st->stats.tcp_conns_open--;
+    if (t->flags & MT_TF_EST) s->stats.tcp_conns_open--;
+    tmr_none(t);
     {
         uint8_t gen = (uint8_t)(t->gen + 1u);
         memset(t, 0, sizeof *t);           /* used = 0, cb = NULL: no further callbacks */
         t->gen = gen;
     }
+    {
+        uint8_t h = s->tcp_hi;
+        const mt_tcp *e = s->tcp + h;
+        while (h && !(--e)->used) h--;
+        s->tcp_hi = h;
+    }
 }
+
+mt_tcp_state mt_tcp_get_state(const mt_tcp *t) { return (mt_tcp_state)t->state; }
+uint32_t mt_tcp_rcv_avail(const mt_tcp *t) { return t->rcvq.used; }
 
 void mt_tcp_get_info(const mt_tcp *t, mt_tcp_info *i) {
     uint32_t sent = 0, q = mt_tcp_sq_total(t);
@@ -460,7 +503,7 @@ void mt_tcp_icmp_error(mt_stack *s, mt_ip4 dst, uint16_t lport, uint16_t rport, 
 #ifdef MT_TEST_HOOKS
     if (s->icmp_err_spy) s->icmp_err_spy(s->icmp_err_ctx, 6, dst, lport, rport, type, code);
 #endif
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (t->used && t->state != MT_TCP_CLOSED && t->state != MT_TCP_LISTEN &&
             t->rip == dst && t->lport == lport && t->rport == rport)
@@ -486,7 +529,7 @@ static uint32_t backoff(uint32_t rto) { return rto >= MT_TCP_RTO_MAX / 2u ? MT_T
 static void ulp_expired(mt_tcp *t, uint32_t now) {
     uint8_t g0 = t->gen;
     if (!(t->flags & MT_TF_ULPABORT)) {
-        t->ulp_dl = now + t->ulp_ms;                       /* report only: keep retrying */
+        ulp_at(t, now + t->ulp_ms);                 /* report only: keep retrying */
         fire(t, MT_TCP_EV_ULP_TIMEOUT, 0);
     } else if (t->state == MT_TCP_SYN_SENT) {
         tcp_term(t, MT_TERM_OPEN_FAILED);
@@ -505,13 +548,13 @@ static void ulp_expired(mt_tcp *t, uint32_t now) {
  * (rto 1, 2, 4 s, doubling per timeout); when the 4th one times out (rto has reached 8 s) it
  * gives up and the TCB listens again, rather than holding the listener for the 120 s ULP
  * timeout. An actively opened SYN_SENT is not affected (it keeps the ULP connect timeout). */
-#define SYNRCVD_GIVEUP_RTO (8u * MT_TCP_RTO_INIT)
+#define SYNRCVD_GIVEUP_RTO(t) (8u * MT_RTO_INIT((t)->st) < MT_TCP_RTO_MAX ? 8u * MT_RTO_INIT((t)->st) : MT_TCP_RTO_MAX)
 
 /* Retransmission timeout. Data states: back to Loss Window (cwnd = 1 MSS, ssthresh halved) and
  * go-back-N from snd_una; SYN states resend the SYN / SYN-ACK. */
 static void rto_fire(mt_tcp *t, uint32_t now) {
     if (t->state == MT_TCP_SYN_RCVD && (t->flags & MT_TF_PASSIVE) &&
-        t->rto >= SYNRCVD_GIVEUP_RTO) {
+        t->rto >= SYNRCVD_GIVEUP_RTO(t)) {
         back_to_listen(t);          /* 4 SYN-ACKs sent and the 4th timed out: free the listener */
         return;
     }
@@ -539,7 +582,8 @@ static void rto_fire(mt_tcp *t, uint32_t now) {
 static void stall_retry(mt_stack *s, uint32_t now) {
     uint16_t i;
     s->stall_on = 0;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    mt_dl_stale(s);
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !(t->flags2 & MT_T2_STALL)) continue;
         t->tnow = now;
@@ -555,7 +599,7 @@ static void stall_retry(mt_stack *s, uint32_t now) {
 void mt_tcp_timers(mt_stack *s, uint32_t now) {
     uint16_t i;
     if (s->stall_on && !mt_time_before(now, s->stall_at)) stall_retry(s, now);
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || !t->tmask) continue;
         t->tnow = now;
@@ -594,10 +638,12 @@ void mt_tcp_timers(mt_stack *s, uint32_t now) {
     }
 }
 
+static uint32_t rel(uint32_t at, uint32_t now) { return mt_time_before(at, now) ? 0u : at - now; }
+
 uint32_t mt_tcp_deadline(const mt_stack *s, uint32_t now) {
     uint32_t best = s->stall_on ? rel(s->stall_at, now) : MT_NO_DEADLINE;
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         const mt_tcp *t = &s->tcp[i];
         if (!t->used || !t->tmask) continue;
         if (t->tmask & (1u << MT_TT_TW)) best = mt_dl_min(best, rel(t->tmr[MT_TT_TW], now));
@@ -633,7 +679,7 @@ void mt_tcp_note_released(mt_stack *s, const uint8_t *ip) {
 
 void mt_tcp_arp_resolved(mt_stack *s, mt_ip4 ip, uint32_t now) {
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         uint32_t skip = 0;
         if (!t->used || t->state == MT_TCP_CLOSED || t->state == MT_TCP_LISTEN ||
@@ -683,7 +729,7 @@ static mt_tcp *lookup(mt_stack *s, mt_ip4 rip, uint16_t rport, uint16_t lport) {
     mt_tcp *best = NULL;
     int bestscore = -1;
     uint16_t i;
-    for (i = 0; i < s->lim.max_tcp; i++) {
+    for (i = 0; i < s->tcp_hi; i++) {
         mt_tcp *t = &s->tcp[i];
         if (!t->used || t->state == MT_TCP_CLOSED) continue;
         if (t->state == MT_TCP_LISTEN) {
@@ -722,7 +768,7 @@ static void in_listen(mt_tcp *t, mt_ip4 src, uint16_t sport, uint16_t dport, con
     t->snd_wl1 = g->seq;
     t->snd_wl2 = t->iss;
     t->flags |= MT_TF_PASSIVE;
-    t->rto = MT_TCP_RTO_INIT;
+    t->rto = MT_RTO_INIT(t->st);
     mt_tcp_set_state(t, MT_TCP_SYN_RCVD);
     s->stats.tcp_passive_opens++;
     mt_tcp_output(t, now);                 /* SYN-ACK */
@@ -784,7 +830,7 @@ static void ack_progress(mt_tcp *t, uint32_t acked, uint32_t now) {
     }
     if (t->cwnd > CWND_MAX) t->cwnd = CWND_MAX;
     t->rto = mt_tcp_rto_base(t);
-    t->ulp_dl = now + t->ulp_ms;
+    ulp_at(t, now + t->ulp_ms);
     if (t->snd_una == t->snd_max) tmr_clr(t, MT_TT_RTO);
     else if (!(t->tmask & (1u << MT_TT_PERSIST))) tmr_set(t, MT_TT_RTO, now + t->rto);
 }
@@ -832,7 +878,7 @@ static void in_syn_sent(mt_tcp *t, const seg *g, uint32_t now) {
     if (ackok) {                                           /* SYN-ACK */
         t->snd_una = g->ack;
         tmr_clr(t, MT_TT_RTO);
-        t->rto = MT_TCP_RTO_INIT;
+        t->rto = MT_RTO_INIT(t->st);
         established(t);
         t->flags |= MT_TF_ACKNOW;
         mt_tcp_output(t, now);                             /* ACK (plus queued data) */
@@ -906,7 +952,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
             t->snd_wl1 = seq;
             t->snd_wl2 = g->ack;
             tmr_clr(t, MT_TT_RTO);
-            t->rto = MT_TCP_RTO_INIT;
+            t->rto = MT_RTO_INIT(t->st);
             established(t);
             t->flags |= MT_TF_ACKNOW;
             mt_tcp_output(t, now);
@@ -948,7 +994,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         t->snd_wl1 = seq;
         t->snd_wl2 = g->ack;
         tmr_clr(t, MT_TT_RTO);
-        t->rto = MT_TCP_RTO_INIT;
+        t->rto = MT_RTO_INIT(t->st);
         established(t);
         ev |= EV_EST;
     }
@@ -957,7 +1003,7 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
         goto out;
     }
     if (t->tmask & (1u << MT_TT_PERSIST))                  /* a peer that answers is not gone: it has */
-        t->ulp_dl = t->tmr[MT_TT_PERSIST] + t->ulp_ms;     /* until a full ULP after the next probe */
+        ulp_at(t, t->tmr[MT_TT_PERSIST] + t->ulp_ms);   /* until a full ULP after the next probe */
     if (g->ack == t->snd_una) {
         /* Duplicate ACK (RFC 5681): no data, window unchanged, data outstanding, not a probe
          * answer. The third one fast-retransmits the first unacked segment; recovery then
@@ -1032,14 +1078,14 @@ static void in_sync(mt_tcp *t, const seg *g, uint32_t now) {
                     uint16_t lm = mt_tcp_local_mss_to(t->st, t->rip);
                     t->rcv_mss = g->acc_n < lm ? (uint16_t)g->acc_n : lm;
                 }
-                if (t->qack < MT_TCP_QUICKACK) {
-                    t->qack++;
+                if (t->qack < MT_QUICKACK(t->st)) {
+                    MT_QACK_INC(t);
                     t->flags |= MT_TF_ACKNOW;
-                } else if (g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
+                } else if (MT_DELACK_ON(t->st) && g->acc_n >= t->rcv_mss && !(g->fl & MT_TH_PSH) && !g->acc_fin &&
                            !(t->flags2 & (MT_T2_ACKHALF | MT_T2_GAP))) {
                     t->flags2 |= MT_T2_ACKHALF;
                     if (!(t->tmask & (1u << MT_TT_DELACK)))
-                        tmr_set(t, MT_TT_DELACK, now + MT_TCP_DELACK_MS);
+                        tmr_set(t, MT_TT_DELACK, now + MT_DELACK(t->st));
                 } else {
                     t->flags |= MT_TF_ACKNOW;
                 }
@@ -1124,7 +1170,8 @@ void mt_tcp_input(mt_stack *s, mt_ip4 src, mt_ip4 dst, const uint8_t *pl, uint16
     if (len < TCP_HDR || !mt_ip_is_local(s, dst) || src == 0 || src == MT_ETH_BCAST_IP) MT_DROP_GOTO(why);
     hl = (uint16_t)((pl[12] >> 4) << 2);
     if (hl < TCP_HDR || hl > len) MT_DROP_GOTO(why);
-    if (parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);
+    g.mss = 0;
+    if (hl > TCP_HDR && parse_opts(pl + TCP_HDR, (uint16_t)(hl - TCP_HDR), &g.mss) < 0) MT_DROP_GOTO(why);
     sport = mt_rd16(pl);
     dport = mt_rd16(pl + 2);
     g.seq = mt_rd32(pl + 4);

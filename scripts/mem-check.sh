@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # MoofTCP resident-memory cap check (Task 13; rules in docs/dev/EMULATOR.md "The cap").
-#   mem-check.sh [--keep-disk] [--no-build]
+#   mem-check.sh [--keep-disk] [--no-build] [--log] [--base N]
+#   --base N: testnet.py ports at N+7, N+9, ... instead of 17007.. (ApiProbe.cfg "B<N>", as probe-run.sh --base), so
+#   the run never shares another session's testnet (e.g. a hardware session's on 17007); our own testnet.py --base N
+#   is started when N+7 is free.
 # One Snow boot on a fresh work.hda with MoofTCP installed (scripts/install-moof.sh), then in order:
 #   HeapInfo (idle), HeapInfoOpen (driver open), ApiProbe groups 2 3 4 5 (real TCP traffic: the "network
 #   operation"; group 4 has the deepest stack path, case 509, the chained reader; group 5 the burst), HeapInfo again, HeapInfoDNR twice. Each app appends exact byte figures to
@@ -18,7 +21,7 @@
 # Exit status 0 only when every rule passes. Output also in build-mac/memcheck/MemCheck.out.
 # MT_LITE=1 checks MoofTCP Lite (build-mac-lite/, output build-mac-lite/memcheck/); same rules and caps.
 # Uses snow.sh, fresh-disk.sh, install-moof.sh, deploy.sh; starts scripts/testnet.py only when nothing
-# listens on 17007 (another session's testnet is shared, never killed).
+# listens on N+7 (17007 by default, --base N otherwise; another session's testnet is shared, never killed).
 set -euo pipefail
 MT_HOME="${MT_HOME:-$HOME/.local/share/mooftcp}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,13 +30,16 @@ DISPLAY_NUM="${MT_DISPLAY:-:142}"
 die() { echo "mem-check.sh: $*" >&2; exit 1; }
 . "$ROOT/scripts/variant.sh"      # MT_LITE=1: MoofTCP Lite (build-mac-lite/); the caps are the same (MacTCP's)
 
-keepdisk=""; build=1; logp=""
+keepdisk=""; build=1; logp=""; base=17000
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-disk) keepdisk=1; shift;;
     --no-build) build=""; shift;;
     --log) logp=1; shift;;   # install prefs with the diagnostic log flag; MoofDiag.out then lists "log:" records
-    *) echo "usage: mem-check.sh [--keep-disk] [--no-build] [--log]" >&2; exit 2;;
+    --base) [ $# -ge 2 ] || { echo "usage: --base N" >&2; exit 2; }; base="$2"; shift 2
+            case "$base" in ''|*[!0-9]*) echo "--base N: a number" >&2; exit 2;; esac
+            [ "$base" -ge 1024 ] && [ "$base" -le 65000 ] || { echo "--base must be 1024..65000" >&2; exit 2; };;
+    *) echo "usage: mem-check.sh [--keep-disk] [--no-build] [--log] [--base N]" >&2; exit 2;;
   esac
 done
 cd "$ROOT"
@@ -55,15 +61,15 @@ for f in $BM/heapinfo/HeapInfo.bin $BM/heapinfo/HeapInfoOpen.bin $BM/heapinfo/He
 done
 
 started_testnet=""; started_extra=""
-if ! (exec 3<>/dev/tcp/127.0.0.1/17007) 2>/dev/null; then
-  scripts/testnet.py > "$out_dir/testnet.log" 2>&1 &
+if ! (exec 3<>/dev/tcp/127.0.0.1/$((base + 7))) 2>/dev/null; then
+  scripts/testnet.py --base "$base" > "$out_dir/testnet.log" 2>&1 &
   started_testnet=$!
   sleep 1
 fi
 # Another session's older testnet.py may hold 17007/17009/17023 without the oneshot/burst/reset ports
 # (17013/17019/17037) that groups 4 and 5 need: serve just those, never touch theirs.
-if ! (exec 3<>/dev/tcp/127.0.0.1/17019) 2>/dev/null; then
-  scripts/testnet.py --only 13,19,37 > "$out_dir/testnet-extra.log" 2>&1 &
+if ! (exec 3<>/dev/tcp/127.0.0.1/$((base + 19))) 2>/dev/null; then
+  scripts/testnet.py --base "$base" --only 13,19,37 > "$out_dir/testnet-extra.log" 2>&1 &
   started_extra=$!
   sleep 1
 fi
@@ -98,6 +104,7 @@ with_volume() {
 # The files the apps write are created up front (empty) so the Finder's icon grid does not shift during the run.
 put_cfg() {
   printf '2345 N' > "$out_dir/ApiProbe.cfg"; : > "$out_dir/empty.txt"
+  if [ "$base" != 17000 ]; then printf ' B%s' "$base" >> "$out_dir/ApiProbe.cfg"; fi
   hcopy -t "$out_dir/ApiProbe.cfg" ":MoofTCP Test:ApiProbe.cfg"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:ApiProbe.out"
   hcopy -t "$out_dir/empty.txt" ":MoofTCP Test:HeapInfo.out"

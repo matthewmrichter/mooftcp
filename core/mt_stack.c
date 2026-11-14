@@ -93,7 +93,7 @@ mt_stack *mt_stack_init(void *mem, uint32_t len, const mt_limits *l, const mt_li
     s->dhcp = (mt_dhcp *)(void *)(base + lay.dhcp);
     s->dhcp->rnd = (seed ^ 0x6A09E667u) | 1u;
 #endif
-    return s;
+    return mt_tune_init(s);                    /* release: s itself */
 }
 
 void mt_set_entropy(mt_stack *s, uint32_t a, uint32_t b) {
@@ -122,6 +122,7 @@ void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t
     uint16_t i, lm;
     if (oaddr != s->cfg.addr || omask != s->cfg.mask || ogw != s->cfg.gateway) {
         memset(s->arp, 0, (size_t)s->lim.arp_entries * sizeof(mt_arp_entry));
+        mt_dl_stale(s);                          /* F7: the ARP deadlines went with the table */
         if (s->pend->len) {                      /* the held frame was addressed from the old setup */
             s->pend->len = 0;
             s->stats.arp_drops++;
@@ -132,7 +133,7 @@ void mt_cfg_commit(mt_stack *s, mt_ip4 oaddr, mt_ip4 omask, mt_ip4 ogw, uint16_t
     }
     if (s->cfg.mtu < omtu) {
         lm = mt_tcp_local_mss(s);
-        for (i = 0; i < s->lim.max_tcp; i++)
+        for (i = 0; i < s->tcp_hi; i++)
             if (s->tcp[i].used && s->tcp[i].mss > lm) s->tcp[i].mss = lm;
     }
 }
@@ -141,7 +142,7 @@ const mt_stats *mt_get_stats(const mt_stack *s) { return &s->stats; }
 
 uint8_t mt_tcp_count_open(const mt_stack *s) {
     uint8_t i, n = 0;
-    for (i = 0; i < s->lim.max_tcp; i++)
+    for (i = 0; i < s->tcp_hi; i++)
         if (s->tcp[i].used && s->tcp[i].state > MT_TCP_LISTEN) n++;
     return n;
 }
@@ -210,14 +211,20 @@ int mt_eth_tx(mt_stack *s, const uint8_t *frame, uint16_t len) {
     return 0;
 }
 
+/* Six-byte MAC compare inline (1.1d2: two memcmp calls per received frame before; mismatches leave at the first
+ * differing byte). */
+static inline int mac_eq(const uint8_t *a, const uint8_t *b) {
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5];
+}
+
 void mt_input(mt_stack *s, const uint8_t *frame, uint16_t len, uint32_t now) {
     uint16_t type;
     s->now = now;
     if (len < MT_ETH_HDR) return;
-    if (memcmp(frame, s->cfg.mac, 6) != 0 &&
+    if (!mac_eq(frame, s->cfg.mac) &&
         (frame[0] & frame[1] & frame[2] & frame[3] & frame[4] & frame[5]) != 0xFF)
         return;
-    if (memcmp(frame + 6, s->cfg.mac, 6) == 0) return;      /* our own frame reflected back */
+    if (mac_eq(frame + 6, s->cfg.mac)) return;              /* our own frame reflected back */
     s->stats.eth_in++;
     type = mt_rd16(frame + 12);
     if (type == 0x0806) mt_arp_input(s, frame + MT_ETH_HDR, (uint16_t)(len - MT_ETH_HDR), now);
@@ -267,9 +274,41 @@ void mt_tick(mt_stack *s, uint32_t now) {
     mt_dns_timers(s, now);
     mt_dhcp_timers(s, now);
     mt_ip_lo_drain(s, now);       /* last: frames the timers just queued to ourselves go too */
+    mt_dl_stale(s);               /* F7: the timers may have moved anything: one rescan at the next query */
 }
 
-uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
+void mt_dl_add(mt_stack *s, uint32_t at) {
+    if (s->dl_state == MT_DL_NONE || (s->dl_state == MT_DL_AT && mt_time_before(at, s->dl_at))) {
+        s->dl_at = at;
+        s->dl_state = MT_DL_AT;
+    }
+}
+
+/* 1.1d2 F7: the cached earliest deadline of the table modules (mt_int.h "the cached deadline"), rebuilt only when a
+ * change made it stale; the O(1) terms (loopback and reassembly, DHCP) are read every time. */
+static void dl_rescan(mt_stack *s, uint32_t now) {
+    uint32_t d = mt_arp_deadline(s, now);
+    d = mt_dl_min(d, mt_tcp_deadline(s, now));
+    d = mt_dl_min(d, mt_dns_deadline(s, now));
+    s->dl_at = now + d;
+    s->dl_state = d == MT_NO_DEADLINE ? MT_DL_NONE : MT_DL_AT;
+#ifdef MT_TEST_HOOKS
+    s->dl_scans++;
+#endif
+}
+
+uint32_t mt_next_deadline(mt_stack *s, uint32_t now) {
+    uint32_t d = MT_NO_DEADLINE;
+    if (s->dl_state == MT_DL_STALE) dl_rescan(s, now);
+    if (s->dl_state == MT_DL_AT) d = mt_time_before(s->dl_at, now) ? 0u : s->dl_at - now;
+    d = mt_dl_min(d, mt_ip_deadline(s, now));
+    d = mt_dl_min(d, mt_dhcp_deadline(s, now));
+    MT_ASSERT(d == mt_next_deadline_scan(s, now));
+    return d;
+}
+
+#ifdef MT_TEST_HOOKS
+uint32_t mt_next_deadline_scan(const mt_stack *s, uint32_t now) {
     uint32_t d = mt_arp_deadline(s, now);
     d = mt_dl_min(d, mt_ip_deadline(s, now));
     d = mt_dl_min(d, mt_tcp_deadline(s, now));
@@ -277,3 +316,18 @@ uint32_t mt_next_deadline(const mt_stack *s, uint32_t now) {
     d = mt_dl_min(d, mt_dhcp_deadline(s, now));
     return d;
 }
+#endif
+
+#ifdef MT_TUNE
+int mt_tune_set(mt_stack *s, const mt_tune *t) {
+    if (!s || !t) return MT_ERR_INVAL;
+    if (t->rto_min < 100u || t->rto_min > 5000u) return MT_ERR_INVAL;
+    if (t->rto_init < t->rto_min || t->rto_init > 10000u) return MT_ERR_INVAL;
+    if (t->delack_ms > 500u) return MT_ERR_INVAL;
+    if (t->stall_ms < 1u || t->stall_ms > 100u) return MT_ERR_INVAL;
+    s->tune = *t;
+    return MT_OK;
+}
+
+void mt_tune_get(const mt_stack *s, mt_tune *t) { *t = s->tune; }
+#endif

@@ -25,12 +25,14 @@
 
 static int same(const MtUdpStream *s, uint8_t gen) { return s->used == LIVE && s->gen == gen; }
 
+typedef char mt_udp_slot_ok[MT_PB_SLOT_OK(MT_PB_MAX_UDP, sizeof(MtUdpStream)) ? 1 : -1];
+
 static MtUdpStream *stream_of(MtDrv *d, StreamPtr h) {
     MacPtr32 base = mt_os_addr(&d->udp[0]);
     uint32_t off = h - base, i;
     if (off >= (uint32_t)d->nudp * (uint32_t)sizeof(MtUdpStream)) return NULL;
-    i = off / (uint32_t)sizeof(MtUdpStream);
-    if (d->udp[i].used != LIVE || d->udp[i].handle != h) return NULL;   /* stale or misaligned */
+    i = mt_pb_slot(off, MT_PB_SLOT_M(sizeof(MtUdpStream)));             /* = off / sizeof(MtUdpStream), see mt_pb.h */
+    if (i >= d->nudp || d->udp[i].used != LIVE || d->udp[i].handle != h) return NULL;   /* stale or misaligned */
     return &d->udp[i];
 }
 
@@ -48,6 +50,7 @@ static void asr(MtUdpStream *s, uint16_t ev, MacPtr32 icmp) {
 
 static MtAnyPb *rq_take(MtUdpStream *s, uint8_t k) {
     MtAnyPb *pb = s->rq[k].pb;
+    if (s->rq[k].timed) mt_pb_dl_stale(s->d);             /* F7: the cached glue deadline stays exact */
     for (; k + 1 < s->rq_n; k++) s->rq[k] = s->rq[k + 1];
     s->rq_n--;
     return pb;
@@ -90,6 +93,7 @@ static int16_t do_read(MtDrv *d, MtUdpStream *s, MtAnyPb *pb) {
     s->rq[s->rq_n].pb = pb;                                      /* matrix 906: several, FIFO */
     s->rq[s->rq_n].timed = (uint8_t)(tmo != 0);                  /* 0 = no timeout (906) */
     s->rq[s->rq_n].dl = d->now + MS(tmo);
+    if (tmo) mt_pb_dl_stale(d);                                  /* F7: a timeout armed */
     s->rq_n++;
     pb->hdr.ioResult = inProgress;
     return inProgress;
@@ -160,6 +164,7 @@ static int16_t do_create(MtDrv *d, MtAnyPb *pb) {
     d->next_uslot = (uint8_t)((i + 1u) % d->nudp);
     s->d = d;
     s->used = LIVE;
+    if (i >= d->udp_hi) d->udp_hi = (uint8_t)(i + 1u);
     s->born = d->own_ser;                        /* owner serial at creation (mt_pb_in_gone) */
     s->handle = mt_os_addr(s) + ((uint32_t)(s->gen & 7u) << 1);
     s->asr = pb->udp.csParam.create.notifyProc;
@@ -176,11 +181,13 @@ static int16_t do_release(MtUdpStream *s, MtAnyPb *pb) {
     mt_udp_release(s->u);                    /* first: the core stops using the app's buffer */
     s->u = NULL;
     s->used = RELEASING;                     /* the handle is invalid from here on */
+    mt_pb_dl_stale(s->d);                    /* F7: its read timeouts leave the scan */
     s->loan_n = 0;                           /* outstanding loans are forgotten: the buffer is the app's */
     while (s->rq_n) complete(s, rq_take(s, 0), connectionTerminated);   /* matrix 906 */
     pb->udp.csParam.create.rcvBuff = s->rbuf;                    /* the buffer goes back to the app */
     pb->udp.csParam.create.rcvBuffLen = s->rlen;
     s->used = 0;
+    mt_pb_hi_lower(s->d);
     return 0;
 }
 
@@ -274,7 +281,7 @@ static int due(uint32_t dl, uint32_t now) { return (int32_t)(dl - now) <= 0; }
 
 void mt_pb_udp_timers(MtDrv *d) {
     uint8_t i, k;
-    for (i = 0; i < d->nudp; i++) {
+    for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *s = &d->udp[i];
         uint8_t g = s->gen;
         if (s->used != LIVE) continue;
@@ -292,7 +299,7 @@ void mt_pb_udp_timers(MtDrv *d) {
 uint32_t mt_pb_udp_deadline(MtDrv *d) {
     uint32_t best = MT_NO_DEADLINE;
     uint8_t i, k;
-    for (i = 0; i < d->nudp; i++) {
+    for (i = 0; i < d->udp_hi; i++) {
         const MtUdpStream *s = &d->udp[i];
         if (s->used != LIVE) continue;
         for (k = 0; k < s->rq_n; k++)

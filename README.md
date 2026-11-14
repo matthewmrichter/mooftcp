@@ -14,8 +14,8 @@ and DHCP client. It was built for a Mac Classic with 4 MB of RAM, so every byte 
 
 ## Why?
 
-MacTCP is wonderful, but it is old, and on a 4 MB Mac Classic with a SCSI Wi-Fi/Ethernet adapter like
-BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. MoofTCP aims, in this order, for:
+MacTCP is wonderful, but it is old and closed, and on a 4 MB Mac Classic with a SCSI Wi-Fi/Ethernet adapter like
+BlueSCSI it is hungry for memory and awkward to set up. MoofTCP aims, in this order, for:
 
 1. **Reliability.** No hangs, no leaks, no surprises when apps quit.
 2. **Low latency** for interactive use, like typing in a telnet session.
@@ -36,6 +36,46 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 - **Built-in diagnostics.** An optional in-memory log and a small `MoofDiag` tool for bug reports.
 - **A portable core.** The TCP/IP stack in `core/` has no `malloc` and no global state, and is tested on the
   desktop with sanitizers and fuzzers.
+
+## New in 1.1 (release candidate 1.1rc1)
+
+1.1rc1 is a release candidate. The download on the [Releases](../../releases) page is still 1.0, and the version
+badge and file names below stay 1.0 until 1.1 is final.
+
+MoofTCP 1.1 is faster than 1.0. Measured on a real Mac Classic (System 6.0.8, 4 MB, BlueSCSI v2 Wi-Fi), timed on
+the PC: MoofTCP 1.1 with [MoofPort](https://github.com/matthewmrichter/moofport/) 1.1 against 1.0's behaviour (the
+MoofTCP 1.0 engine, with MoofPort at 1.0's settings). The gains come from both together: MoofTCP 1.1's shorter call
+path and MoofPort's `steadyack` timing, which MoofTCP 1.1 switches on. Medians:
+
+|                             | 1.0       | 1.1       |
+| --------------------------- | --------- | --------- |
+| Echo round trip, 1 byte     | 53.6 ms   | 41.4 ms   |
+| Terminal burst, 2,000 bytes | 153.6 ms  | 124.6 ms  |
+| TCP receive, 1 MB           | 45.3 KB/s | 55.6 KB/s |
+
+Measured 2026-11-14 in one session of 10 pairs, with the AppleShare server's Wi-Fi power saving off. These three
+were better in all 10 pairs (the session the night before gave the same direction). Not significant in this
+session: TCP send with 4 sends queued (36.7 -> 41.0 KB/s), one-at-a-time sends (25.2 -> 23.9 KB/s) and AppleShare
+copies (too few pairs with the volume mounted). The network was noisy that day: stock MacTCP's one-at-a-time send
+ranged from 11 to 40 KB/s. The figures were measured over Wi-Fi and vary with the network.
+
+With the DaynaPORT driver the gain is small: MoofTCP leaves DaynaPORT's driver as it is. Echo was about 54.9 ms with
+MoofTCP 1.1 against 57.6 ms with 1.0 (two blocks; the 1.0 figure is from an earlier session with different Wi-Fi
+settings, so this is not a clean comparison).
+
+Against stock MacTCP with the DaynaPORT driver in the same session (3 blocks, medians): MacTCP still answers faster
+(echo 33.6 ms, terminal burst 109.1 ms) and usually sends faster, though its send figures varied widely that day;
+MoofTCP 1.1 with MoofPort receives faster (MacTCP 45.5 KB/s).
+
+- A shorter path through every MacTCP call, timer tick and packet.
+- With the MoofPort 1.1 driver, MoofTCP switches MoofPort to its `steadyack` timing when it opens the driver. With
+  any other driver it changes nothing.
+- The timer recovers by itself from a lost Time Manager task, with a once-a-second heartbeat as a backup.
+- Resident memory stays below MacTCP's.
+- To go back to 1.0: click **Remove** in the 1.1rc1 installer first, then **Install** in the 1.0 installer, and
+  restart (the 1.0 installer does not replace a newer MoofTCP). Your settings are kept.
+
+[CHANGELOG.md](CHANGELOG.md) has the full list.
 
 ## Screenshots
 
@@ -66,10 +106,10 @@ StuffIt Lite 3.6 is tested as working for expanding the `.hqx` packages.
 
 ## Compatibility
 
-Tested on a real **Mac Classic** (System 6.0.8, 4 MB, BlueSCSI v2 WiFi with DaynaPORT) and in the
+**1.0 results:** tested on a real **Mac Classic** (System 6.0.8, 4 MB, BlueSCSI v2 WiFi with DaynaPORT) and in the
 [Snow](https://github.com/twvd/snow) emulator.
 
-| Program                 | Result                       |
+| Program (1.0)           | Result                       |
 | ----------------------- | ---------------------------- |
 | Flynn (telnet terminal) | Works, real Mac and emulator |
 | Wikipedia Reader        | Works, real Mac and emulator |
@@ -79,14 +119,22 @@ Tested on a real **Mac Classic** (System 6.0.8, 4 MB, BlueSCSI v2 WiFi with Dayn
 | TurboGopher             | Works in the emulator        |
 | Eudora                  | Starts; mail was not tried   |
 
+**1.1rc1:** MoofTCP 1.1 ran on the real Mac Classic with the MoofPort driver (two sessions of 10 blocks) and with
+the DaynaPORT driver (2 blocks), using the telnet-style echo and terminal tests, TCP send and receive, and
+AppleShare alongside. In Snow: the installer (install, switch to MacTCP and back, unattended), MultiFinder runs
+with two applications (full and Lite), ApiProbe against MacTCP's recorded answers, and the resident-memory check.
+The programs in the table above were not re-run with 1.1.
+
 Have a program that doesn't work? Please open an issue (see below).
 
 ## Memory
 
-|                                                                                 | MoofTCP       | MoofTCP Lite |
-| ------------------------------------------------------------------------------- | ------------- | ------------ |
-| Driver code                                                                     | 95,623 bytes  | 90,722 bytes |
-| Free system heap after first open (real Mac Classic, single Finder, full build) | about 30.7 KB | n/a          |
+|                                                                                                    | MoofTCP       | MoofTCP Lite  |
+| -------------------------------------------------------------------------------------------------- | ------------- | ------------- |
+| Driver code, 1.1rc1                                                                                | 93,746 bytes  | 88,879 bytes  |
+| Driver code, 1.0                                                                                   | 95,623 bytes  | 90,722 bytes  |
+| Resident over the no-network baseline after network use, 1.1rc1 (emulator; MacTCP: 195,046 bytes) | 171,816 bytes | 166,852 bytes |
+| Free system heap after first open, 1.0 (real Mac Classic, single Finder, full build)               | about 30.7 KB | n/a           |
 
 MultiFinder grows the system heap on demand, so free memory varies more there.
 
@@ -100,9 +148,22 @@ to analyze the codebase and the diagnostic output as well and to submit fix PRs.
 ## Known limitations
 
 - No IPv6.
-- Tested only with the DaynaPORT Ethernet driver on System 6.0.8.
+- Tested only with the DaynaPORT and MoofPort Ethernet drivers on System 6.0.8.
+- The timer's once-a-second heartbeat runs only while some program calls `SystemTask`. A program that waits in a
+  synchronous MacTCP call on a quiet network calls nothing, so a lost timer task then waits for the next packet
+  or call.
 - DHCP is basic: no lease RELEASE, no INIT-REBOOT and no address-conflict probe. While it runs, programs cannot
   use UDP port 68. With no DHCP server, the first open waits about 10 seconds and then fails.
+
+### Network setup note: AppleShare at start-up
+
+AppleShare volumes set to open at start-up can fail to mount. At start-up AppleShare finds the server with
+AppleTalk multicast lookups (4 tries in about 2 seconds, no retry), and on Wi-Fi these are lost far more often than
+normal traffic. Measured on the test setup: with the server's Wi-Fi power saving on, about 1 in 7 to 1 in 3 boots
+failed; with it off, 0 of 15 at night but up to 1 in 3 at busy times of day. The stock MacTCP + DaynaPORT driver
+fails the same way, and in an interleaved test MacTCP + MoofPort failed 4 of 10 boots and MoofTCP 1.1 + MoofPort 1
+of 10. It is not caused by MoofTCP or MoofPort. Workaround: open the volume from the Chooser; to make it rarer,
+reduce multicast loss (a wired connection for the server, the server's Wi-Fi power saving off).
 
 ## Building from source
 

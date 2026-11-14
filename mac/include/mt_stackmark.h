@@ -9,7 +9,8 @@
  *   used   largest (episode entry - sp) seen at any mark: the stack the driver, its call-outs and
  *          nested driver calls took below that entry. MoofDiag prints low, entry and used.
  * An episode is one outermost entry (gate poke from the handler, gate tick from the Time Manager
- * task, or an application Control call) up to its matching leave; nested entries only deepen it.
+ * task, an application Control call, or in perf builds the transmit pump's task, mt_enet_pump.c) up to its
+ * matching leave; nested entries only deepen it.
  * The counters are single-owner volatile words: a mark only lowers/raises its own figure, and an
  * interrupt that nests enter/leave inside a mark leaves nest unchanged, so no mask is needed.
  *

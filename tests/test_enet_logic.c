@@ -67,4 +67,115 @@ static void timer_deadline_helper(void)
     T_CHECK(MT_TIMER_STEP_MS >= 17);
 }
 
-T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper)
+/* 1.1d1 F5: a deadline re-arms the Time Manager task only when it is earlier than the pending shot. */
+static void timer_rearm_only_when_earlier(void)
+{
+    MtTimer t;
+    memset(&t, 0, sizeof t);
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 500));                  /* not armed (or fired: inside the callback) */
+    t.armed = 1;
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 500));                   /* later: the shot at 1100 stays */
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 100));                   /* the same time: stays */
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 99));                   /* earlier: re-arm */
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 17));
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, MT_TIMER_MAX_MS));       /* no deadline: the longest shot */
+    T_CHECK(mt_timer_keep(&t, 0x10u, 0xFFFFFFF0u, 0x20u));         /* across the 2^32 wrap */
+    T_CHECK(!mt_timer_keep(&t, 0x10u, 0xFFFFFFF0u, 0x1Fu));
+    t.in_cb = 1;                                                   /* armed again in the same callback */
+    T_CHECK(mt_timer_keep(&t, 1100, 1000, 500));
+    t.armed = 0;
+    T_CHECK(!mt_timer_keep(&t, 1100, 1000, 500));                  /* fired: PrimeTime from the callback */
+}
+
+/* 1.1d2 fix: a pending shot overdue by more than MT_TIMER_LOST_MS is taken as lost (armed stays 1 but it never
+ * fired): re-arm, whatever the new deadline. Within the slack it is still kept (the coarse clock may pass it a
+ * little before the exact-ms shot fires). */
+static void timer_overdue_shot_rearmed(void)
+{
+    MtTimer t;
+    memset(&t, 0, sizeof t);
+    t.armed = 1;
+    T_CHECK(mt_timer_keep(&t, 1000, 1000, 500));                   /* due now: kept */
+    T_CHECK(mt_timer_keep(&t, 1000 - MT_TIMER_LOST_MS, 1000, 500)); /* at the slack: kept */
+    T_CHECK(!mt_timer_keep(&t, 1000 - MT_TIMER_LOST_MS - 1u, 1000, 500));   /* beyond: lost, re-arm */
+    T_CHECK(!mt_timer_keep(&t, 1000 - 600000u, 1000, MT_TIMER_MAX_MS));     /* long lost, no deadline: re-arm */
+    T_CHECK(!mt_timer_keep(&t, 0xFFFFFF00u, 0x100u, 500));         /* lost across the 2^32 wrap */
+}
+
+/* 1.1d2 fix 2: a lost shot is counted (with the clock time) when it is found, so MoofDiag can show it after the next
+ * gate session has healed it; a live or a fired shot is not. */
+static void timer_lost_shot_counted(void)
+{
+    MtTimer t;
+    MtTimerShot sh;
+    memset(&t, 0, sizeof t);
+    memset(&sh, 0, sizeof sh);
+    sh.due = 1000;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 5000));                   /* not armed: fired, nothing lost */
+    t.armed = 1;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 1000 + MT_TIMER_LOST_MS)); /* within the slack */
+    T_EQ(sh.lost, 0);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1001 + MT_TIMER_LOST_MS));
+    T_EQ(sh.lost, 1);
+    T_EQ(sh.lost_at, 1001 + MT_TIMER_LOST_MS);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 9000));
+    T_EQ(sh.lost, 2);
+    T_EQ(sh.lost_at, 9000);
+    T_CHECK(!mt_timer_keep(&t, sh.due, 9000, 500));                /* and the same shot is re-armed */
+}
+
+/* Task 27: the largest overdue amount of the lost-shot finds is kept (MtTimerShot.lost_max), so a coarse-clock drift
+ * (tens of ms past due) can be told from a shot the Time Manager really lost (found seconds later); a find within the
+ * slack or of a fired shot leaves it alone, a smaller later find does not lower it, and it works across the 2^32 wrap. */
+static void timer_lost_max_overdue(void)
+{
+    MtTimer t;
+    MtTimerShot sh;
+    memset(&t, 0, sizeof t);
+    memset(&sh, 0, sizeof sh);
+    t.armed = 1;
+    sh.due = 1000;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 1000 + MT_TIMER_LOST_MS));  /* within the slack: nothing */
+    T_EQ(sh.lost_max, 0);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1051));                       /* drift: 51 ms past due */
+    T_EQ(sh.lost_max, 51);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 4000));                       /* a real loss: 3 s */
+    T_EQ(sh.lost_max, 3000);
+    T_CHECK(mt_timer_note_lost(&t, &sh, 1040));                       /* smaller: the maximum stays */
+    T_EQ(sh.lost_max, 3000);
+    T_EQ(sh.lost, 3);
+    t.armed = 0;
+    T_CHECK(!mt_timer_note_lost(&t, &sh, 900000));                    /* fired: not a find */
+    T_EQ(sh.lost_max, 3000);
+    t.armed = 1;
+    sh.due = 0xFFFFFF00u;
+    T_CHECK(mt_timer_note_lost(&t, &sh, 0x2000u));                    /* across the wrap: 0x2100 ms */
+    T_EQ(sh.lost_max, 0x2100u);
+}
+
+/* 1.1d2 fix: the Time Manager steps of mt_timer_arm (mt_timer_arm_steps), run against a model of the task: every arm,
+ * outside the callback, once inside it and again inside it, leaves the task inserted and primed with armed = 1. */
+static void timer_arm_steps_always_prime(void)
+{
+    MtTimer t;
+    int ins = 0, primed = 0, k, seq;
+    for (seq = 0; seq < 4; seq++) {
+        memset(&t, 0, sizeof t);
+        t.inserted = 1; ins = 1; primed = 0;                         /* mt_timer_init: InsTime */
+        for (k = 0; k < 6; k++) {
+            unsigned st;
+            int in_cb = (seq & 1) ? (k >= 2) : (k % 2);              /* mixes of task-time and in-callback arms */
+            if (k == 3 && (seq & 2)) { t.armed = 0; primed = 0; }    /* the shot fired in between */
+            t.in_cb = (uint8_t)in_cb;
+            st = mt_timer_arm_steps(&t);
+            if (st & MT_TIMER_RMV) { T_CHECK(ins); ins = 0; primed = 0; t.inserted = 0; }
+            if (st & MT_TIMER_INS) { T_CHECK(!ins); ins = 1; t.inserted = 1; }
+            T_CHECK(ins);                                            /* PrimeTime needs an inserted task */
+            if (primed) T_CHECK(0);                                  /* never PrimeTime an active task */
+            primed = 1; t.armed = 1;
+        }
+    }
+}
+
+T_MAIN(pad_lengths, ms_from_ticks, timer_deadline_helper, timer_rearm_only_when_earlier, timer_overdue_shot_rearmed,
+       timer_arm_steps_always_prime, timer_lost_shot_counted, timer_lost_max_overdue)

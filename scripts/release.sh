@@ -29,6 +29,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -eq 1 ] || die "usage: release.sh [--force] [--no-build] <version>"
+# Perf and debug build switches never reach a release: with MT_TUNE / MT_TRACE set, build-mac.sh (scripts/variant.sh)
+# builds into build-mac-tune*/ while this script packages build-mac/, i.e. whatever was built there last; and
+# MT_EXTRA_CFLAGS would change the release objects. Refuse rather than unset, so the caller sees why.
+for v in MT_TUNE MT_TRACE MT_EXTRA_CFLAGS; do
+  [ -z "${!v:-}" ] || die "$v is set ('${!v}'): release builds take no perf or extra build flags; run with $v unset (env -u $v ...)"
+done
 export MT_LITE=0
 BM=build-mac
 ver="$1"
@@ -73,6 +79,10 @@ for tree in build-mac build-mac-lite; do
     [ "$(wc -l <<<"$syms")" -gt 5 ] || die "nm output of $tree $flt.flt.gdb looks empty"
     if grep -q 'mt_os_stack_\(mark\|enter\|leave\)\|mt_os_mac_set_stack' <<<"$syms"; then
       die "$tree $flt has stack-mark symbols: not a release build"
+    fi
+    # perf builds (MT_TUNE levers, the MT_TUNE transmit pump, the MT_TRACE echo-path trace) are never released
+    if grep -q ' _\?\(mt_tune_set\|mt_enet_pump_run\|mt_trace[A-Za-z0-9_]*\)$' <<<"$syms"; then
+      die "$tree $flt has perf-build symbols (mt_tune_set / mt_enet_pump_run / mt_trace*): not a release build"
     fi
     if [ "$flt" = MoofDrvr ]; then   # Lite: no DHCP code at all; full: the client is there
       if [ "$tree" = build-mac-lite ]; then

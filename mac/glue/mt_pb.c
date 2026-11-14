@@ -2,6 +2,15 @@
  * TCP calls live in mt_pb_tcp.c. See mt_pb.h for the contract. */
 #include <string.h>
 #include "mt_pb.h"
+#ifdef MT_TEST_HOOKS
+#include "mt_int.h"                /* mt_next_deadline_scan: the reference scan (test builds) */
+#endif
+#ifdef MT_TUNE
+#include "mt_tune_abi.h"
+#endif
+#ifdef MT_TRACE
+#include "mt_trace.h"
+#endif
 
 #if defined(__GNUC__)
 #define OWN_BARRIER() __asm__ volatile("" ::: "memory")
@@ -15,7 +24,8 @@ uint32_t mt_pb_size(const mt_limits *lim) {
     return DRV_ROUND((uint32_t)sizeof(MtDrv)) + mt_stack_size(lim);
 }
 
-MtDrv *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link *link,
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) MtDrv *mt_pb_init(void *mem, uint32_t len, const mt_limits *lim, const mt_link *link,
                   uint32_t seed) {
     MtDrv *d = (MtDrv *)mem;
     uint32_t off = DRV_ROUND((uint32_t)sizeof(MtDrv));
@@ -135,13 +145,19 @@ int mt_pb_unstick(MtDrv *d, const MtAppMem *cur, unsigned gate_below) {
 
 void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
     uint8_t sv = d->co_gate, gen;
-    if (d->n_own && (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
+    if (d->n_own && !mt_pb_owners_alive(d) &&  /* 1.1d3: every owner alive, nothing is gone (a load each) */
+        (mt_pb_gone(d, mt_os_addr(pb)) || mt_pb_gone(d, pb->hdr.ioCompletion)))
         return;                                 /* its application quit (MultiFinder): the sweep forgets it */
     if (pb->hdr.ioCompletion) co_note(d);       /* no routine, nothing can quit inside it: skip the context
                                                  * (every sync call completes through here; round 5) */
     gen = d->co_gen;
     d->co_gate = (uint8_t)mt_os_gate_depth();   /* calls from the routine find the gate here */
     d->depth++;
+#ifdef MT_TRACE
+    if (pb->hdr.csCode != MT_CS_TUNE && pb->hdr.csCode != MT_CS_TRACE)
+        mt_trace_ev(MT_TRACE_PBDONE, pb->hdr.ioCompletion != 0, (uint16_t)pb->hdr.csCode, mt_os_addr(pb),
+                    (uint32_t)(int32_t)err);
+#endif
     mt_os_complete(pb, err);
     if (d->co_gen != gen) return;               /* abandoned meanwhile (a wrongful unstick): the accounting
                                                  * was reset, a depth-- would wrap it */
@@ -151,7 +167,7 @@ void mt_pb_call_complete(MtDrv *d, MtAnyPb *pb, int16_t err) {
 void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason, MacPtr32 icmp) {
     uint8_t sv, gen;
     if (!a->proc) return;                       /* no notifyProc given: accepted (matrix 202b) */
-    if (d->n_own && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
+    if (d->n_own && !mt_pb_owners_alive(d) && mt_pb_gone(d, a->proc)) return;   /* its application quit (MultiFinder) */
     co_note(d);
     gen = d->co_gen;
     sv = d->co_gate;
@@ -162,12 +178,24 @@ void mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t reason
     co_done(d, sv);
 }
 
+void mt_pb_hi_lower(MtDrv *d) {
+    uint8_t h = d->tcp_hi;
+    const MtStream *t = d->tcp + h;
+    const MtUdpStream *u;
+    while (h && !(--t)->used) h--;
+    d->tcp_hi = h;
+    h = d->udp_hi;
+    u = d->udp + h;
+    while (h && !(--u)->used) h--;
+    d->udp_hi = h;
+}
+
 /* Perform the core releases that were deferred while a glue frame was active. Also called by
  * the driver entry after it ran a completion routine itself (mt_pb_flush). */
 static void flush_deferred(MtDrv *d) {
     uint8_t i;
     if (d->depth || d->in_core || !d->rel_mask) return;
-    for (i = 0; i < d->ntcp; i++)
+    for (i = 0; i < d->tcp_hi; i++)
         if (d->rel_mask & (1u << i)) {
             d->rel_mask &= (uint16_t)~(1u << i);
             mt_pb_tcp_free(d, &d->tcp[i]);
@@ -181,6 +209,59 @@ static int answers_zero(int16_t cs) {
     return cs == 1 || cs == 9 || cs == 10 || cs == 11 || cs == 14 || cs == 16 || cs == 18 ||
            cs == 44;
 }
+
+#ifdef MT_TUNE
+/* Private Control MT_CS_TUNE (mt_tune_abi.h): get or set the core's timing levers and the link's transmit pump
+ * (d->txpump, glue state: the core has no part in it); perf builds only. Version 1 blocks read as txpump 0. Runs in
+ * mt_pb_control's critical section (under the core gate: mt_os_irq_save = MT_GATE_ENTER; the core is not entered,
+ * in_core is only set inside it), which is also the gate owner the pump's switch belongs to (mt_enet.h). */
+int16_t mt_pb_tune_control(MtDrv *d, MtAnyPb *pb) {
+    uint16_t w[MT_TW_N];
+    MacPtr32 a;
+    uint8_t *p;
+    mt_tune t;
+    uint16_t pump;
+    memcpy(&a, (const uint8_t *)pb + 28, 4);
+    p = (uint8_t *)mt_os_ptr(a);
+    if (!p) return MT_TUNE_PARAMERR;
+    memcpy(w, p, MT_TUNE_BLOCK_BYTES);
+    if (w[MT_TW_VERSION] != MT_TUNE_ABI_VERSION && w[MT_TW_VERSION] != MT_TUNE_ABI_V1) return MT_TUNE_PARAMERR;
+    if (w[MT_TW_OP] == MT_TUNE_OP_SET) {
+        pump = w[MT_TW_VERSION] == MT_TUNE_ABI_V1 ? 0 : w[MT_TW_TXPUMP];
+        if (w[MT_TW_QUICKACK] > 255u || pump > 1u || (pump && !d->txpump)) return MT_TUNE_PARAMERR;
+        t.rto_min = w[MT_TW_RTO_MIN];
+        t.rto_init = w[MT_TW_RTO_INIT];
+        t.delack_ms = w[MT_TW_DELACK];
+        t.stall_ms = w[MT_TW_STALL];
+        t.quickack = (uint8_t)w[MT_TW_QUICKACK];
+        if (mt_tune_set(d->s, &t) != MT_OK) return MT_TUNE_PARAMERR;
+        if (d->txpump) *d->txpump = (uint8_t)pump;
+        return 0;
+    }
+    if (w[MT_TW_OP] != MT_TUNE_OP_GET) return MT_TUNE_PARAMERR;
+    mt_tune_get(d->s, &t);
+    w[MT_TW_RTO_MIN] = t.rto_min;
+    w[MT_TW_RTO_INIT] = t.rto_init;
+    w[MT_TW_DELACK] = t.delack_ms;
+    w[MT_TW_STALL] = t.stall_ms;
+    w[MT_TW_QUICKACK] = t.quickack;
+    w[MT_TW_TXPUMP] = (w[MT_TW_VERSION] != MT_TUNE_ABI_V1 && d->txpump) ? *d->txpump : 0;
+    memcpy(p, w, MT_TUNE_BLOCK_BYTES);
+    return 0;
+}
+#endif
+
+#ifdef MT_TRACE
+/* Private Control MT_CS_TRACE (mt_trace_abi.h): the echo-path trace's ring; perf builds with MT_TRACE only. */
+int16_t mt_pb_trace_control(MtDrv *d, MtAnyPb *pb) {
+    MacPtr32 a;
+    MtTraceBlk *blk;
+    (void)d;
+    memcpy(&a, (const uint8_t *)pb + 28, 4);
+    blk = (MtTraceBlk *)mt_os_ptr(a);
+    return blk ? mt_trace_control(blk) : MT_TRACE_PARAMERR;
+}
+#endif
 
 int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
     int16_t cs = pb->hdr.csCode, r;
@@ -199,6 +280,14 @@ int16_t mt_pb_control(MtDrv *d, MtAnyPb *pb) {
         r = mt_pb_ip_control(d, pb);
     else if (cs == MT_CS_DNR)
         r = mt_pb_dns_control(d, pb);           /* private: dnrp's lookups (not a MacTCP code) */
+#ifdef MT_TUNE
+    else if (cs == MT_CS_TUNE)
+        r = mt_pb_tune_control(d, pb);          /* private: timing levers (perf builds only) */
+#endif
+#ifdef MT_TRACE
+    else if (cs == MT_CS_TRACE)
+        r = mt_pb_trace_control(d, pb);         /* private: the echo-path trace (perf builds with MT_TRACE) */
+#endif
     else if (answers_zero(cs))
         r = 0;
     else
@@ -225,17 +314,31 @@ void mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len) {
     mt_os_irq_restore(sv);
 }
 
+/* 1.1d2 F7: the core's cached deadline, the glue's cached command timeouts (rebuilt here only when a change made
+ * them stale), the queued-reads kick and the MultiFinder sweep: O(1) unless a cache is stale. */
 uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     int sv = mt_os_irq_save();
     uint32_t c, g;
     d->now = mt_os_ms();
-    c = mt_next_deadline(d->s, d->now);
-    g = mt_pb_tcp_deadline(d);
-    if (g > c) g = c;
-    c = mt_pb_udp_deadline(d);
-    if (g > c) g = c;
-    c = mt_pb_ip_deadline(d);
-    if (g > c) g = c;
+    g = mt_next_deadline(d->s, d->now);
+    if (d->gdl_state == MT_PB_DL_STALE) {      /* rescan (an overdue timeout is held as now: still 0 later) */
+        uint32_t t;
+        c = mt_pb_tcp_deadline(d);
+        t = mt_pb_udp_deadline(d);
+        if (c > t) c = t;
+        t = mt_pb_ip_deadline(d);
+        if (c > t) c = t;
+        d->gdl_at = d->now + c;
+        d->gdl_state = c == MT_NO_DEADLINE ? MT_PB_DL_NONE : MT_PB_DL_AT;
+#ifdef MT_TEST_HOOKS
+        d->gdl_scans++;
+#endif
+    }
+    if (d->gdl_state == MT_PB_DL_AT) {
+        c = (int32_t)(d->gdl_at - d->now) > 0 ? d->gdl_at - d->now : 0;
+        if (g > c) g = c;
+    }
+    if (d->rcv_kick) g = 0;                     /* serve the queued reads at once */
     if (d->n_own) {                             /* MultiFinder owners: the periodic sweep (Task 12) */
         c = (int32_t)(d->own_dl - d->now) > 0 ? d->own_dl - d->now : 0;
         if (g > c) g = c;
@@ -244,7 +347,30 @@ uint32_t mt_pb_next_deadline_ms(MtDrv *d) {
     return g;
 }
 
+#ifdef MT_TEST_HOOKS
+uint32_t mt_pb_next_deadline_scan(MtDrv *d) {
+    uint32_t c, g;
+    d->now = mt_os_ms();
+    g = mt_next_deadline_scan(d->s, d->now);
+    c = mt_pb_tcp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_udp_deadline(d);
+    if (g > c) g = c;
+    c = mt_pb_ip_deadline(d);
+    if (g > c) g = c;
+    if (d->rcv_kick) g = 0;
+    if (d->n_own) {
+        c = (int32_t)(d->own_dl - d->now) > 0 ? d->own_dl - d->now : 0;
+        if (g > c) g = c;
+    }
+    return g;
+}
+#endif
+
 void mt_pb_tick(MtDrv *d) {
+#ifdef MT_TRACE
+    mt_trace_ev(MT_TRACE_TICK, 0, 0, mt_os_ms(), 0);
+#endif
     int sv = mt_os_irq_save();
     if (d->in_core) {
         d->reenter_drops++;
@@ -262,6 +388,7 @@ void mt_pb_tick(MtDrv *d) {
     mt_pb_ip_timers(d);
     mt_pb_tcp_after_core(d);
     flush_deferred(d);
+    mt_pb_dl_stale(d);                          /* F7: the timers may have moved anything: one rescan next query */
     mt_os_irq_restore(sv);
 }
 
@@ -337,10 +464,11 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
     int sv = mt_os_irq_save();
     uint8_t i;
     Gone g;
+    d->own_key_ok = 0;                          /* 1.1d3 F6: every forget drops the sweep's fast key */
     g.d = d;
     g.m = m;
     g.m_born = m_born;
-    for (i = 0; i < d->ntcp; i++) {
+    for (i = 0; i < d->tcp_hi; i++) {
         MtStream *s = &d->tcp[i];
         uint8_t gen = s->gen;
         uint16_t conn = (uint16_t)(s->conn + 1u);
@@ -350,19 +478,25 @@ static void forget_aged(MtDrv *d, const MtAppMem *m, uint16_t m_born) {
         s->gen = gen;
         s->conn = conn;
         d->rel_mask &= (uint16_t)~(1u << i);
+        mt_pb_dl_stale(d);                      /* F7: its timeouts went with it */
     }
-    for (i = 0; i < d->nudp; i++) {
+    for (i = 0; i < d->udp_hi; i++) {
         MtUdpStream *u = &d->udp[i];
         uint8_t gen = u->gen;
         if (!u->used || !app_udp(&g, u)) continue;
         if (u->u) mt_udp_release(u->u);
         memset(u, 0, sizeof *u);
         u->gen = gen;
+        mt_pb_dl_stale(d);
     }
+    mt_pb_hi_lower(d);
     mt_pb_dns_goodbye(d, m, m_born);
     for (i = 0; i < MT_PB_ECHOQ; i++) {           /* a late reply is ignored */
         MtEcho *e = &d->echo[i];
-        if (e->state && e->blk.ioCompletion && gone_p(&g, e->blk.ioCompletion, e->born)) e->state = 0;
+        if (e->state && e->blk.ioCompletion && gone_p(&g, e->blk.ioCompletion, e->born)) {
+            e->state = 0;
+            mt_pb_dl_stale(d);
+        }
     }
     mt_os_irq_restore(sv);
 }
@@ -371,12 +505,14 @@ void mt_pb_forget(MtDrv *d, const MtAppMem *m) { forget_aged(d, m, d->own_ser); 
 
 /* See mt_pb.h "Owner table slots": lo first, so a concurrent reader sees an empty slot. */
 static void own_drop(MtDrv *d, uint8_t i) {
+    d->own_key_ok = 0;                          /* 1.1d3 F6: the table changes */
     *(volatile MacPtr32 *)&d->own[i].lo = 0;
     OWN_BARRIER();
     d->own[i].hi = d->own[i].h0 = d->own[i].name = 0;
     if (d->n_own) d->n_own--;
 }
 static void own_set(MtDrv *d, uint8_t i, const MtAppMem *m) {
+    d->own_key_ok = 0;                          /* 1.1d3 F6: the table changes */
     if (!++d->own_ser) d->own_ser = 1;          /* never 0: that is "age unknown" (mt_pb_in_gone) */
     d->own_born[i] = d->own_ser;
     d->own[i].hi = m->hi;
@@ -402,11 +538,13 @@ void mt_pb_goodbye(MtDrv *d) {
  * 4) contains it too: a stale PB or routine of the dead one would point into the tenant's memory. The
  * tenant's own routines are withheld with them until the dead owner is swept (counted here as well). */
 int mt_pb_gone(MtDrv *d, MacPtr32 p) {
-    uint8_t i;
-    if (!d->n_own || !p) return 0;
-    for (i = 0; i < MT_PB_OWNERS; i++) {
+    uint8_t i, left = d->n_own;
+    if (!left || !p) return 0;
+    for (i = 0; left && i < MT_PB_OWNERS; i++) {   /* bounded by n_own, as quiet() (1.1d1) */
         const MtAppMem *o = &d->own[i];
-        if (o->lo && mt_pb_in_app(o, p) && !mt_os_app_alive(o)) {
+        if (!o->lo) continue;
+        left--;
+        if (mt_pb_in_app(o, p) && !mt_os_app_alive(o)) {
             d->n_dead_calls++;
             return 1;
         }
@@ -440,7 +578,7 @@ static int quiet(const MtDrv *d, const MtAppMem *cur) {
 
 /* The input path's check (mt_drv.c rx_cb, before every frame while owners exist): every recorded
  * partition still there? Inline header loads only; the full sweep runs when one is gone. */
-int mt_pb_owners_alive(const MtDrv *d) {
+__attribute__((noinline)) int mt_pb_owners_alive(const MtDrv *d) {   /* one copy: per frame and call */
     const MtAppMem *o = d->own;
     uint8_t left = d->n_own, i;
     for (i = 0; left && i < MT_PB_OWNERS; i++, o++) {
@@ -451,13 +589,32 @@ int mt_pb_owners_alive(const MtDrv *d) {
     return 1;
 }
 
+/* The fast answer is quiet()'s: the caller's MtAppMem is the one recorded when the key was kept (same inputs), so it
+ * is still known and overlaps no other owner (the table is unchanged); what remains is every owner alive, and the
+ * caller's own record is alive by the header word the key just compared. */
+int mt_pb_sweep_quiet(MtDrv *d) {
+    if (!d->own_key_ok || !mt_os_app_same(&d->own_key) || !mt_pb_owners_alive(d)) return 0;
+#ifdef MT_TEST_HOOKS
+    {
+        MtAppMem cur;
+        int part = mt_os_app_mem(&cur);
+        assert(part && quiet(d, &cur));          /* the full path agrees */
+        d->own_fast++;
+    }
+#endif
+    return 1;
+}
+
 int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx) {
     MtAppMem cur, gone;
     int sv, n = 0, part = 0, known = 0, can;
     uint8_t i, fr = MT_PB_OWNERS;
     uint16_t gone_born;
     if (!note && !d->n_own) return 0;            /* no MultiFinder caller recorded: nothing to watch */
-    if (note) part = mt_os_app_mem(&cur);        /* task time: the caller's own globals */
+    if (note) {                                  /* task time: the caller's own globals (and F6's key of them) */
+        d->own_key_ok = 0;
+        part = mt_os_app_mem_key(&cur, &d->own_key);
+    }
     if (!part && !d->n_own) return 0;
     if (!note) {                                 /* timer / input path (gate owner): every time */
         if (quiet(d, NULL)) {
@@ -465,6 +622,9 @@ int mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), 
             return 0;
         }
     } else if (quiet(d, part ? &cur : NULL)) {
+        if (part && d->own_key.w[0]) d->own_key_ok = 1;   /* 1.1d3 F6: its next call may take the fast path. (An
+                                                 * interrupt-time sweep since quiet() can only have dropped a dead
+                                                 * owner, which leaves this caller quiet: the key stays right) */
         return 0;                                /* the common case: no gate round trip */
     } else if (note == MT_PB_SWEEP_NOTE_ONLY && !part) {
         return 0;

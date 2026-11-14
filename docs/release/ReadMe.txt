@@ -1,18 +1,62 @@
-MoofTCP 1.0
-===========
+MoofTCP 1.1rc1
+==============
 
 MoofTCP is a replacement for MacTCP. Programs that use MacTCP
 should work with it unchanged. It keeps its settings in its own
 file and does not need MacTCP's.
 
-It was developed in an emulator of a Mac Classic with 4 MB and
-tested on a real Mac Classic (System 6.0.8, 4 MB, a BlueSCSI
-with DaynaPORT). Other Macs and adapters were not tried. Please
-report problems.
+It was developed in an emulator of a Mac Classic with 4 MB.
+MoofTCP 1.0 was tested on a real Mac Classic (System 6.0.8,
+4 MB, a BlueSCSI with DaynaPORT). MoofTCP 1.1 was tested on the
+same Mac with the MoofPort driver and with the DaynaPORT
+driver. Other Macs and adapters were not tried. Please report
+problems.
 
-Tested with MoofTCP in the emulator: Flynn, Wikipedia Reader,
-MacTCP Watcher, NCSA Telnet, Fetch and TurboGopher (they
-connect and work). Eudora starts; its mail was not tried.
+Tested with MoofTCP 1.0 in the emulator: Flynn, Wikipedia
+Reader, MacTCP Watcher, NCSA Telnet, Fetch and TurboGopher
+(they connect and work). Eudora starts; its mail was not tried.
+For 1.1 the emulator tests were the Installer, MultiFinder with
+two programs, a MacTCP call-by-call comparison (ApiProbe) and
+the memory check; the programs above were not tried again.
+
+
+NEW IN 1.1
+
+This is a release candidate (1.1rc1).
+
+MoofTCP 1.1 is faster than 1.0. Measured on a real Mac Classic
+with a BlueSCSI v2 Wi-Fi (medians, timed on the PC): MoofTCP 1.1
+with the MoofPort 1.1 driver, against 1.0's behaviour (the
+MoofTCP 1.0 engine, with MoofPort at 1.0's settings). The gains
+come from both together: MoofTCP 1.1's shorter path and
+MoofPort's "steadyack" timing, which MoofTCP 1.1 switches on.
+
+                          1.0           1.1
+  Echo round trip         53.6 ms       41.4 ms
+  Terminal burst,         153.6 ms      124.6 ms
+    2,000 bytes
+  TCP receive, 1 MB       45.3 KB/s     55.6 KB/s
+
+Measured 2026-11-14, 10 pairs in one session, with the
+AppleShare server's Wi-Fi power saving off; these three were
+better in all 10 pairs. Not significant that day: TCP send
+with 4 sends queued (36.7 -> 41.0 KB/s), one-at-a-time sends
+(25.2 -> 23.9 KB/s) and AppleShare copies (too few pairs). The
+network was noisy that day, and the figures vary with the
+network.
+
+With the DaynaPORT driver the gain is small, because MoofTCP
+leaves that driver as it is: echo about 54.9 ms with 1.1
+against 57.6 ms with 1.0 (an earlier session with different
+Wi-Fi settings, so not a clean comparison).
+
+MoofTCP 1.1 still uses less system memory than MacTCP. Update
+from 1.0 by running the 1.1 Installer and clicking Install; your
+settings stay.
+
+To go back to 1.0: click Remove in the 1.1rc1 Installer first,
+then Install in the 1.0 Installer, and restart. (The 1.0
+Installer does not replace a newer MoofTCP.) Your settings stay.
 
 
 TWO VERSIONS: MOOFTCP AND MOOFTCP LITE
@@ -41,8 +85,8 @@ WHAT YOU NEED
 
   - A Mac with System 6.0.8 (the only version tested).
   - An Ethernet adapter on the SCSI bus that uses the DaynaPORT
-    driver (a BlueSCSI with DaynaPORT, for example). It is the
-    only adapter MoofTCP was tested with.
+    driver or the MoofPort driver (a BlueSCSI v2 Wi-Fi, for
+    example). It is the only adapter MoofTCP was tested with.
   - Nothing else. You do not need MacTCP's settings; MoofTCP
     has its own.
 
@@ -128,4 +172,24 @@ KNOWN LIMITS
 
   - MoofTCP Lite has no DHCP: you must enter the address yourself.
   - No IPv6.
-  - Tested only with the DaynaPORT Ethernet driver.
+  - Tested only with the DaynaPORT and MoofPort Ethernet
+    drivers.
+  - MoofTCP's timer has a once-a-second backup that runs only
+    while a program calls the system (SystemTask). A program
+    that waits in a MacTCP call on a quiet network does not, so
+    a rare lost timer event then waits for the next packet.
+
+
+NETWORK SETUP NOTE: APPLESHARE AT START-UP
+
+AppleShare volumes set to open at start-up may not mount. At
+start-up AppleShare finds the server with AppleTalk multicast
+lookups (4 tries in about 2 seconds, no retry). On Wi-Fi these
+are lost far more often than normal traffic. On the test
+setup, with the server's Wi-Fi power saving on, about 1 boot
+in 7 to 1 in 3 failed; with it off, none of 15 at night but up
+to 1 in 3 at busy times of day. Stock MacTCP with the DaynaPORT
+driver fails the same way. It is not caused by MoofTCP or
+MoofPort. Open the volume from the Chooser; to make it rarer,
+use a wired connection for the server or turn its Wi-Fi power
+saving off.

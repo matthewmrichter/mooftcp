@@ -80,6 +80,7 @@ void mt_os_asr(const MtStreamAsr *a, uint16_t event, uint16_t reason, MacPtr32 i
 
 static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     MtRes *r = (MtRes *)ctx;
+    mt_drv_note_work(&r->armed);                 /* a frame after an early tick: after_cb queries the deadline */
     /* MultiFinder: notice a quit application before the core writes into its receive buffers: every
      * frame, one header load per recorded owner (a load and a branch without MultiFinder; Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_RX)) return;   /* dropped (TCP
@@ -87,8 +88,30 @@ static void rx_cb(void *ctx, const uint8_t *frame, uint16_t len) {
     mt_pb_input(r->d, frame, len);
 }
 
+/* After a gate session (and an early timer tick): the watchdog, then the timer for the deadline d read at now (now is
+ * read before the deadline query: the shot is never late). The Time Manager is touched only for an earlier deadline. */
+static void arm_next(MtRes *r, uint32_t now, uint32_t d) {
+    mt_enet_watchdog(&r->enet, now);             /* idle: one compare */
+    d = mt_enet_wd_deadline(&r->enet, d, now);
+    mt_timer_arm_deadline(&r->timer, d, now, &r->shot);
+}
+
 static void tick_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
+    uint32_t now = 0, dl = 0;
+    if (r->timer.in_cb) {                        /* only the Time Manager task's ticks can be early */
+        now = mt_os_ms();
+        dl = mt_pb_next_deadline_ms(r->d);       /* O(1) since 1.1d2 (F7) */
+    }
+    /* 1.1d1: run from the Time Manager task (in_cb; a tick deferred behind a held gate runs in full, as before) before
+     * anything is due (the timer is re-armed only for earlier deadlines): no sweep, no tick work. 1.1d2: the timer is
+     * armed here with the deadline just read, and after_cb does not query it again unless its drain ran a PB */
+    if (mt_drv_tick_idle(r->timer.in_cb, dl)) {
+        arm_next(r, now, dl);
+        mt_drv_note_early(&r->armed);
+        return;
+    }
+    mt_drv_note_work(&r->armed);
     mt_entry_sweep(&r->entry, 0, MT_SWEEP_TIMER);   /* MultiFinder: applications that quit (Task 12) */
     if ((r->d->n_own || r->d->depth) && !mt_entry_core_ok(&r->entry, MT_SWEEP_TIMER)) return;   /* a gone owner
                                                  * not yet forgotten: no core work (no drain either) */
@@ -98,13 +121,30 @@ static void tick_cb(void *ctx) {
 
 static void after_cb(void *ctx) {
     MtRes *r = (MtRes *)ctx;
-    mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
+    uint32_t now;
+    int ran = mt_entry_drain_ok(&r->entry, MT_SWEEP_TIMER);   /* same rule as tick_cb: no drain while a gone owner
                                                  * is still recorded (its queued PBs are not dropped yet) */
-    mt_enet_watchdog(&r->enet, mt_os_ms());      /* idle: one compare */
-    mt_timer_arm_deadline(&r->timer, mt_enet_wd_deadline(&r->enet, mt_pb_next_deadline_ms(r->d)));
+    if (!mt_drv_after_query(&r->armed, ran)) return;   /* an early tick armed the timer already (tick_cb) */
+    now = mt_os_ms();
+    arm_next(r, now, mt_pb_next_deadline_ms(r->d));
 }
 
 static void tm_cb(void *ctx) { mt_gate_tick(&((MtRes *)ctx)->gate); }
+
+#ifdef MT_TUNE
+/* Perf builds: link.tx goes through the transmit pump (mt_enet.h), which with the lever off does what
+ * mt_enet_write does; pump_cb is the pump's own Time Manager task (never enters the core).
+ * MT_TXPUMP_BOOT=1 (measurement builds only, e.g. MT_TUNE=1 MT_EXTRA_CFLAGS="... -DMT_TXPUMP_BOOT=1"
+ * scripts/mem-check.sh): the lever starts on, so the memory and stack rules are checked with the pump in use. */
+#ifndef MT_TXPUMP_BOOT
+#define MT_TXPUMP_BOOT 0
+#endif
+static int pump_tx(void *ctx, const uint8_t *frame, uint16_t len) {
+    MtRes *r = (MtRes *)ctx;
+    return mt_enet_tx_write(&r->enet, &r->pump, frame, len);
+}
+static void pump_cb(void *ctx) { MtRes *r = (MtRes *)ctx; mt_enet_pump_run(&r->enet, &r->pump); }
+#endif
 
 /* ---- boot (from the INIT, once) ---- */
 
@@ -117,7 +157,8 @@ long mt_drv_boot(void *drvr) {
     return r;
 }
 
-static long boot(void *drvr) {
+/* 1.1d3: runs only at boot: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) static long boot(void *drvr) {
     mt_limits lim;
     mt_link link;
     mt_ifconfig cfg;
@@ -150,8 +191,13 @@ static long boot(void *drvr) {
     r->variant = MT_RES_VARIANT_LITE;            /* full: stays 0 (NewPtrSysClear) */
 #endif
 
+#ifdef MT_TUNE
+    link.ctx = r;
+    link.tx = pump_tx;
+#else
     link.ctx = &r->enet;
     link.tx = mt_enet_write;
+#endif
     r->d = mt_pb_init((uint8_t *)r + off, len - off, &lim, &link, LM_TICKS);
     if (!r->d) { mt_mac_free(raw); return MT_BOOT_NOMEM; }
     mt_mac_entropy(&ea, &eb);
@@ -169,6 +215,15 @@ static long boot(void *drvr) {
     r->stk.flags = (uint16_t)((MT_STACK_MARK ? 1 : 0) | (MT_STACK_PAINT ? 2 : 0));
     mt_os_mac_set_stack(&r->stk);
     mt_timer_init(&r->timer, tm_cb, r);
+#ifdef MT_TUNE
+    mt_timer_init(&r->pump.tm, pump_cb, r);
+    r->pump.on = MT_TXPUMP_BOOT;
+    r->d->txpump = &r->pump.on;
+#endif
+#ifdef MT_TRACE
+    mt_trace_set(&r->trace);                     /* perf builds: the echo-path trace records from here on */
+    mt_trace_mac_start(&r->trace);               /* its stopwatch (a Time Manager task) and lap_us */
+#endif
 
     r->view.magic = MT_VIEW_MAGIC;
     r->view.version = MT_VIEW_VERSION;
@@ -191,6 +246,13 @@ static long boot(void *drvr) {
     if (e) {
         r->enet_err = (int16_t)e;
         mt_timer_close(&r->timer);
+#ifdef MT_TUNE
+        mt_timer_close(&r->pump.tm);
+#endif
+#ifdef MT_TRACE
+        mt_trace_set(0);
+        mt_timer_close(&r->trace.clk);
+#endif
         mt_os_mac_set_gate(0);
         mt_os_mac_set_stack(0);
         g_res = 0;
@@ -208,7 +270,8 @@ static long boot(void *drvr) {
 /* The first successful open brings the link up: .ENET0 cannot be opened at INIT time (obs, Task 10:
  * the DaynaPORT driver's poll reads through CurStackBase, which is -1 until the first application
  * runs: address error at its offset 0x19F8). MacTCP also opens its LAP at driver open. */
-static int16_t link_up(MtRes *r) {
+/* 1.1d3: runs only at the first OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) static int16_t link_up(MtRes *r) {
     void *z;
     int e;
     if (r->enet.opened) return 0;
@@ -217,15 +280,16 @@ static int16_t link_up(MtRes *r) {
     mt_mac_zone_restore(z);
     r->enet_err = (int16_t)e;
     if (e) return ipBadLapErr;
+    r->mp_tune = mt_enet_mp_tune(r->enet.refnum);   /* 1.1d4: a MoofPort driver gets steadyack; any other driver,
+                                                  * version or error: nothing changes, the open goes on (mt_enet_mp.h) */
     memcpy(r->cfg.mac, r->enet.mac, 6);
 #ifndef MT_NO_DHCP
     if (r->view.mode)                            /* DHCP: the client starts; its DISCOVER leaves at the first tick */
         (void)mt_pb_dhcp_start(r->d, &r->cfg, r->dhcp_hint, &r->view);
     else
 #endif
-        mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: arms the timer too */
-    r->view.linked = 1;
-    mt_timer_arm_deadline(&r->timer, mt_pb_next_deadline_ms(r->d));
+        mt_pb_set_config(r->d, &r->cfg);         /* gate enter/leave: after_cb arms the timer */
+    r->view.linked = 1;                          /* (1.1d1: no second arm here; it would keep the same shot) */
     return 0;
 }
 
@@ -240,7 +304,13 @@ static void enet_service(MtRes *r, const MtAnyPb *pb) {
     if (pb->hdr.csCode == -1 || sr_irq() || mt_os_gate_depth() != 0) return;
     z = mt_mac_zone_sys();
     MT_GATE_ENTER(&r->gate);
+#ifdef MT_TUNE
+    mt_enet_pump_hold(&r->pump, 1);              /* no pumped EWrite between the blocked check and the sync calls */
+#endif
     mt_enet_service(&r->enet, mt_os_ms());
+#ifdef MT_TUNE
+    mt_enet_pump_hold(&r->pump, 0);              /* frames still queued are primed again */
+#endif
     MT_GATE_LEAVE(&r->gate);                     /* after_cb re-arms the timer */
     mt_mac_zone_restore(z);
 }
@@ -260,7 +330,8 @@ static int16_t dhcp_wait(MtRes *r) {
 }
 #endif
 
-int16_t mt_drv_open(void *pb, void *dce) {
+/* 1.1d3: runs only at OpenDriver: cold, so GCC builds it for size (the resident driver must not grow) */
+__attribute__((cold)) int16_t mt_drv_open(void *pb, void *dce) {
     (void)pb; (void)dce;
     if (!g_res) return ipBadAddr;
 #ifndef MT_NO_DHCP
@@ -287,16 +358,8 @@ int16_t mt_drv_prime(void *pb, void *dce) {
 }
 
 int16_t mt_drv_status(void *vpb, void *dce) {
-    MtAnyPb *pb = (MtAnyPb *)vpb;
     (void)dce;
-    if (pb->hdr.csCode == MT_DRV_STATUS_RES && g_res) {   /* private: diagnostics (MoofDiag) */
-        uint32_t p = (uint32_t)(uintptr_t)g_res;
-        uint16_t v = MT_STATUS_VERSION;
-        memcpy((uint8_t *)pb + 28, &p, 4);
-        memcpy((uint8_t *)pb + 32, &v, 2);
-        return 0;
-    }
-    return -18;                                  /* statusErr: .IPP answers only Control */
+    return mt_drv_status_res(vpb, ((MtAnyPb *)vpb)->hdr.csCode, g_res);        /* private: diagnostics (MoofDiag); every other csCode -18 */
 }
 
 int16_t mt_drv_control(void *vpb, void *dce) {
@@ -316,7 +379,12 @@ int16_t mt_drv_control(void *vpb, void *dce) {
     if (!r) { pb->hdr.ioResult = MT_PB_NOTOPEN; return MT_PB_NOTOPEN; }
     if ((r->enet.kill_req | r->enet.reattach_req) && !(mt_entry_trap(pb) & MT_DRV_TRAP_IMMED))
         enet_service(r, pb);                      /* the watchdog asked; task time only */
-    res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
+    if (pb->hdr.csCode == MT_DRV_ACCRUN && !sr_irq()) {   /* 1.1d2 heartbeat (SystemTask): no sweep, no owner */
+        res = mt_entry_accrun(&r->entry, &r->n_accrun);
+        pb->hdr.ioResult = res;
+    } else {
+        res = mt_entry_control(&r->entry, pb, mt_entry_trap(pb), sr_irq());
+    }
     for (i = 0; i < n; i++) {
         MtAnyPb *x = (MtAnyPb *)extra[i];
         r->entry.n_adopted++;

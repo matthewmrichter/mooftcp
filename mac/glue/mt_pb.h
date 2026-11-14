@@ -206,6 +206,8 @@ struct MtDrv {
     uint8_t   rcv_kick;         /* a TCPRcv was queued instead of served inline: serve at the next tick */
     uint8_t   ntcp, next_slot;
     uint8_t   nudp, next_uslot;
+    uint8_t   tcp_hi;           /* one past the highest tcp[] slot in use (live or dying; 0: none), was a pad byte:
+                                 * the stream loops stop there (1.1d1; mt_pb_hi_lower) */
     uint16_t  echo_seq;
     uint16_t  rel_mask;         /* streams whose core release is deferred */
     uint32_t  now;
@@ -257,11 +259,50 @@ struct MtDrv {
     uint8_t   n_own;            /* used entries of own[] */
     uint8_t   dead_n;           /* a lone byte before the buffers above made them odd (Task 12) */
     uint8_t   co_gen;           /* bumped by every abandonment: a routine that resumes after one skips its depth-- */
-    uint8_t   pad_co;
+    uint8_t   udp_hi;           /* the same for udp[] (was pad_co) */
 #ifndef MT_NO_DHCP
     struct MtStatusView *view;  /* DHCP mode: the status mirror the event callback updates (NULL: none) */
 #endif
+#ifdef MT_TUNE
+    volatile uint8_t *txpump;   /* perf builds: the link's transmit pump switch (MtEnetPump.on, mt_enet.h), set by the
+                                 * driver at boot; NULL = no pump (Control 0x4D55 then refuses txpump 1) */
+#endif
+    /* 1.1d2 F7: the glue's command timeouts (timed TCP/UDP reads and passive opens of live streams, ICMP echoes
+     * waiting) cached like the core's deadline (mt_int.h "the cached deadline"): gdl_at is the earliest while
+     * gdl_state is MT_PB_DL_AT; appended last so every earlier offset stays (MoofDiag, MfEcho). */
+    uint32_t  gdl_at;
+    uint8_t   gdl_state;        /* MT_PB_DL_STALE / AT / NONE */
+    uint8_t   own_key_ok;       /* 1.1d3 F6: own_key below is valid */
+    /* 1.1d3 F6 (appended): the last task-time caller the sweep found quiet (recorded, every owner alive, none
+     * overlapping it), by the raw inputs of its partition read (mt_os_app_same); valid while own_key_ok. Every owner
+     * table change (own_set, own_drop) and every forget clears own_key_ok (mt_pb_sweep_quiet). */
+    MtAppKey  own_key;
+#ifdef MT_TEST_HOOKS
+    uint32_t  gdl_scans;        /* rescans done (tests) */
+    uint32_t  own_fast;         /* sweeps answered by mt_pb_sweep_quiet (tests) */
+#endif
 };
+
+/* The glue's cached deadline, kept exact by marking it stale at every change to a command timeout (armed, served,
+ * timed out, a stream leaving LIVE, a gone owner's objects forgotten); mt_pb_next_deadline_ms rescans once after a
+ * change. A call that changes none (TCPSend, a TCPRcv served at once, frames that complete no read) costs no scan.
+ * mt_pb_tick marks it stale when it ends. */
+enum { MT_PB_DL_STALE = 0, MT_PB_DL_AT = 1, MT_PB_DL_NONE = 2 };
+static inline void mt_pb_dl_stale(MtDrv *d) { d->gdl_state = MT_PB_DL_STALE; }
+
+
+/* 1.1d2: the slot of a stream handle without a division (stream_of runs on every call; __udivsi3 is two divu.w on the
+ * 68000). For an offset off < n * size <= 65535 from the first slot, (off * M) >> 16 with M = ceil(65536 / size) is
+ * exactly off / size whenever off = slot * size + r with r <= 14 (a live handle: the slot's address plus its gen bits,
+ * mt_pb_tcp.c / mt_pb_udp.c), on every slot below n (MT_PB_SLOT_OK, checked at compile time). Any other offset maps
+ * to a slot whose handle compare fails, as with the division, or to n (callers check). One 16x16 mulu.w. */
+#define MT_PB_SLOT_M(size) ((65536u + (uint32_t)(size) - 1u) / (uint32_t)(size))
+#define MT_PB_SLOT_OK(n, size) ((uint32_t)(n) * (uint32_t)(size) <= 65535u && \
+    ((uint32_t)(n) - 1u) * (MT_PB_SLOT_M(size) * (uint32_t)(size) - 65536u) + 14u * MT_PB_SLOT_M(size) < 65536u)
+static inline uint32_t mt_pb_slot(uint32_t off, uint32_t m) { return ((uint32_t)(uint16_t)off * (uint16_t)m) >> 16; }
+
+/* After a slot was freed (used = 0): tcp_hi and udp_hi drop past every free slot at the top. A create raises them. */
+void     mt_pb_hi_lower(MtDrv *d);
 
 /* Completion nesting limit for reads served inline: a TCPRcv / TCPNoCopyRcv issued with data
  * available from a completion routine nested this deep (MtDrv.depth) is queued and served from the
@@ -292,7 +333,10 @@ void     mt_pb_dhcp_event(void *user, int ev, uint8_t state, mt_ip4 addr, uint32
 
 int16_t  mt_pb_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_input(MtDrv *d, const uint8_t *frame, uint16_t len);
-uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE */
+uint32_t mt_pb_next_deadline_ms(MtDrv *d);     /* ms from now, or MT_NO_DEADLINE (O(1) unless a cache is stale) */
+#ifdef MT_TEST_HOOKS
+uint32_t mt_pb_next_deadline_scan(MtDrv *d);   /* the same by a full scan of the core and every glue table */
+#endif
 void     mt_pb_tick(MtDrv *d);
 /* The Device Manager's goodbye kiss (csCode -1, the application heap is about to be reset):
  * forget every TCP and UDP stream whose receive buffer, ASR or any pending PB lies in the
@@ -325,6 +369,11 @@ int      mt_pb_in_gone(const MtDrv *d, const MtAppMem *m, uint16_t m_born, MacPt
  * and from the timer (mt_pb_next_deadline_ms asks for a tick every MT_PB_SWEEP_MS while owners are
  * recorded). Without MultiFinder no owner is ever recorded and it returns at once. */
 int      mt_pb_sweep(MtDrv *d, int note, void (*drop)(void *ctx, const MtAppMem *m), void *ctx);
+/* 1.1d3 F6: the per-call sweep's fast path (mt_entry_sweep, task-time calls): 1 when the caller is the one the last
+ * quiet sweep kept (own_key: the same partition read, mt_os_app_same), the owner table has not changed since, and
+ * every recorded owner is still alive: exactly the case in which mt_pb_sweep would find the table quiet and return
+ * 0, without the partition read, the name hash and the identity compares. 0: take mt_pb_sweep. */
+int      mt_pb_sweep_quiet(MtDrv *d);
 #define MT_PB_SWEEP_NOTE_ONLY 2  /* note value: a task-time call while the gate is held (abandoned frames whose
                                   * release is postponed, or a nested call-out): record the caller, forget nothing */
 /* A routine (completion / ASR) run inline by the glue whose PROCESS quits from inside it (ExitToShell,
@@ -365,13 +414,19 @@ void     mt_pb_call_asr(MtDrv *d, const MtStreamAsr *a, uint16_t ev, uint16_t re
 int16_t  mt_pb_tcp_control(MtDrv *d, MtAnyPb *pb);
 void     mt_pb_tcp_after_core(MtDrv *d);       /* close / send progress after input and ticks */
 void     mt_pb_tcp_timers(MtDrv *d);           /* expire command timeouts */
-uint32_t mt_pb_tcp_deadline(MtDrv *d);         /* earliest command timeout, ms from now */
+uint32_t mt_pb_tcp_deadline(MtDrv *d);         /* earliest command timeout, ms from now (a scan: F7 caches it) */
 void     mt_pb_tcp_free(MtDrv *d, MtStream *s);/* the deferred mt_tcp_release */
 int16_t  mt_pb_udp_control(MtDrv *d, MtAnyPb *pb);   /* csCodes 20..29 (mt_pb_udp.c) */
 void     mt_pb_udp_timers(MtDrv *d);           /* expire UDPRead timeouts */
 uint32_t mt_pb_udp_deadline(MtDrv *d);
 int16_t  mt_pb_ip_control(MtDrv *d, MtAnyPb *pb);    /* csCodes 15, 17, 19 (mt_pb_ip.c) */
 int16_t  mt_pb_dns_control(MtDrv *d, MtAnyPb *pb);   /* csCode MT_CS_DNR (mt_pb_dns.c) */
+#ifdef MT_TUNE
+int16_t  mt_pb_tune_control(MtDrv *d, MtAnyPb *pb);  /* csCode MT_CS_TUNE (mt_pb.c; perf builds only) */
+#ifdef MT_TRACE
+int16_t  mt_pb_trace_control(MtDrv *d, MtAnyPb *pb); /* csCode MT_CS_TRACE (mt_pb.c; perf builds with MT_TRACE) */
+#endif
+#endif
 void     mt_pb_dns_goodbye(MtDrv *d, const MtAppMem *m, uint16_t m_born);   /* cancel the lookups of the
                                                  * application in m (m_born as mt_pb_in_gone) */
 /* Nonzero if p lies in a recorded MultiFinder owner whose partition is gone (counts n_dead_calls): the

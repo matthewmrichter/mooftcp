@@ -206,8 +206,122 @@ static void test_info_after_fin_acked(void) {
     T_EQ(in.send_queued, 0);
 }
 
+/* 1.1d1 F3: the one-field getters agree with mt_tcp_get_info in every state they pass through. */
+static void same_as_info(const mt_tcp *t) {
+    mt_tcp_info in;
+    mt_tcp_get_info(t, &in);
+    T_EQ(mt_tcp_get_state(t), in.state);
+    T_EQ(mt_tcp_rcv_avail(t), in.rcv_avail);
+}
+
+static void test_one_field_getters(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    rec r; uint32_t ps, ms; uint8_t f[200], buf[8]; uint16_t n;
+    static uint8_t rb[4096];
+    mt_tcp *t, *c = mt_tcp_create(s, rb, sizeof rb, rec_cb, &r);
+    memset(&r, 0, sizeof r);
+    T_CHECK(c != NULL);
+    if (!c) return;
+    T_EQ(mt_tcp_get_state(c), MT_TCP_CLOSED);
+    same_as_info(c);
+    T_EQ(mt_tcp_listen(c, 0, 0, 7000), MT_OK);
+    T_EQ(mt_tcp_get_state(c), MT_TCP_LISTEN);
+    same_as_info(c);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(t != NULL);
+    if (!t) return;
+    T_EQ(mt_tcp_get_state(t), MT_TCP_ESTABLISHED);
+    T_EQ(mt_tcp_rcv_avail(t), 0);
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps, ms, TF_ACK | TF_PSH, 8192, NULL, 0, (const uint8_t *)"hello", 5);
+    mt_input(s, f, n, 1);
+    T_EQ(mt_tcp_rcv_avail(t), 5);
+    same_as_info(t);
+    T_EQ(mt_tcp_recv(t, buf, 2, 2), 2);
+    T_EQ(mt_tcp_rcv_avail(t), 3);
+    same_as_info(t);
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps + 5, ms, TF_ACK | TF_FIN, 8192, NULL, 0, NULL, 0);
+    mt_input(s, f, n, 3);
+    T_EQ(mt_tcp_get_state(t), MT_TCP_CLOSE_WAIT);
+    same_as_info(t);
+    T_EQ(mt_tcp_close(t, 4), MT_OK);
+    T_EQ(mt_tcp_get_state(t), MT_TCP_LAST_ACK);
+    same_as_info(t);
+}
+
+/* 1.1d1 F2: tcp_hi is one past the highest used TCB, raised at create, lowered at release past every free slot
+ * below; the TCB scans (timers, deadline, input lookup) stop there and still see the highest connection. */
+static void test_tcp_hi_tracks_highest_used(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    static uint8_t b[4][2048];
+    mt_tcp *t[4];
+    rec r; uint32_t ps, ms;
+    mt_tcp *c;
+    int i;
+    memset(&r, 0, sizeof r);
+    T_EQ(s->tcp_hi, 0);
+    for (i = 0; i < 3; i++) t[i] = mt_tcp_create(s, b[i], sizeof b[i], rec_cb, &r);
+    T_CHECK(t[0] == &s->tcp[0] && t[1] == &s->tcp[1] && t[2] == &s->tcp[2]);
+    T_EQ(s->tcp_hi, 3);
+    mt_tcp_release(t[1]);
+    T_EQ(s->tcp_hi, 3);                                      /* a hole below the top */
+    mt_tcp_release(t[2]);
+    T_EQ(s->tcp_hi, 1);                                      /* down past the hole */
+    t[3] = mt_tcp_create(s, b[3], sizeof b[3], rec_cb, &r);
+    T_CHECK(t[3] == &s->tcp[1]);                             /* first free slot */
+    T_EQ(s->tcp_hi, 2);
+    mt_tcp_release(t[0]);
+    T_EQ(s->tcp_hi, 2);
+    mt_tcp_release(t[3]);
+    T_EQ(s->tcp_hi, 0);
+    mt_tcp_release(t[3]);                                    /* again: no-op */
+    T_EQ(s->tcp_hi, 0);
+    /* a connection in the top slot: its timers and segments are still found */
+    for (i = 0; i < 3; i++) t[i] = mt_tcp_create(s, b[i], sizeof b[i], rec_cb, &r);
+    c = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(c == &s->tcp[3]);
+    T_EQ(s->tcp_hi, 4);
+    T_EQ(tsend(c, (const uint8_t *)"x", 1, 1, 0, 10), 1);
+    T_CHECK(mt_next_deadline(s, 10) != MT_NO_DEADLINE);     /* its RTO */
+    T_EQ(mt_tcp_get_state(c), MT_TCP_ESTABLISHED);
+}
+
+/* 1.1d2 F7: the core keeps its earliest deadline cached. A query after work that moved no timer rescans nothing, an
+ * armed timer is folded in without a rescan, and removing the earliest one costs exactly one rescan at the next
+ * query. The value always equals the full scan (mt_next_deadline_scan, test builds). */
+static void test_deadline_cached(void) {
+    fake_link fl; mt_stack *s = tstack_new(&fl, T_ME);
+    rec r; uint32_t ps, ms, sc; uint8_t f[200]; uint16_t n;
+    mt_tcp *t;
+    memset(&r, 0, sizeof r);
+    t = tconn_established(s, &fl, &r, &ps, &ms);
+    T_CHECK(t != NULL);
+    if (!t) return;
+    T_EQ(mt_next_deadline(s, 1), mt_next_deadline_scan(s, 1));
+    sc = s->dl_scans;
+    T_EQ(mt_next_deadline(s, 5), mt_next_deadline_scan(s, 5));
+    T_EQ(s->dl_scans, sc);                                   /* nothing changed: no rescan */
+    T_EQ(tsend(t, (const uint8_t *)"x", 1, 1, 0, 10), 1);   /* arms the RTO, earlier than the ARP entry's expiry */
+    T_EQ(mt_next_deadline(s, 10), t->rto);
+    T_EQ(mt_next_deadline_scan(s, 10), t->rto);
+    T_EQ(s->dl_scans, sc);                                   /* folded in */
+    /* the echo: one byte of data, PSH, acking ours (the RTO, the earliest deadline, is cleared) */
+    n = mk_tcp(f, T_PEER, 23, T_ME, t->lport, ps, ms + 1, TF_ACK | TF_PSH, 8192, NULL, 0, (const uint8_t *)"y", 1);
+    mt_input(s, f, n, 20);
+    T_EQ(mt_next_deadline(s, 20), mt_next_deadline_scan(s, 20));
+    T_EQ(s->dl_scans, sc + 1);                               /* one rescan */
+    T_EQ(mt_next_deadline(s, 21), mt_next_deadline_scan(s, 21));
+    T_EQ(s->dl_scans, sc + 1);
+    T_EQ(mt_tcp_recv(t, f, 1, 22), 1);                       /* reading moves no timer */
+    T_EQ(mt_next_deadline(s, 22), mt_next_deadline_scan(s, 22));
+    T_EQ(s->dl_scans, sc + 1);
+    mt_tick(s, 30);                                          /* a tick rescans once (its timers may move anything) */
+    T_EQ(mt_next_deadline(s, 30), mt_next_deadline_scan(s, 30));
+    T_EQ(s->dl_scans, sc + 2);
+}
+
 T_MAIN(test_set_config_addr_change_flushes_arp, test_set_config_other_changes_keep_arp,
        test_set_config_mtu_shrink_reclamps_mss,
        test_set_config_dns_change_next_retry_uses_new_server,
        test_ulp_deadline_stale_when_ulp_set_later, test_ulp_change_moves_deadline_with_start,
-       test_info_after_fin_acked)
+       test_info_after_fin_acked, test_one_field_getters, test_tcp_hi_tracks_highest_used,
+       test_deadline_cached)

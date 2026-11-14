@@ -112,8 +112,33 @@ typedef struct MtEntry {
     uint32_t      n_compl_deferred;  /* results completed later because completions nested too deep */
 } MtEntry;
 
+/* accRun: the csCode SystemTask's periodic Control call carries (DRVR dNeedTime; 1.1d2 heartbeat, mt_entry_accrun). */
+#define MT_DRV_ACCRUN 65
+
 /* ioTrap bits the Device Manager stores in the PB (offset 6). */
 #define MT_DRV_TRAP_IMMED 0x0200u
 #define MT_DRV_TRAP_ASYNC 0x0400u
+
+/* 1.1d1: the gate's tick callback skips the MultiFinder sweep and the tick work (mt_pb_tick) when it runs inside the
+ * Time Manager task (in_cb = MtTimer.in_cb; a tick deferred behind a held gate, or one a queued PB asked for outside
+ * the task, runs in full) and nothing is due yet: next_ms = mt_pb_next_deadline_ms, nonzero.
+ * The timer is re-armed only for earlier deadlines (mt_timer_keep), so it may fire before the current deadline;
+ * such a tick then does no more than a tick that did not happen. 1.1d2: it re-arms the timer itself with next_ms, and
+ * the after callback that follows queries the deadline again only if a frame or a queued PB ran in between. */
+static inline int mt_drv_tick_idle(uint8_t in_cb, uint32_t next_ms) {
+    return in_cb && next_ms != 0;
+}
+
+/* 1.1d2: the after-callback's deadline query, skipped after an early tick that armed the timer itself (MtRes.armed).
+ * mt_drv_note_early: the early tick armed the timer. mt_drv_note_work: anything else ran in the gate session (a frame,
+ * a full tick): the deadline may have moved. mt_drv_after_query: nonzero when the after-callback must query and arm
+ * (ran: its drain ran a queued PB or a completion); it always leaves `armed` 0, so the next session queries. */
+static inline void mt_drv_note_early(uint8_t *armed) { *armed = 1; }
+static inline void mt_drv_note_work(uint8_t *armed) { *armed = 0; }
+static inline int mt_drv_after_query(uint8_t *armed, int ran) {
+    int skip = *armed && !ran;
+    *armed = 0;
+    return !skip;
+}
 
 #endif /* MT_DRV_LOGIC_H */

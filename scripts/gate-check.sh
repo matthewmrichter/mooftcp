@@ -2,9 +2,11 @@
 # Retro68 compile gate (Plan 3 Task 1; PLAN3-CARRYOVER 4.3 item H).
 #   gate-check.sh
 # 1. Every Mac target (mac/, which includes the core as mtcore68k) must build with
-#    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint,lite}/ (build-mac/ is not touched): the
+#    -m68000 -O2 -Wall -Wextra -Werror in separate trees build-gate-{off,mark,paint,lite,tune,trace}/ (build-mac/ is not touched): the
 #    default (stack marks off, the shipping configuration), -DMT_STACK_MARK=1, MARK=1 + -DMT_STACK_PAINT=4096, and
-#    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants").
+#    MoofTCP Lite (CMake MT_NO_DHCP=ON, marks off: the other shipping configuration, docs/dev/RELEASE.md "Variants"),
+#    and the perf configurations -DMT_TUNE=1 (run-time timing levers + MoofTCPTune; never shipped) and
+#    -DMT_TUNE=1 -DMT_TRACE=1 (the same plus the echo-path trace, mac/glue/mt_trace.h; never shipped).
 #    Lite is built first: the installer of the other trees embeds its MoofTCP file (MT_LITE_MOOF_BIN).
 #    Any warning or error fails the gate (exit 1). Log: build-gate.log.
 # 2. Probe: core/*.c compiled alone with -mshort (16-bit int). Hazards (warnings) are listed;
@@ -17,9 +19,9 @@ R68_TOOLCHAIN=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.
 FLAGS="-m68000 -O2 -Wall -Wextra -Werror"
 log="$ROOT/build-gate.log"
 
-# Four configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
-# and MoofTCP Lite (what ships as the Lite variant).
-for cfg in "lite:" "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096"; do
+# Six configurations: the default (stack marks off, what ships), marks on, marks + paint (diagnostic builds),
+# MoofTCP Lite (what ships as the Lite variant) and the perf builds (MT_TUNE, MT_TUNE + MT_TRACE).
+for cfg in "lite:" "off:" "mark:-DMT_STACK_MARK=1" "paint:-DMT_STACK_MARK=1 -DMT_STACK_PAINT=4096" "tune:-DMT_TUNE=1" "trace:-DMT_TUNE=1 -DMT_TRACE=1"; do
   name="${cfg%%:*}"; extra="${cfg#*:}"
   dir="build-gate-$name"
   lite=OFF; [ "$name" != lite ] || lite=ON
