@@ -323,12 +323,19 @@ def flip(path, offset):
         f.write(bytes([b[0] ^ 0x01]))
 
 
-def find_unique(path, needle):
+def find_unique(path, fork, n=48, step=16):
+    """Offset in `path` of a byte of `fork` (the installer's resource fork, stored verbatim there): the first
+    n-byte window of the fork, scanning from its midpoint (then from its start), that occurs exactly once in
+    the file. A fixed window can repeat (the installer holds two near-identical MoofTCP builds and repeated
+    68k code), so the window is searched per artifact."""
     d = open(path, "rb").read()
-    i = d.find(needle)
-    if i < 0 or d.find(needle, i + 1) >= 0:
-        raise Fail("self-test: cannot place a unique marker in " + path)
-    return i
+    mid = (len(fork) // 2) & ~1
+    for start in list(range(mid, len(fork) - n, step)) + list(range(0, mid, step)):
+        w = fork[start:start + n]
+        i = d.find(w)
+        if i >= 0 and d.find(w, i + 1) < 0:
+            return i
+    raise Fail("self-test: cannot place a unique marker in " + path)
 
 
 def crc16x(b):
@@ -482,20 +489,20 @@ def self_test(paths, inst, readme):
     dl = struct.unpack(">I", rsrc[83:87])[0]
     roff = 128 + ((dl + 127) // 128) * 128
     rl = struct.unpack(">I", rsrc[87:91])[0]
-    marker = rsrc[roff + rl // 2:roff + rl // 2 + 48]
+    fork = rsrc[roff:roff + rl]
     tmp = tempfile.mkdtemp(prefix="relv-self-")
     good = True
     try:
         cases = []
-        # sit: stored, so the marker is in the file verbatim
+        # sit: stored, so the fork is in the file verbatim (a window unique in it is the marker)
         c = dict(paths, sit=os.path.join(tmp, "bad.sit"))
         shutil.copy(paths["sit"], c["sit"])
-        flip(c["sit"], find_unique(c["sit"], marker) + 7)
+        flip(c["sit"], find_unique(c["sit"], fork) + 7)
         cases.append(("sit resource-fork byte", c, "sit via unar"))
         # dsk: stored contiguously
         c = dict(paths, dsk=os.path.join(tmp, "bad.dsk"))
         shutil.copy(paths["dsk"], c["dsk"])
-        flip(c["dsk"], find_unique(c["dsk"], marker) + 7)
+        flip(c["dsk"], find_unique(c["dsk"], fork) + 7)
         cases.append(("dsk resource-fork byte", c, "dsk via hfsutils"))
         # dsk: wrong type code via hattrib
         c = dict(paths, dsk=os.path.join(tmp, "badtype.dsk"))
