@@ -37,6 +37,30 @@ BlueSCSI it can be slow to answer, hungry for memory, and awkward to set up. Moo
 - **A portable core.** The TCP/IP stack in `core/` has no `malloc` and no global state, and is tested on the
   desktop with sanitizers and fuzzers.
 
+## New in 1.1 (release candidate 1.1rc1)
+
+MoofTCP 1.1 is faster than 1.0. Measured on a real Mac Classic (System 6.0.8, 4 MB, BlueSCSI v2 Wi-Fi) on
+2026-11-13: MoofTCP 1.1 with [MoofPort](https://github.com/matthewmrichter/moofport/) 1.1 against MoofTCP 1.0
+with MoofPort 1.0, 10 paired blocks in one session, timed on the PC. Medians:
+
+|                             | 1.0       | 1.1             |
+| --------------------------- | --------- | --------------- |
+| Echo round trip, 1 byte     | 53.6 ms   | about 44.5 ms   |
+| Terminal burst, 2,000 bytes | 153.6 ms  | about 131 ms    |
+| TCP receive, 1 MB           | 45.1 KB/s | about 54.8 KB/s |
+| TCP send, 4 sends queued    | 38.0 KB/s | about 41.0 KB/s |
+
+All four were better in every pair. One-at-a-time sends and AppleShare copies showed no significant difference.
+The figures were measured over Wi-Fi and vary with the network.
+
+- A shorter path through every MacTCP call, timer tick and packet.
+- With the MoofPort 1.1 driver, MoofTCP switches MoofPort to its `steadyack` timing when it opens the driver. With
+  any other driver it changes nothing.
+- The timer recovers by itself from a lost Time Manager task, with a once-a-second heartbeat as a backup.
+- Resident memory stays below MacTCP's.
+
+[CHANGELOG.md](CHANGELOG.md) has the full list.
+
 ## Screenshots
 
 | Installer                                   | MoofTCP Lite panel                            |
@@ -83,10 +107,12 @@ Have a program that doesn't work? Please open an issue (see below).
 
 ## Memory
 
-|                                                                                 | MoofTCP       | MoofTCP Lite |
-| ------------------------------------------------------------------------------- | ------------- | ------------ |
-| Driver code                                                                     | 95,623 bytes  | 90,722 bytes |
-| Free system heap after first open (real Mac Classic, single Finder, full build) | about 30.7 KB | n/a          |
+|                                                                                                    | MoofTCP       | MoofTCP Lite  |
+| -------------------------------------------------------------------------------------------------- | ------------- | ------------- |
+| Driver code, 1.1rc1                                                                                | 93,746 bytes  | 88,879 bytes  |
+| Driver code, 1.0                                                                                   | 95,623 bytes  | 90,722 bytes  |
+| Resident over the no-network baseline after network use, 1.1rc1 (emulator; MacTCP: 195,046 bytes) | 171,816 bytes | 166,852 bytes |
+| Free system heap after first open, 1.0 (real Mac Classic, single Finder, full build)               | about 30.7 KB | n/a           |
 
 MultiFinder grows the system heap on demand, so free memory varies more there.
 
@@ -100,7 +126,14 @@ to analyze the codebase and the diagnostic output as well and to submit fix PRs.
 ## Known limitations
 
 - No IPv6.
-- Tested only with the DaynaPORT Ethernet driver on System 6.0.8.
+- Tested only with the DaynaPORT and MoofPort Ethernet drivers on System 6.0.8.
+- The timer's once-a-second heartbeat runs only while some program calls `SystemTask`. A program that waits in a
+  synchronous MacTCP call on a quiet network calls nothing, so a lost timer task then waits for the next packet
+  or call.
+- AppleShare volumes set to open at start-up can fail to mount when the AppleShare server is itself on Wi-Fi with
+  Wi-Fi power saving on: AppleTalk's start-up lookups are multicast, and a power-saving Wi-Fi receiver misses most
+  of them (about 1 boot in 7 with power saving on, none in 15 with it off; the stock DaynaPORT driver too). Turn
+  power saving off on the server, use a wired server, or open the volume from the Chooser.
 - DHCP is basic: no lease RELEASE, no INIT-REBOOT and no address-conflict probe. While it runs, programs cannot
   use UDP port 68. With no DHCP server, the first open waits about 10 seconds and then fails.
 
